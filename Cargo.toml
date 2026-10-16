@@ -5,6 +5,8 @@ members = [
     "crates/caqtdm-ui",
     "crates/caqtdm-datasource",
     "crates/caqtdm-epics-ca",
+    "crates/caqtdm-epics-pva",
+    "crates/caqtdm-widgets",
 ]
 
 [workspace.package]
@@ -21,3 +23,5 @@ caqtdm-core = { path = "crates/caqtdm-core" }
 caqtdm-ui = { path = "crates/caqtdm-ui" }
 caqtdm-datasource = { path = "crates/caqtdm-datasource" }
 caqtdm-epics-ca = { path = "crates/caqtdm-epics-ca" }
+caqtdm-epics-pva = { path = "crates/caqtdm-epics-pva" }
+caqtdm-widgets = { path = "crates/caqtdm-widgets" }

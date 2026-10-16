@@ -34,12 +34,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "caqtdm-epics-pva"
+version = "0.1.0"
+dependencies = [
+ "caqtdm-core",
+ "caqtdm-datasource",
+]
+
+[[package]]
 name = "caqtdm-ui"
 version = "0.1.0"
 dependencies = [
  "caqtdm-core",
  "quick-xml",
  "thiserror",
+]
+
+[[package]]
+name = "caqtdm-widgets"
+version = "0.1.0"
+dependencies = [
+ "caqtdm-core",
+ "caqtdm-datasource",
+ "caqtdm-ui",
 ]
 
 [[package]]

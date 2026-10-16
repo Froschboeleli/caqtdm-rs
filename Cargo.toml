@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/caqtdm-core",
     "crates/caqtdm-ui",
+    "crates/caqtdm-datasource",
 ]
 
 [workspace.package]
@@ -17,3 +18,4 @@ thiserror = "2"
 regex = "1"
 caqtdm-core = { path = "crates/caqtdm-core" }
 caqtdm-ui = { path = "crates/caqtdm-ui" }
+caqtdm-datasource = { path = "crates/caqtdm-datasource" }

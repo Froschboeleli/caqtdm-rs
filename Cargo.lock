@@ -19,6 +19,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "caqtdm-datasource"
+version = "0.1.0"
+dependencies = [
+ "caqtdm-core",
+]
+
+[[package]]
 name = "caqtdm-ui"
 version = "0.1.0"
 dependencies = [

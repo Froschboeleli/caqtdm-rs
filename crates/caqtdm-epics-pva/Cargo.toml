@@ -1,0 +1,12 @@
+[package]
+name = "caqtdm-epics-pva"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "PV Access search codec and a scalar get/put/monitor subset"
+
+[dependencies]
+caqtdm-core.workspace = true
+caqtdm-datasource.workspace = true

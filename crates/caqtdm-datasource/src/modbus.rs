@@ -14,8 +14,13 @@ use caqtdm_core::{ChannelData, ChannelSpec, PutValue, PvValue};
 use crate::error::DsError;
 use crate::source::{DataSource, Update};
 
+pub const FN_READ_COILS: u8 = 0x01;
+pub const FN_READ_DISCRETE: u8 = 0x02;
 pub const FN_READ_HOLDING: u8 = 0x03;
+pub const FN_READ_INPUT: u8 = 0x04;
+pub const FN_WRITE_COIL: u8 = 0x05;
 pub const FN_WRITE_SINGLE: u8 = 0x06;
+pub const FN_WRITE_COILS: u8 = 0x0F;
 pub const FN_WRITE_MULTIPLE: u8 = 0x10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +32,57 @@ pub struct Mbap {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pdu {
-    ReadHolding { address: u16, count: u16 },
-    ReadHoldingResponse { registers: Vec<u16> },
-    WriteSingle { address: u16, value: u16 },
-    WriteMultiple { address: u16, values: Vec<u16> },
-    WriteMultipleResponse { address: u16, count: u16 },
-    Exception { function: u8, code: u8 },
+    ReadHolding {
+        address: u16,
+        count: u16,
+    },
+    ReadHoldingResponse {
+        registers: Vec<u16>,
+    },
+    WriteSingle {
+        address: u16,
+        value: u16,
+    },
+    WriteMultiple {
+        address: u16,
+        values: Vec<u16>,
+    },
+    WriteMultipleResponse {
+        address: u16,
+        count: u16,
+    },
+    ReadBits {
+        function: u8,
+        address: u16,
+        count: u16,
+    },
+    ReadBitsResponse {
+        function: u8,
+        bits: Vec<bool>,
+    },
+    ReadInput {
+        address: u16,
+        count: u16,
+    },
+    ReadInputResponse {
+        registers: Vec<u16>,
+    },
+    WriteCoil {
+        address: u16,
+        on: bool,
+    },
+    WriteCoils {
+        address: u16,
+        bits: Vec<bool>,
+    },
+    WriteCoilsResponse {
+        address: u16,
+        count: u16,
+    },
+    Exception {
+        function: u8,
+        code: u8,
+    },
 }
 
 pub fn encode_request(mbap: &Mbap, pdu: &Pdu) -> Result<Vec<u8>, DsError> {
@@ -106,12 +156,73 @@ fn encode_pdu(pdu: &Pdu) -> Result<Vec<u8>, DsError> {
             body.extend_from_slice(&address.to_be_bytes());
             body.extend_from_slice(&count.to_be_bytes());
         }
+        Pdu::ReadBits {
+            function,
+            address,
+            count,
+        } => {
+            body.push(*function);
+            body.extend_from_slice(&address.to_be_bytes());
+            body.extend_from_slice(&count.to_be_bytes());
+        }
+        Pdu::ReadBitsResponse { function, bits } => {
+            body.push(*function);
+            let packed = pack_bits(bits);
+            body.push(packed.len() as u8);
+            body.extend_from_slice(&packed);
+        }
+        Pdu::ReadInput { address, count } => {
+            body.push(FN_READ_INPUT);
+            body.extend_from_slice(&address.to_be_bytes());
+            body.extend_from_slice(&count.to_be_bytes());
+        }
+        Pdu::ReadInputResponse { registers } => {
+            body.push(FN_READ_INPUT);
+            body.push((registers.len() * 2) as u8);
+            for reg in registers {
+                body.extend_from_slice(&reg.to_be_bytes());
+            }
+        }
+        Pdu::WriteCoil { address, on } => {
+            body.push(FN_WRITE_COIL);
+            body.extend_from_slice(&address.to_be_bytes());
+            body.extend_from_slice(&(if *on { 0xFF00u16 } else { 0 }).to_be_bytes());
+        }
+        Pdu::WriteCoils { address, bits } => {
+            body.push(FN_WRITE_COILS);
+            body.extend_from_slice(&address.to_be_bytes());
+            body.extend_from_slice(&(bits.len() as u16).to_be_bytes());
+            let packed = pack_bits(bits);
+            body.push(packed.len() as u8);
+            body.extend_from_slice(&packed);
+        }
+        Pdu::WriteCoilsResponse { address, count } => {
+            body.push(FN_WRITE_COILS);
+            body.extend_from_slice(&address.to_be_bytes());
+            body.extend_from_slice(&count.to_be_bytes());
+        }
         Pdu::Exception { function, code } => {
             body.push(function | 0x80);
             body.push(*code);
         }
     }
     Ok(body)
+}
+
+fn pack_bits(bits: &[bool]) -> Vec<u8> {
+    let mut packed = vec![0u8; bits.len().div_ceil(8)];
+    for (index, bit) in bits.iter().enumerate() {
+        if *bit {
+            packed[index / 8] |= 1 << (index % 8);
+        }
+    }
+    packed
+}
+
+fn unpack_bits(bytes: &[u8], count: usize) -> Vec<bool> {
+    (0..count)
+        .map(|index| bytes.get(index / 8).copied().unwrap_or(0) & (1 << (index % 8)) != 0)
+        .collect()
 }
 
 fn decode_pdu(bytes: &[u8]) -> Result<Pdu, DsError> {
@@ -172,6 +283,62 @@ fn decode_pdu(bytes: &[u8]) -> Result<Pdu, DsError> {
             }
             Ok(Pdu::WriteMultiple { address, values })
         }
+        FN_READ_COILS | FN_READ_DISCRETE if bytes.len() == 5 => Ok(Pdu::ReadBits {
+            function,
+            address: u16::from_be_bytes([bytes[1], bytes[2]]),
+            count: u16::from_be_bytes([bytes[3], bytes[4]]),
+        }),
+        FN_READ_COILS | FN_READ_DISCRETE => {
+            let nbytes = *bytes.get(1).unwrap_or(&0) as usize;
+            if bytes.len() < 2 + nbytes {
+                return Err(DsError::new("modbus bit response truncated"));
+            }
+            let count = nbytes * 8;
+            Ok(Pdu::ReadBitsResponse {
+                function,
+                bits: unpack_bits(&bytes[2..2 + nbytes], count),
+            })
+        }
+        FN_READ_INPUT if bytes.len() == 5 => Ok(Pdu::ReadInput {
+            address: u16::from_be_bytes([bytes[1], bytes[2]]),
+            count: u16::from_be_bytes([bytes[3], bytes[4]]),
+        }),
+        FN_READ_INPUT => {
+            let nbytes = *bytes.get(1).unwrap_or(&0) as usize;
+            if bytes.len() < 2 + nbytes || nbytes % 2 != 0 {
+                return Err(DsError::new("modbus input length mismatch"));
+            }
+            let mut registers = Vec::new();
+            let mut i = 2;
+            while i < 2 + nbytes {
+                registers.push(u16::from_be_bytes([bytes[i], bytes[i + 1]]));
+                i += 2;
+            }
+            Ok(Pdu::ReadInputResponse { registers })
+        }
+        FN_WRITE_COIL if bytes.len() >= 5 => Ok(Pdu::WriteCoil {
+            address: u16::from_be_bytes([bytes[1], bytes[2]]),
+            on: u16::from_be_bytes([bytes[3], bytes[4]]) == 0xFF00,
+        }),
+        FN_WRITE_COILS if bytes.len() == 5 => Ok(Pdu::WriteCoilsResponse {
+            address: u16::from_be_bytes([bytes[1], bytes[2]]),
+            count: u16::from_be_bytes([bytes[3], bytes[4]]),
+        }),
+        FN_WRITE_COILS => {
+            if bytes.len() < 6 {
+                return Err(DsError::new("modbus write-coils truncated"));
+            }
+            let address = u16::from_be_bytes([bytes[1], bytes[2]]);
+            let count = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+            let nbytes = bytes[5] as usize;
+            if bytes.len() < 6 + nbytes {
+                return Err(DsError::new("modbus write-coils length mismatch"));
+            }
+            Ok(Pdu::WriteCoils {
+                address,
+                bits: unpack_bits(&bytes[6..6 + nbytes], count),
+            })
+        }
         other => Err(DsError::new(format!("unsupported modbus function {other}"))),
     }
 }
@@ -179,12 +346,18 @@ fn decode_pdu(bytes: &[u8]) -> Result<Pdu, DsError> {
 #[derive(Clone)]
 pub struct RegisterMap {
     holding: BTreeMap<u16, u16>,
+    input: BTreeMap<u16, u16>,
+    coils: BTreeMap<u16, bool>,
+    discrete: BTreeMap<u16, bool>,
 }
 
 impl RegisterMap {
     pub fn new() -> Self {
         Self {
             holding: BTreeMap::new(),
+            input: BTreeMap::new(),
+            coils: BTreeMap::new(),
+            discrete: BTreeMap::new(),
         }
     }
 
@@ -194,6 +367,18 @@ impl RegisterMap {
 
     pub fn get(&self, address: u16) -> u16 {
         self.holding.get(&address).copied().unwrap_or(0)
+    }
+
+    pub fn set_input(&mut self, address: u16, value: u16) {
+        self.input.insert(address, value);
+    }
+
+    pub fn set_coil(&mut self, address: u16, on: bool) {
+        self.coils.insert(address, on);
+    }
+
+    pub fn set_discrete(&mut self, address: u16, on: bool) {
+        self.discrete.insert(address, on);
     }
 
     pub fn handle(&mut self, pdu: &Pdu) -> Pdu {
@@ -215,6 +400,58 @@ impl RegisterMap {
                 Pdu::WriteSingle {
                     address: *address,
                     value: *value,
+                }
+            }
+            Pdu::ReadBits {
+                function,
+                address,
+                count,
+            } => {
+                if *count == 0 || *count > 2000 {
+                    return Pdu::Exception {
+                        function: *function,
+                        code: 3,
+                    };
+                }
+                let map = if *function == FN_READ_DISCRETE {
+                    &self.discrete
+                } else {
+                    &self.coils
+                };
+                let bits = (*address..address.saturating_add(*count))
+                    .map(|a| map.get(&a).copied().unwrap_or(false))
+                    .collect();
+                Pdu::ReadBitsResponse {
+                    function: *function,
+                    bits,
+                }
+            }
+            Pdu::ReadInput { address, count } => {
+                if *count == 0 || *count > 125 {
+                    return Pdu::Exception {
+                        function: FN_READ_INPUT,
+                        code: 3,
+                    };
+                }
+                let registers = (*address..address.saturating_add(*count))
+                    .map(|a| self.input.get(&a).copied().unwrap_or(0))
+                    .collect();
+                Pdu::ReadInputResponse { registers }
+            }
+            Pdu::WriteCoil { address, on } => {
+                self.set_coil(*address, *on);
+                Pdu::WriteCoil {
+                    address: *address,
+                    on: *on,
+                }
+            }
+            Pdu::WriteCoils { address, bits } => {
+                for (i, bit) in bits.iter().enumerate() {
+                    self.set_coil(address.saturating_add(i as u16), *bit);
+                }
+                Pdu::WriteCoilsResponse {
+                    address: *address,
+                    count: bits.len() as u16,
                 }
             }
             Pdu::WriteMultiple { address, values } => {
@@ -245,6 +482,10 @@ fn function_of(pdu: &Pdu) -> u8 {
         Pdu::ReadHolding { .. } | Pdu::ReadHoldingResponse { .. } => FN_READ_HOLDING,
         Pdu::WriteSingle { .. } => FN_WRITE_SINGLE,
         Pdu::WriteMultiple { .. } | Pdu::WriteMultipleResponse { .. } => FN_WRITE_MULTIPLE,
+        Pdu::ReadBits { function, .. } | Pdu::ReadBitsResponse { function, .. } => *function,
+        Pdu::ReadInput { .. } | Pdu::ReadInputResponse { .. } => FN_READ_INPUT,
+        Pdu::WriteCoil { .. } => FN_WRITE_COIL,
+        Pdu::WriteCoils { .. } | Pdu::WriteCoilsResponse { .. } => FN_WRITE_COILS,
         Pdu::Exception { function, .. } => *function,
     }
 }

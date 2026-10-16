@@ -15,6 +15,14 @@ use caqtdm_paint::paint;
 use caqtdm_ui::{expand_includes, load_path, SearchPath, WidgetNode};
 use caqtdm_widgets::{load_image_notes, supported_classes, Session};
 
+mod config;
+mod net;
+
+pub use config::ConfigFile;
+pub use net::{
+    attach_to, http_get, serve_attach, serve_http, websocket_accept, websocket_roundtrip,
+};
+
 #[derive(Debug, Clone)]
 struct Options {
     command: String,
@@ -26,6 +34,7 @@ struct Options {
     ca: Option<SocketAddr>,
     pva: Option<SocketAddr>,
     macro_file: Option<PathBuf>,
+    attach: Option<SocketAddr>,
 }
 
 pub fn execute(args: &[String]) -> Result<String, String> {
@@ -60,7 +69,7 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             });
             Ok(lines.join("\n"))
         }
-        "paint" => {
+        "paint" | "print" => {
             let path = require_file(&options, "paint")?;
             let display = load_display(&path, &options)?;
             let mut session = Session::open(
@@ -86,8 +95,12 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             std::fs::write(&dest, image.to_ppm()).map_err(|e| e.to_string())?;
             Ok(format!("wrote {}", dest.display()))
         }
+        "config" => Ok(config_text(&options)),
         "run" => {
             let path = require_file(&options, "run")?;
+            if let Some(addr) = options.attach {
+                return attach_to(addr, &path.display().to_string()).map_err(|err| err.to_string());
+            }
             let display = load_display(&path, &options)?;
             let macros = parse_macro_list(&options.macros);
             let mut session = Session::open(display.root, standard_hub(&options), &macros);
@@ -173,6 +186,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         ca: None,
         pva: None,
         macro_file: None,
+        attach: None,
     };
     let mut i = 1;
     while i < args.len() {
@@ -181,7 +195,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "-h" | "--help" | "-help" => options.command = "help".into(),
             "--execute-shell" => options.execute_shell = true,
             "-macro" | "--macro" | "-macrodefs" | "-cs" | "--cs" | "-o" | "--output"
-            | "-display" | "--ca" | "--pva" => {
+            | "-display" | "--ca" | "--pva" | "-config" | "-attach" => {
                 let value = args
                     .get(i + 1)
                     .ok_or_else(|| format!("{arg} needs a value"))?;
@@ -193,11 +207,14 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     "-display" => options.file = Some(PathBuf::from(value)),
                     "--ca" => options.ca = Some(parse_addr(value)?),
                     "--pva" => options.pva = Some(parse_addr(value)?),
+                    "-config" => apply_config(&mut options, Path::new(value))?,
+                    "-attach" => options.attach = Some(parse_addr(value)?),
                     _ => {}
                 }
                 i += 1;
             }
-            "dump" | "validate" | "paint" | "widgets" | "convert" | "run" | "help"
+            "dump" | "validate" | "paint" | "print" | "widgets" | "convert" | "run" | "help"
+            | "config"
                 if options.command.is_empty() =>
             {
                 options.command = arg.to_string();
@@ -242,6 +259,37 @@ fn parse_addr(text: &str) -> Result<SocketAddr, String> {
     text.parse().map_err(|_| format!("bad address {text}"))
 }
 
+fn apply_config(options: &mut Options, path: &Path) -> Result<(), String> {
+    let config = ConfigFile::load(path)?;
+    if options.control_system == "epics3" {
+        options.control_system = config.control_system;
+    }
+    if options.macros.is_empty() {
+        options.macros = config.macros;
+    }
+    if options.ca.is_none() && !config.ca.is_empty() {
+        options.ca = Some(parse_addr(&config.ca)?);
+    }
+    if options.pva.is_none() && !config.pva.is_empty() {
+        options.pva = Some(parse_addr(&config.pva)?);
+    }
+    if config.execute_shell {
+        options.execute_shell = true;
+    }
+    Ok(())
+}
+
+fn config_text(options: &Options) -> String {
+    ConfigFile {
+        control_system: options.control_system.clone(),
+        ca: options.ca.map(|addr| addr.to_string()).unwrap_or_default(),
+        pva: options.pva.map(|addr| addr.to_string()).unwrap_or_default(),
+        macros: options.macros.clone(),
+        execute_shell: options.execute_shell,
+    }
+    .to_text()
+}
+
 fn help_text() -> String {
     "\
 caqtdm [command] [file] [options]
@@ -252,17 +300,21 @@ Commands:
   validate   parse a display and expand includes
   convert    list widgets and channels
   paint      write a PPM rendering
+  print      same as paint
   widgets    list widget classes the runtime draws
+  config     print the operator settings
   help
 
 Options:
   -display FILE
   -macro KEY=VALUE,KEY2=VALUE2
   -macrodefs FILE     one KEY=VALUE per line, then -macro overrides
+  -config FILE        operator settings (control system, macros, CA, PVA)
   -cs PLUGIN          default control system (epics3)
   --ca HOST:PORT      Channel Access server
   --pva HOST:PORT     PV Access server (scalar subset)
-  -o FILE             PPM output for paint
+  -attach HOST:PORT   send the display path to a running instance
+  -o FILE             PPM output for paint and print
   --execute-shell     run caShellCommand instead of recording it
 "
     .to_string()

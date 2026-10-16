@@ -38,6 +38,9 @@ pub struct Record {
     pub seconds: u32,
     pub nanoseconds: u32,
     pub generation: u64,
+    /// Extra elements after [`Record::value`]. Empty means a scalar.
+    pub waveform: Vec<f64>,
+    pub enum_strings: Vec<String>,
 }
 
 impl Record {
@@ -62,17 +65,40 @@ impl Record {
             seconds: 0,
             nanoseconds: 0,
             generation: 1,
+            waveform: Vec::new(),
+            enum_strings: Vec::new(),
+        }
+    }
+
+    pub fn element(&self, index: usize) -> f64 {
+        if index == 0 {
+            self.waveform.first().copied().unwrap_or(self.value)
+        } else {
+            self.waveform.get(index).copied().unwrap_or(0.0)
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        if self.waveform.is_empty() {
+            1
+        } else {
+            self.waveform.len() as u32
         }
     }
 
     pub fn to_channel(&self) -> ChannelData {
-        let mut data = ChannelData::scalar(self.value);
+        let mut data = ChannelData::scalar(self.element(0));
         data.precision = i32::from(self.precision);
         data.units = self.units.clone();
         data.limits = self.limits;
         data.severity = Severity::from_epics(self.severity);
         data.status = self.status;
         data.description = self.name.clone();
+        data.enum_strings = self.enum_strings.clone();
+        if self.waveform.len() > 1 {
+            data.value = PvValue::Doubles(self.waveform.clone());
+            data.element_count = self.waveform.len();
+        }
         data
     }
 }
@@ -149,8 +175,7 @@ pub fn encode_dbr(record: &Record, dbr: u16, count: u32) -> Result<Vec<u8>, CaEr
     write_meta(&mut buf, record, dbr);
     let native = native_of(dbr);
     for index in 0..count {
-        let value = if index == 0 { record.value } else { 0.0 };
-        write_native(&mut buf, native, value);
+        write_native(&mut buf, native, record.element(index));
     }
     Ok(buf)
 }
@@ -165,32 +190,146 @@ pub fn decode_dbr(bytes: &[u8], dbr: u16) -> Result<ChannelData, CaError> {
         data.status = i16::from_be_bytes([bytes[0], bytes[1]]);
         data.severity = Severity::from_epics(i16::from_be_bytes([bytes[2], bytes[3]]));
     }
-    if dbr == DBR_CTRL_DOUBLE || dbr == DBR_GR_DOUBLE {
-        data.precision = i32::from(i16::from_be_bytes([bytes[4], bytes[5]]));
-        data.units = unpad(&bytes[8..16]);
-        let n = if dbr == DBR_CTRL_DOUBLE { 8 } else { 6 };
-        let mut limits = [0.0; 8];
-        for (i, slot) in limits.iter_mut().enumerate().take(n) {
-            let at = 16 + i * 8;
-            *slot = f64::from_be_bytes(bytes[at..at + 8].try_into().unwrap_or([0; 8]));
-        }
-        data.limits = Limits {
-            upper_display: limits[0],
-            lower_display: limits[1],
-            upper_alarm: limits[2],
-            upper_warning: limits[3],
-            lower_warning: limits[4],
-            lower_alarm: limits[5],
-            upper_ctrl: limits[6],
-            lower_ctrl: limits[7],
-        };
-    }
+    read_gr_ctrl(&mut data, bytes, dbr);
     let native = native_of(dbr);
-    data.value = read_native(&bytes[meta..], native)?;
+    let size = value_size(native).max(1);
+    let rest = &bytes[meta..];
+    let count = (rest.len() / size).max(1);
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        let at = index * size;
+        let slice = rest.get(at..).unwrap_or(&[]);
+        if slice.len() < size && index > 0 {
+            break;
+        }
+        values.push(read_native(slice, native)?);
+    }
+    data.element_count = values.len();
+    data.value = collapse_values(native, values);
     data.connected = true;
     data.access_read = true;
     data.access_write = true;
     Ok(data)
+}
+
+fn collapse_values(native: u16, values: Vec<PvValue>) -> PvValue {
+    if values.len() <= 1 {
+        return values.into_iter().next().unwrap_or(PvValue::Double(0.0));
+    }
+    match native {
+        DBR_STRING => PvValue::Strings(values.into_iter().map(|value| value.as_text()).collect()),
+        DBR_FLOAT | DBR_DOUBLE => PvValue::Doubles(
+            values
+                .into_iter()
+                .map(|value| value.as_f64().unwrap_or(0.0))
+                .collect(),
+        ),
+        _ => PvValue::Ints(
+            values
+                .into_iter()
+                .map(|value| value.as_i64().unwrap_or(0))
+                .collect(),
+        ),
+    }
+}
+
+fn read_gr_ctrl(data: &mut ChannelData, bytes: &[u8], dbr: u16) {
+    if !(21..=34).contains(&dbr) {
+        return;
+    }
+    let native = native_of(dbr);
+    let ctrl = dbr >= 28;
+    let n = if ctrl { 8 } else { 6 };
+    match native {
+        DBR_DOUBLE | DBR_FLOAT => {
+            if bytes.len() < 16 {
+                return;
+            }
+            data.precision = i32::from(i16::from_be_bytes([bytes[4], bytes[5]]));
+            data.units = unpad(&bytes[8..16]);
+            let mut limits = [0.0; 8];
+            for (i, slot) in limits.iter_mut().enumerate().take(n) {
+                if native == DBR_DOUBLE {
+                    let at = 16 + i * 8;
+                    *slot = bytes
+                        .get(at..at + 8)
+                        .and_then(|s| s.try_into().ok())
+                        .map(f64::from_be_bytes)
+                        .unwrap_or(0.0);
+                } else {
+                    let at = 16 + i * 4;
+                    *slot = bytes
+                        .get(at..at + 4)
+                        .and_then(|s| s.try_into().ok())
+                        .map(f32::from_be_bytes)
+                        .map(f64::from)
+                        .unwrap_or(0.0);
+                }
+            }
+            data.limits = limits_from(limits);
+        }
+        DBR_SHORT | DBR_LONG | DBR_CHAR => {
+            if bytes.len() < 12 {
+                return;
+            }
+            data.units = unpad(&bytes[4..12]);
+            let mut limits = [0.0; 8];
+            for (i, slot) in limits.iter_mut().enumerate().take(n) {
+                *slot = match native {
+                    DBR_SHORT => {
+                        let at = 12 + i * 2;
+                        bytes
+                            .get(at..at + 2)
+                            .and_then(|s| s.try_into().ok())
+                            .map(i16::from_be_bytes)
+                            .map(f64::from)
+                            .unwrap_or(0.0)
+                    }
+                    DBR_LONG => {
+                        let at = 12 + i * 4;
+                        bytes
+                            .get(at..at + 4)
+                            .and_then(|s| s.try_into().ok())
+                            .map(i32::from_be_bytes)
+                            .map(f64::from)
+                            .unwrap_or(0.0)
+                    }
+                    _ => f64::from(*bytes.get(12 + i).unwrap_or(&0)),
+                };
+            }
+            data.limits = limits_from(limits);
+        }
+        DBR_ENUM => {
+            if bytes.len() < 6 {
+                return;
+            }
+            let count = i16::from_be_bytes([bytes[4], bytes[5]]).max(0) as usize;
+            let mut labels = Vec::new();
+            for index in 0..count.min(MAX_ENUM_STATES) {
+                let at = 6 + index * MAX_ENUM_STRING;
+                let end = at + MAX_ENUM_STRING;
+                if end > bytes.len() {
+                    break;
+                }
+                labels.push(unpad(&bytes[at..end]));
+            }
+            data.enum_strings = labels;
+        }
+        _ => {}
+    }
+}
+
+fn limits_from(limits: [f64; 8]) -> Limits {
+    Limits {
+        upper_display: limits[0],
+        lower_display: limits[1],
+        upper_alarm: limits[2],
+        upper_warning: limits[3],
+        lower_warning: limits[4],
+        lower_alarm: limits[5],
+        upper_ctrl: limits[6],
+        lower_ctrl: limits[7],
+    }
 }
 
 fn write_meta(buf: &mut Vec<u8>, record: &Record, dbr: u16) {
@@ -214,6 +353,34 @@ fn write_meta(buf: &mut Vec<u8>, record: &Record, dbr: u16) {
         return;
     }
     match native {
+        DBR_ENUM => {
+            let count = record.enum_strings.len().min(MAX_ENUM_STATES) as i16;
+            buf.extend_from_slice(&count.to_be_bytes());
+            for index in 0..MAX_ENUM_STATES {
+                let mut raw = [0u8; MAX_ENUM_STRING];
+                if let Some(text) = record.enum_strings.get(index) {
+                    let bytes = text.as_bytes();
+                    let n = bytes.len().min(MAX_ENUM_STRING - 1);
+                    raw[..n].copy_from_slice(&bytes[..n]);
+                }
+                buf.extend_from_slice(&raw);
+            }
+        }
+        DBR_SHORT | DBR_LONG | DBR_CHAR => {
+            write_units(buf, &record.units);
+            let n = if dbr >= 28 { 8 } else { 6 };
+            let limits = limit_array(record);
+            for value in limits.iter().take(n) {
+                match native {
+                    DBR_SHORT => buf.extend_from_slice(&(*value as i16).to_be_bytes()),
+                    DBR_LONG => buf.extend_from_slice(&(*value as i32).to_be_bytes()),
+                    _ => buf.push(*value as u8),
+                }
+            }
+            if native == DBR_CHAR {
+                buf.push(0);
+            }
+        }
         DBR_DOUBLE | DBR_FLOAT => {
             buf.extend_from_slice(&record.precision.to_be_bytes());
             buf.extend_from_slice(&0i16.to_be_bytes());
@@ -328,4 +495,64 @@ fn unpad(bytes: &[u8]) -> String {
 /// Decode a native write payload into a number.
 pub fn decode_put(bytes: &[u8], native: u16) -> Result<f64, CaError> {
     Ok(read_native(bytes, native)?.as_f64().unwrap_or(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_round_trips_every_native_class() {
+        let mut record = Record::new("WF", 1.0);
+        record.waveform = vec![1.0, 2.5, -4.0];
+        record.units = "mm".into();
+        record.enum_strings = vec!["off".into(), "on".into()];
+        record.limits.upper_display = 10.0;
+        record.limits.lower_display = 0.0;
+        record.severity = 1;
+        record.status = 2;
+        for native in 0u16..=6 {
+            for class in [0u16, 7, 14, 21, 28] {
+                let dbr = native + class;
+                let encoded = encode_dbr(&record, dbr, 3).unwrap();
+                assert_eq!(
+                    encoded.len(),
+                    meta_size(dbr) + 3 * value_size(native),
+                    "dbr {dbr} length"
+                );
+                let decoded = decode_dbr(&encoded, dbr).unwrap();
+                assert_eq!(decoded.element_count, 3, "dbr {dbr} count");
+                match &decoded.value {
+                    PvValue::Strings(values) => {
+                        assert_eq!(values, &["1".to_string(), "2.5".into(), "-4".into()]);
+                    }
+                    PvValue::Doubles(values) => {
+                        assert!((values[0] - 1.0).abs() < 1e-5);
+                        assert!((values[1] - 2.5).abs() < 1e-5);
+                        assert!((values[2] + 4.0).abs() < 1e-5);
+                    }
+                    PvValue::Ints(values) => {
+                        let expected: Vec<i64> = if native == DBR_CHAR {
+                            vec![1, 2, 0]
+                        } else {
+                            vec![1, 2, -4]
+                        };
+                        assert_eq!(values, &expected, "dbr {dbr}");
+                    }
+                    other => panic!("dbr {dbr} unexpected {other:?}"),
+                }
+                if dbr >= 7 {
+                    assert_eq!(decoded.status, 2);
+                    assert_eq!(decoded.severity, Severity::Minor);
+                }
+                if native == DBR_ENUM && dbr >= 21 {
+                    assert_eq!(decoded.enum_strings, ["off".to_string(), "on".into()]);
+                }
+                if matches!(native, DBR_DOUBLE | DBR_FLOAT | DBR_SHORT | DBR_LONG) && dbr >= 21 {
+                    assert_eq!(decoded.units, "mm");
+                    assert!((decoded.limits.upper_display - 10.0).abs() < 1e-4);
+                }
+            }
+        }
+    }
 }

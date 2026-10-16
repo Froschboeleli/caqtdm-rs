@@ -59,6 +59,59 @@ fn widgets_and_sample_display() {
 }
 
 #[test]
+fn config_print_attach_and_http() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let ui = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/displays/vacuum.ui"
+    );
+    let dir = std::env::temp_dir().join(format!("caqtdm-config-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let cfg = dir.join("caqtdm.conf");
+    std::fs::write(
+        &cfg,
+        "control_system=epics4\nmacros=SYS=RF\nexecute_shell=true\n",
+    )
+    .unwrap();
+    let text = execute(&args(&["config", "-config", cfg.to_str().unwrap()])).unwrap();
+    assert!(text.contains("control_system=epics4"));
+    assert!(text.contains("macros=SYS=RF"));
+    assert!(text.contains("execute_shell=true"));
+
+    let ppm = dir.join("vacuum.ppm");
+    let printed = execute(&args(&[
+        "print",
+        ui,
+        "-macro",
+        "SYS=VAC",
+        "-o",
+        ppm.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(printed.contains("wrote"));
+    assert!(std::fs::read(&ppm).unwrap().starts_with(b"P6\n"));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let addr = caqtdm_app::serve_attach(Arc::clone(&stop)).unwrap();
+    let reply = execute(&args(&["run", ui, "-attach", &addr.to_string()])).unwrap();
+    assert!(reply.contains("ok"));
+    assert!(reply.contains("vacuum.ui"));
+    stop.store(true, Ordering::Relaxed);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let addr = caqtdm_app::serve_http(Arc::clone(&stop)).unwrap();
+    let page = caqtdm_app::http_get(addr).unwrap();
+    assert!(page.contains("200"));
+    assert!(page.contains("caQtDM"));
+    let pong = caqtdm_app::websocket_roundtrip(addr, "ping").unwrap();
+    assert_eq!(pong, "pong");
+    stop.store(true, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn help_and_bad_file() {
     let help = execute(&args(&["help"])).unwrap();
     assert!(help.contains("-macro"));

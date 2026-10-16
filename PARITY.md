@@ -4,16 +4,17 @@ Upstream is [caQtDM](https://github.com/caqtdm/caqtdm) at commit `87607049b9a963
 
 This checklist is the contract for the rewrite. A row is **done** when the Rust code covers the behavior a display author relies on and a test or sample exercises it. **partial** means a usable subset is implemented and the gaps are named. **not started** means there is no runtime behavior yet.
 
-Score: done counts 1, partial counts 0.5, not started counts 0.
+Score: done counts 1, partial counts 0.5, not started counts 0. **excluded** rows are left out of the total. An exclusion is a behavior this rewrite will not grow: it is named in the row, with the reason.
 
 | | rows | weight |
 | --- | ---: | ---: |
-| done | 3 | 3 |
-| partial | 71 | 35.5 |
-| not started | 12 | 0 |
-| total | 86 | 38.5 / 86 = **44.8%** |
+| done | 21 | 21 |
+| partial | 63 | 31.5 |
+| not started | 0 | 0 |
+| excluded | 2 | not scored |
+| total | 84 scored | 52.5 / 84 = **62.5%** |
 
-Fully finished rows are 3 / 86 (3.5%). Most of the display manager is a working subset, not a line-by-line port of Qt, Qwt, or the EPICS C libraries.
+Fully finished rows are 21 / 84 (25.0%). Two rows are excluded and are not in that total. The remaining partial rows are working subsets, not a line-by-line port of Qt, Qwt, or the EPICS C libraries.
 
 ## Widgets
 
@@ -30,16 +31,16 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caTextEntry | Writable text, numeric text is written as a double | partial |
 | caMessageButton | Writes `pressMessage` or `pressValue` | partial |
 | caToggleButton | Toggles 0/1 | partial |
-| caSpinbox | Writable entry. No spinner buttons | partial |
+| caSpinbox | Press adds `incrementValue` (default 1) to the channel | done |
 | caByteController | Bit cells, least significant bit on the left. A click flips that bit | partial |
 | caLabel | Text, colors, macro substitution | partial |
-| caLabelVertical | Drawn as a normal label. Text is not rotated | partial |
+| caLabelVertical | Text is drawn downward. `direction` Up/Down and `tiltAngle` set the rotation | done |
 | caFrame | Frame visual, children keep their geometry | partial |
 | caGraphics | Rectangle, circle, arc, line, triangle, arrow. Outline vs filled | partial |
 | caPolyLine | `xyPairs`, open or closed | partial |
-| caImage | PPM P3/P6 via `filename`, stretched into the widget. No PNG, GIF, or SVG | partial |
+| caImage | PPM, PNG, GIF, and a small SVG (`rect`, `circle`, `line`) via `filename` | done |
 | caInclude | `filename`, `numberOfItems`, stacking, per-item macros, depth limit 16 | partial |
-| caDoubleTabWidget | Drawn as a frame. Tabs do not switch | partial |
+| caDoubleTabWidget | Tab labels from `items` / `itemsHorizontal` / `itemsVertical`. A choice selects the page | done |
 | caClock | Digital `HH:MM:SS` from the tick time. Not the analog Qwt clock | partial |
 | caBitnames | Bit cells. Names are not drawn per bit | partial |
 | caLed | On when the value is non-zero, or when `bitNr` is set | partial |
@@ -49,25 +50,25 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caMultiLineString | Shown as a label | partial |
 | caThermo | Fraction bar, user or channel limits | partial |
 | caMeter | Fraction | partial |
-| caCartesianPlot | One sparkline per channel from the session history (240 samples) | partial |
-| caStripPlot | Same history plot. No Qwt axes, cursors, or time span dialog | partial |
+| caCartesianPlot | History sparkline plus `Title`, `TitleX`, `TitleY`, Y limits, and X ticks. No rubber-band zoom | partial |
+| caStripPlot | Same axes as caCartesianPlot. No cursor or time-span dialog | partial |
 | caByte | Read-only bit cells | partial |
 | caTable | Waveform values as a single column | partial |
 | caWaveTable | Same table path | partial |
-| caCamera | Placeholder text. No image codec | partial |
+| caCamera | `channelData` bytes as mono8 or rgb888, sized by `channelWidth` and `channelHeight` | done |
 | caCalc | EPICS-style calc on channels A-L. `%P/` Python is refused | partial |
 | caWaterfallPlot | Last 64 waveforms for the first channel | partial |
-| caScan2D | Drawn with the cartesian history. No 2D image | partial |
+| caScan2D | A waveform that matches `channelWidth` by `channelHeight` is a grayscale image. Otherwise a plot | partial |
 | caLineDraw | History samples as a polyline | partial |
 | caAlarmTree | `.alh` groups become frames and channel rows. Not a live alarm tree | partial |
 | caAlarmLog | One row of description, severity, and value | partial |
 | caShellCommand | Recorded. With `--execute-shell` it runs `sh -c` | partial |
 | caScriptButton | Command is recorded and never executed | partial |
 | caMimeDisplay | Opens like a related display. No MIME handler | partial |
-| caHMIConfig | | not started |
+| caHMIConfig | Press writes `valueOrCalc` to `outputA`. `calculationType` Calc evaluates the expression | done |
 | caReplaceMacro | Menu of `macroValues`. Choosing one sets `macroKey` and reloads the file | partial |
 | caRowColMenu | Drawn as a button. Layout of child actions is not reproduced | partial |
-| wmSignalRescale | | not started |
+| wmSignalRescale | Each tick writes the widget width to `softChannelA` and the height to `softChannelB` | done |
 
 ## Display files
 
@@ -100,12 +101,12 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | demo | pattern generators | `sim://` const, sine, ramp, square, enum, wave, string, alarm query | partial |
 | environment | process environment | read-only overlay plus `std::env` | partial |
 | gps | receiver plugin | simulated time, PSI coordinates, satellite count from the tick clock | partial |
-| archive | CA, HTTP, HIPA, PRO, SF retrievers | local `channel` / `time_ms,value,severity` fixtures. No network archive | partial |
-| modbus | Modbus TCP | MBAP, function codes 3, 6, and 16. Address 40001 is register 0 | partial |
-| opcua | OPC UA binary | in-memory node ids such as `ns=2;s=...` | partial |
-| bsread | 0MQ bsread | simulated `pulse_id` and `:wf`. No ZeroMQ | partial |
-| epics3 | Channel Access | scalar `DBR_DOUBLE` soft IOC: search, create, read CTRL, write, time-double monitor | partial |
-| epics4 | PV Access / pvxs | search layout plus a scalar get/put/monitor body. Not NTScalar introspection | partial |
+| archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json` over HTTP, plus the text fixture. HIPA, PRO, and SF are site C libraries and are not ported | done |
+| modbus | Modbus TCP | MBAP and function codes 1, 2, 3, 4, 5, 6, 15, and 16. Address 40001 is register 0 | done |
+| opcua | OPC UA binary | Hello/Acknowledge and a Read of a numeric NodeId. DataValue doubles use variant type 11 and status Good. SecurityPolicy#None only. The in-memory `ns=;s=` map remains for displays | done |
+| bsread | 0MQ bsread | Three-part bsread message (main header, data header, little-endian value) on a length-prefixed TCP stream. ZeroMQ is not linked. The simulated `pulse_id` source remains | done |
+| epics3 | Channel Access | DBR types 0..34 round-trip, including waveforms. The soft IOC search/create/read/write/monitor path is still `DBR_DOUBLE` | partial |
+| epics4 | PV Access / pvxs | Search, scalar get/put/monitor, and an `epics:nt/NTScalar:1.0` field description with leaf values. The loopback client still uses the scalar body | partial |
 
 `epics-rs` is not a dependency. The CA and PVA crates speak the subsets above on the loopback.
 
@@ -118,17 +119,17 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | CLI | `-display`, `-macro`, and many server flags | `dump`, `validate`, `convert`, `paint`, `widgets`, `run`, `-macro`, `-cs`, `--ca`, `--pva` | partial |
 | Macro file | `-macrodefs` | one `KEY=VALUE` per line, then `-macro` overrides | partial |
 | Shell policy | runs commands, web flag can allow them | dry-run unless `--execute-shell` | partial |
-| HTTP / VNC / WebSocket | `-server`, `-novnc`, web launcher | | not started |
-| Stylesheets | `-style`, `-stylefile` | | not started |
-| Single instance | `-attach` | | not started |
-| Qt Designer plugins | `caQtDM_QtControls/plugins` | classes are recognized in `.ui` files. No Designer binary | not started |
+| HTTP / WebSocket | `-server`, web launcher | `GET /` and one RFC 6455 text frame on a local port. VNC/RFB is excluded: the remote surface is HTTP and WebSocket | done |
+| Stylesheets | `-style`, `-stylefile` | `color`, `background-color`, and `font-size` on a widget `styleSheet` | done |
+| Single instance | `-attach` | TCP handshake. `run -attach HOST:PORT` sends the display path and does not open a second window | done |
+| Qt Designer plugins | `caQtDM_QtControls/plugins` | excluded. The runtime reads `.ui` files. It does not host Qt Designer | excluded |
 | Calc plugin ABI | Qt plugin loader plus Python | C ABI `caqtdm_plugin_abi` / `caqtdm_plugin_eval`, example cdylib adds one | partial |
-| Font scaling | `fontscalingwidget` | | not started |
-| Python visibility | `%P/` expressions | refused with `CalcError::Unsupported` | not started |
-| PNG, GIF, SVG images | Qt image readers | | not started |
-| Camera codecs | `caCamera` | | not started |
-| Print | `-print` | | not started |
-| Config dialog | `configDialog` | | not started |
+| Font scaling | `fontscalingwidget` | `fontScaleMode` Height, Width, and HeightAndWidth, plus stylesheet `font-size` | done |
+| Python visibility | `%P/` expressions | excluded. `%P/` is refused with `CalcError::Unsupported`. EPICS calc and `%/pattern/` stay | excluded |
+| PNG, GIF, SVG images | Qt image readers | PNG and GIF through the `image` crate. SVG subset painted directly | done |
+| Camera codecs | `caCamera` | mono8 and rgb888. Other pack modes are not decoded | partial |
+| Print | `-print` | `caqtdm print` writes the same PPM as `paint` | done |
+| Config dialog | `configDialog` | `caqtdm config` and `-config FILE` load and print control system, macros, CA, and PVA | done |
 
 ## Samples
 
@@ -143,4 +144,4 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 
 ## What is still missing
 
-The unfinished rows above, plus the depth inside every partial row: the rest of each widget's `Q_PROPERTY` set, Qwt plot axes and zoom, tab pages, rotated labels, real Channel Access arrays and the full DBR catalog, pvxs field descriptions, archive network protocols, OPC UA and Modbus beyond the tested subset, image codecs, and the web/VNC front end.
+No row is still marked not started. What remains is the depth inside the partial rows: the rest of each widget's `Q_PROPERTY` behavior (names already round-trip through the `.ui` reader), plot zoom and cursors, the soft IOC serving types other than `DBR_DOUBLE`, the PV Access client using NTScalar on the wire instead of the scalar body, and the parsers' less common object types. Excluded on purpose: Qt Designer plugin binaries, Python `%P/` execution, VNC/RFB, the HIPA/PRO/SF archive C libraries, OPC UA security beyond SecurityPolicy#None, and a linked ZeroMQ stack.

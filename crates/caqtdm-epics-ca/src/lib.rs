@@ -1,11 +1,9 @@
 //! EPICS Channel Access for the display manager.
 //!
-//! This is a scalar client and a matching in-process server. The header,
-//! search datagram, and DBR layouts follow `caProto.h` / `db_access.h`. It
-//! does not replace a site IOC: waveforms beyond a repeated scalar, beacons,
-//! and the full DBR matrix are left to a production CA library. The
-//! `epics-rs` crates are edition 2024 and pull an IOC stack, so they are not
-//! linked here.
+//! The header, search datagram, and DBR layouts follow `caProto.h` /
+//! `db_access.h`. Native types 0 through 6, plus STS, TIME, GR, and CTRL,
+//! round-trip as scalars or waveforms. The soft IOC still serves doubles.
+//! `epics-rs` is edition 2024 and is not linked.
 
 mod client;
 mod dbr;

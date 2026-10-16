@@ -19,15 +19,18 @@ mod hub;
 mod intern;
 mod modbus;
 mod opcua;
+mod opcua_bin;
 mod pattern;
 mod sim;
 mod source;
 
 pub use archive::{
-    build_archive_url, parse_archive_request, parse_fixture, ArchiveRequest, ArchiveSample,
-    ArchiveSource,
+    build_archive_url, fetch_archiver, parse_archive_request, parse_archiver_json, parse_fixture,
+    samples_to_json, serve_archiver, ArchiveRequest, ArchiveSample, ArchiveSource,
 };
-pub use bsread::BsreadSource;
+pub use bsread::{
+    decode_bsread, encode_bsread, fetch_bsread, serve_bsread, BsMessage, BsreadSource,
+};
 pub use env::EnvSource;
 pub use error::DsError;
 pub use gps::GpsSource;
@@ -35,9 +38,15 @@ pub use hub::Hub;
 pub use intern::InternSource;
 pub use modbus::{
     decode_response, encode_request, exchange, serve_loopback, Mbap, ModbusSource, Pdu,
-    RegisterMap, FN_READ_HOLDING, FN_WRITE_MULTIPLE, FN_WRITE_SINGLE,
+    RegisterMap, FN_READ_COILS, FN_READ_DISCRETE, FN_READ_HOLDING, FN_READ_INPUT, FN_WRITE_COIL,
+    FN_WRITE_COILS, FN_WRITE_MULTIPLE, FN_WRITE_SINGLE,
 };
 pub use opcua::OpcuaSource;
+pub use opcua_bin::{
+    decode_ack, decode_hello, decode_read_response, encode_ack, encode_hello, encode_node_id,
+    encode_read_request, read_node, serve_read, NodeId, READ_REQUEST, READ_RESPONSE, STATUS_GOOD,
+    VARIANT_DOUBLE,
+};
 pub use sim::SimSource;
 pub use source::{DataSource, Update};
 

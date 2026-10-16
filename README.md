@@ -22,10 +22,12 @@ cargo run -p caqtdm-app -- dump examples/displays/vacuum.ui -macrodefs macros.tx
 cargo run -p caqtdm-app -- validate examples/displays/vacuum.ui -macro SYS=VAC
 cargo run -p caqtdm-app -- convert examples/displays/rf.edl
 cargo run -p caqtdm-app -- paint examples/displays/vacuum.ui -macro SYS=VAC -o /tmp/vacuum.ppm
+cargo run -p caqtdm-app -- print examples/displays/vacuum.ui -macro SYS=VAC -o /tmp/vacuum.ppm
+cargo run -p caqtdm-app -- config
 cargo run -p caqtdm-app -- run examples/displays/vacuum.ui -macro SYS=VAC
 ```
 
-`dump`, `validate`, `convert`, `paint`, and `widgets` do not open a window. `run` opens the egui viewer. `caShellCommand` is recorded and not executed unless you pass `--execute-shell`. `caScriptButton` never runs Python.
+`dump`, `validate`, `convert`, `paint`, `print`, `config`, and `widgets` do not open a window. `run` opens the egui viewer. `run -attach HOST:PORT` sends the file to a process that is already listening. `caShellCommand` is recorded and not executed unless you pass `--execute-shell`. `caScriptButton` never runs Python.
 
 Channel names follow caQtDM: `intern://NAME`, `sim://sine:20:4000:40`, `env://VAR`, `pva://NAME`, `ca://NAME`, or a bare name on the default plugin (`-cs epics3` by default). `--ca HOST:PORT` and `--pva HOST:PORT` connect the scalar clients. Without those flags the EPICS plugins stay offline and the simulated plugins still run.
 
@@ -37,9 +39,9 @@ Included displays are searched next to the parent file and in `CAQTDM_DISPLAY_PA
 | --- | --- |
 | `caqtdm-core` | macros, calc, colors, formats, channel names, values |
 | `caqtdm-ui` | `.ui`, `.adl`, `.edl`, `.alh`, `.prc`, includes |
-| `caqtdm-datasource` | plugin hub, intern, sim, env, gps, archive fixtures, modbus, opcua, bsread |
-| `caqtdm-epics-ca` | Channel Access codec, soft IOC, scalar client (`epics3`) |
-| `caqtdm-epics-pva` | PV Access header and scalar get/put/monitor (`epics4`) |
+| `caqtdm-datasource` | plugin hub, intern, sim, env, gps, archive HTTP, modbus, OPC UA, bsread |
+| `caqtdm-epics-ca` | Channel Access codec, DBR catalog, soft IOC, client (`epics3`) |
+| `caqtdm-epics-pva` | PV Access search, scalar get/put/monitor, and NTScalar (`epics4`) |
 | `caqtdm-widgets` | widget runtime: alarms, visibility, writes, plots |
 | `caqtdm-paint` | PPM rasterizer |
 | `caqtdm-egui` | desktop viewer |
@@ -49,4 +51,4 @@ Included displays are searched next to the parent file and in `CAQTDM_DISPLAY_PA
 
 ## Limits you will hit
 
-Channel Access here is a scalar double soft server and client (search, create, CTRL read, write, time-double monitor). PV Access speaks the search frame and a documented scalar body, not pvxs `NTScalar` introspection. Archive, OPC UA, Modbus, GPS, and bsread are local stand-ins for the protocols, covered by tests where a loopback is practical. Image widgets decode PPM only.
+Channel Access round-trips DBR types 0 through 34, including waveforms. The soft IOC that the client loopback uses is still a double server. PV Access has a scalar get/put/monitor body and a separate `epics:nt/NTScalar:1.0` codec. Archive speaks Archiver Appliance `getData.json`. OPC UA speaks Hello, Acknowledge, and Read under SecurityPolicy#None. Modbus speaks function codes 1, 2, 3, 4, 5, 6, 15, and 16. bsread messages are three length-prefixed parts on TCP, not ZeroMQ. Images decode PPM, PNG, GIF, and a small SVG subset. `caqtdm print` writes a PPM. `caqtdm config` and `-attach` cover the operator file and the single-instance handshake. GPS remains a simulated clock.

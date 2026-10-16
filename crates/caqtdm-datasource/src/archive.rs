@@ -182,3 +182,119 @@ impl DataSource for ArchiveSource {
         build_archive_url("archive:/", &req.channel, req.from_ms, req.to_ms)
     }
 }
+
+/// Archiver Appliance `getData.json` document for one channel.
+pub fn samples_to_json(channel: &str, samples: &[ArchiveSample]) -> String {
+    let mut data = String::from("[");
+    for (index, sample) in samples.iter().enumerate() {
+        if index > 0 {
+            data.push(',');
+        }
+        let secs = sample.time_ms / 1000;
+        let nanos = (sample.time_ms % 1000) * 1_000_000;
+        data.push_str(&format!(
+            "{{\"secs\":{secs},\"nanos\":{nanos},\"val\":{},\"severity\":{}}}",
+            sample.value,
+            severity_code(sample.severity)
+        ));
+    }
+    data.push(']');
+    format!("[{{\"meta\":{{\"name\":\"{channel}\"}},\"data\":{data}}}]")
+}
+
+pub fn parse_archiver_json(text: &str) -> Result<Vec<ArchiveSample>, DsError> {
+    let mut samples = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("\"secs\"") {
+        let window = &rest[at..rest.len().min(at + 200)];
+        let secs =
+            json_field(window, "secs").ok_or_else(|| DsError::new("archive json missing secs"))?;
+        let nanos = json_field(window, "nanos").unwrap_or(0.0);
+        let value =
+            json_field(window, "val").ok_or_else(|| DsError::new("archive json missing val"))?;
+        let severity = json_field(window, "severity").unwrap_or(0.0);
+        samples.push(ArchiveSample {
+            time_ms: (secs * 1000.0 + nanos / 1_000_000.0) as u64,
+            value,
+            severity: Severity::from_epics(severity as i16),
+        });
+        rest = &rest[at + 6..];
+    }
+    if samples.is_empty() {
+        Err(DsError::new("archive json contained no samples"))
+    } else {
+        Ok(samples)
+    }
+}
+
+fn severity_code(severity: Severity) -> i16 {
+    match severity {
+        Severity::NoAlarm => 0,
+        Severity::Minor => 1,
+        Severity::Major => 2,
+        Severity::Invalid => 3,
+        Severity::NotConnected => 99,
+    }
+}
+
+fn json_field(window: &str, name: &str) -> Option<f64> {
+    let key = format!("\"{name}\"");
+    let at = window.find(&key)? + key.len();
+    let tail = window[at..].trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    let end = tail
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+        .unwrap_or(tail.len());
+    tail[..end].parse().ok()
+}
+
+/// Serve one JSON document for `GET /retrieval/data/getData.json`.
+pub fn serve_archiver(
+    body: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<std::net::SocketAddr> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    std::thread::spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                    let mut buf = [0u8; 2048];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(addr)
+}
+
+pub fn fetch_archiver(
+    addr: std::net::SocketAddr,
+    channel: &str,
+) -> Result<Vec<ArchiveSample>, DsError> {
+    let mut stream = std::net::TcpStream::connect(addr)
+        .map_err(|err| DsError::new(format!("archive connect: {err}")))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .ok();
+    let request = format!(
+        "GET /retrieval/data/getData.json?pv={channel} HTTP/1.1\r\nHost: archive\r\nConnection: close\r\n\r\n"
+    );
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .map_err(|err| DsError::new(format!("archive write: {err}")))?;
+    let mut buf = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut stream, &mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or(&text);
+    parse_archiver_json(body)
+}

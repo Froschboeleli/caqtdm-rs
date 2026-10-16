@@ -196,7 +196,11 @@ fn create_channel(db: &Mutex<Database>, cid: u32, payload: &[u8]) -> Vec<u8> {
     db.by_sid.insert(sid, name);
     let mut header = CaHeader::new(CMD_CREATE_CHAN);
     header.data_type = DBR_DOUBLE;
-    header.count = 1;
+    header.count = db
+        .records
+        .get(&unpad_string(payload))
+        .map(Record::count)
+        .unwrap_or(1);
     header.cid = cid;
     header.available = sid;
     let mut out = header.encode();

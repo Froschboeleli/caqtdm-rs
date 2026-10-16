@@ -27,6 +27,10 @@ pub struct Session {
     pending: BTreeMap<String, f64>,
     toggles: BTreeMap<String, bool>,
     tabs: BTreeMap<String, usize>,
+    zooms: BTreeMap<String, (f64, f64)>,
+    cursors: BTreeMap<String, Vec<f64>>,
+    alarm_log: VecDeque<Vec<String>>,
+    last_severity: BTreeMap<String, Severity>,
     pub log: Vec<String>,
     pub allow_shell: bool,
     now_ms: u64,
@@ -47,6 +51,10 @@ impl Session {
             pending: BTreeMap::new(),
             toggles: BTreeMap::new(),
             tabs: BTreeMap::new(),
+            zooms: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            alarm_log: VecDeque::new(),
+            last_severity: BTreeMap::new(),
             log: Vec::new(),
             allow_shell: false,
             now_ms: 0,
@@ -79,10 +87,25 @@ impl Session {
                         rows.pop_front();
                     }
                 }
+                self.note_alarm(&name, &data);
                 self.cache.insert(name, data);
             }
         }
         self.propagate_rescale();
+    }
+
+    fn note_alarm(&mut self, name: &str, data: &ChannelData) {
+        let previous = self.last_severity.insert(name.to_string(), data.severity);
+        if previous.is_some_and(|old| old != data.severity) {
+            self.alarm_log.push_back(vec![
+                name.to_string(),
+                data.severity.name().to_string(),
+                data.value.as_text(),
+            ]);
+            while self.alarm_log.len() > 32 {
+                self.alarm_log.pop_front();
+            }
+        }
     }
 
     pub fn visuals(&self) -> Vec<Visual> {
@@ -98,7 +121,9 @@ impl Session {
             Action::Press { id }
             | Action::SetNumber { id, .. }
             | Action::SetText { id, .. }
-            | Action::Choose { id, .. } => *id,
+            | Action::Choose { id, .. }
+            | Action::Zoom { id, .. }
+            | Action::PlaceCursor { id, .. } => *id,
         };
         let Some(node) = self.nodes.get(id as usize).cloned() else {
             return Vec::new();
@@ -106,7 +131,12 @@ impl Session {
         match action {
             Action::Press { .. } => self.press(&node),
             Action::SetNumber { value, .. } => {
-                self.write_number(&node, value);
+                if node.class_name == "caApplyNumeric" {
+                    self.pending.insert(node.name.clone(), value);
+                    self.log.push(format!("pending {} = {value}", node.name));
+                } else {
+                    self.write_number(&node, value);
+                }
                 Vec::new()
             }
             Action::SetText { text, .. } => {
@@ -114,6 +144,16 @@ impl Session {
                 Vec::new()
             }
             Action::Choose { index, .. } => self.choose(&node, index),
+            Action::Zoom { y_min, y_max, .. } => {
+                self.zooms.insert(node.name.clone(), (y_min, y_max));
+                self.log.push(format!("zoom {} {y_min} {y_max}", node.name));
+                Vec::new()
+            }
+            Action::PlaceCursor { at, .. } => {
+                self.cursors.entry(node.name.clone()).or_default().push(at);
+                self.log.push(format!("cursor {} {at}", node.name));
+                Vec::new()
+            }
         }
     }
 
@@ -196,6 +236,7 @@ impl Session {
     fn choose(&mut self, node: &WidgetNode, index: usize) -> Vec<Effect> {
         if node.class_name == "caMenu"
             || node.class_name == "caChoice"
+            || node.class_name == "caRowColMenu"
             || node.class_name == "QComboBox"
         {
             self.write_number(node, index as f64);
@@ -248,8 +289,9 @@ impl Session {
         } else {
             PutValue::String(text.to_string())
         };
-        if let Err(err) = self.hub.put(raw, &value) {
-            self.log.push(err.to_string());
+        match self.hub.put(raw, &value) {
+            Ok(()) => self.log.push(format!("put {raw} = {text}")),
+            Err(err) => self.log.push(err.to_string()),
         }
     }
 
@@ -289,8 +331,14 @@ impl Session {
                 VisualKind::Entry { writable: true }
             }
             "caApplyNumeric" => VisualKind::Entry { writable: true },
-            "caMessageButton" | "QPushButton" | "QToolButton" | "caRowColMenu" => {
-                VisualKind::Button
+            "caMessageButton" | "QPushButton" | "QToolButton" => VisualKind::Button,
+            "caRowColMenu" => {
+                let items = split_list(node.prop_str("labels").or_else(|| node.prop_str("items")));
+                if items.is_empty() {
+                    VisualKind::Button
+                } else {
+                    VisualKind::Menu { items, selected: 0 }
+                }
             }
             "caToggleButton" | "QCheckBox" | "QRadioButton" => VisualKind::Toggle {
                 on: self
@@ -299,7 +347,11 @@ impl Session {
                     .copied()
                     .unwrap_or(value != 0.0),
             },
-            "caSlider" | "QSlider" | "QScrollBar" => VisualKind::Slider { fraction, min, max },
+            "caSlider" | "QSlider" | "QScrollBar" => VisualKind::Slider {
+                fraction: slider_fraction(node, fraction),
+                min,
+                max,
+            },
             "caLinearGauge" => VisualKind::Gauge {
                 fraction,
                 circular: false,
@@ -325,15 +377,22 @@ impl Session {
                     .enum_tail("polystyle")
                     .is_some_and(|s| s.eq_ignore_ascii_case("Polygon")),
             },
-            "caCartesianPlot" | "caStripPlot" => VisualKind::Plot {
-                series: self.plot_series(node),
-                title: node.prop_str("Title").unwrap_or("").to_string(),
-                title_x: node.prop_str("TitleX").unwrap_or("").to_string(),
-                title_y: node.prop_str("TitleY").unwrap_or("").to_string(),
-                y_min: node.prop_f64("YaxisLimitsMin_1").unwrap_or(f64::NAN),
-                y_max: node.prop_f64("YaxisLimitsMax_1").unwrap_or(f64::NAN),
-                x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
-            },
+            "caCartesianPlot" | "caStripPlot" => {
+                let (y_min, y_max) = self.zooms.get(&node.name).copied().unwrap_or((
+                    node.prop_f64("YaxisLimitsMin_1").unwrap_or(f64::NAN),
+                    node.prop_f64("YaxisLimitsMax_1").unwrap_or(f64::NAN),
+                ));
+                VisualKind::Plot {
+                    series: self.plot_series(node),
+                    title: node.prop_str("Title").unwrap_or("").to_string(),
+                    title_x: node.prop_str("TitleX").unwrap_or("").to_string(),
+                    title_y: node.prop_str("TitleY").unwrap_or("").to_string(),
+                    y_min,
+                    y_max,
+                    x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
+                    cursors: self.cursors.get(&node.name).cloned().unwrap_or_default(),
+                }
+            }
             "caScan2D" => scan_kind(
                 node,
                 data,
@@ -388,10 +447,10 @@ impl Session {
             "caCalc" => VisualKind::Label,
             "caInclude" => VisualKind::Frame,
             "caAlarmTree" => VisualKind::Table {
-                cells: alarm_tree_cells(node),
+                cells: self.alarm_tree_cells(node),
             },
             "caAlarmLog" => VisualKind::Table {
-                cells: alarm_rows(data),
+                cells: self.alarm_rows(data),
             },
             "caLineDraw" => VisualKind::Polyline {
                 points: self
@@ -501,13 +560,27 @@ impl Session {
     }
 
     fn plot_series(&self, node: &WidgetNode) -> Vec<Vec<f64>> {
+        let span = if node.class_name == "caStripPlot" {
+            node.prop_f64("timeSpan")
+                .map(|n| n as usize)
+                .filter(|n| *n > 0)
+        } else {
+            None
+        };
         node_channels(node)
             .into_iter()
             .map(|raw| {
-                self.history
+                let mut samples: Vec<f64> = self
+                    .history
                     .get(&raw)
                     .map(|s| s.iter().copied().collect())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                if let Some(span) = span {
+                    if samples.len() > span {
+                        samples = samples[samples.len() - span..].to_vec();
+                    }
+                }
+                samples
             })
             .collect()
     }
@@ -569,6 +642,51 @@ impl Session {
     fn reindex(&mut self) {
         self.nodes.clear();
         collect(&self.root, &mut self.nodes);
+    }
+
+    fn alarm_tree_cells(&self, node: &WidgetNode) -> Vec<Vec<String>> {
+        let mut rows = Vec::new();
+        fn walk(
+            node: &WidgetNode,
+            cache: &BTreeMap<String, ChannelData>,
+            rows: &mut Vec<Vec<String>>,
+        ) {
+            if node.class_name != "caAlarmTree" && node.class_name != "caFrame" {
+                let channel = node.prop_str("channel").unwrap_or("").to_string();
+                let severity = cache
+                    .get(&channel)
+                    .map(|data| data.severity.name().to_string())
+                    .unwrap_or_else(|| "n/a".into());
+                rows.push(vec![
+                    node.name.clone(),
+                    channel,
+                    node.prop_str("mask").unwrap_or("").to_string(),
+                    severity,
+                ]);
+            }
+            for child in &node.children {
+                walk(child, cache, rows);
+            }
+        }
+        walk(node, &self.cache, &mut rows);
+        if rows.is_empty() {
+            rows.push(vec!["empty".into()]);
+        }
+        rows
+    }
+
+    fn alarm_rows(&self, data: Option<&ChannelData>) -> Vec<Vec<String>> {
+        if !self.alarm_log.is_empty() {
+            return self.alarm_log.iter().cloned().collect();
+        }
+        let Some(data) = data else {
+            return vec![vec!["disconnected".into()]];
+        };
+        vec![vec![
+            data.description.clone(),
+            data.severity.name().to_string(),
+            data.value.as_text(),
+        ]]
     }
 }
 
@@ -841,6 +959,7 @@ fn scan_kind(node: &WidgetNode, data: Option<&ChannelData>, width: u32, height: 
         y_min: f64::NAN,
         y_max: f64::NAN,
         x_ticks: 2,
+        cursors: Vec::new(),
     }
 }
 
@@ -858,7 +977,11 @@ fn image_kind(
         .to_string();
     if let Some(PvValue::Bytes(bytes)) = data.map(|d| &d.value) {
         if width > 0 && height > 0 {
-            let rgba = camera_rgba(bytes, width, height);
+            let pack = node
+                .prop_str("dataType")
+                .or_else(|| node.prop_str("pack"))
+                .unwrap_or("");
+            let rgba = camera_rgba(bytes, width, height, pack);
             if !rgba.is_empty() {
                 return VisualKind::Image {
                     note,
@@ -877,14 +1000,29 @@ fn image_kind(
     }
 }
 
-fn camera_rgba(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
+fn camera_rgba(bytes: &[u8], width: u32, height: u32, pack: &str) -> Vec<u8> {
     let pixels = (width as usize).saturating_mul(height as usize);
     if pixels == 0 {
         return Vec::new();
     }
     let mut rgba = Vec::with_capacity(pixels * 4);
-    if bytes.len() >= pixels * 3 {
+    let pack = pack.to_ascii_lowercase();
+    if pack == "mono16" && bytes.len() >= pixels * 2 {
+        for chunk in bytes.chunks(2).take(pixels) {
+            let level = chunk[0];
+            rgba.extend_from_slice(&[level, level, level, 255]);
+        }
+    } else if pack == "rgba" && bytes.len() >= pixels * 4 {
+        rgba.extend_from_slice(&bytes[..pixels * 4]);
+    } else if pack == "mono8" && bytes.len() >= pixels {
+        for byte in bytes.iter().take(pixels) {
+            rgba.extend_from_slice(&[*byte, *byte, *byte, 255]);
+        }
+    } else if pack == "rgb888" || (pack.is_empty() && bytes.len() >= pixels * 3) {
         for chunk in bytes.chunks(3).take(pixels) {
+            if chunk.len() < 3 {
+                break;
+            }
             rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
         }
     } else if bytes.len() >= pixels {
@@ -909,27 +1047,6 @@ fn samples_to_rgba(samples: &[f64], width: u32, height: u32) -> Vec<u8> {
         rgba.extend_from_slice(&[level, level, level, 255]);
     }
     rgba
-}
-
-fn alarm_tree_cells(node: &WidgetNode) -> Vec<Vec<String>> {
-    let mut rows = Vec::new();
-    fn walk(node: &WidgetNode, rows: &mut Vec<Vec<String>>) {
-        if node.class_name != "caAlarmTree" && node.class_name != "caFrame" {
-            rows.push(vec![
-                node.name.clone(),
-                node.prop_str("channel").unwrap_or("").to_string(),
-                node.prop_str("mask").unwrap_or("").to_string(),
-            ]);
-        }
-        for child in &node.children {
-            walk(child, rows);
-        }
-    }
-    walk(node, &mut rows);
-    if rows.is_empty() {
-        rows.push(vec!["empty".into()]);
-    }
-    rows
 }
 
 fn macro_values(node: &WidgetNode) -> Vec<String> {
@@ -1018,15 +1135,27 @@ fn table_cells(node: &WidgetNode, data: Option<&ChannelData>) -> Vec<Vec<String>
     }
 }
 
-fn alarm_rows(data: Option<&ChannelData>) -> Vec<Vec<String>> {
-    let Some(data) = data else {
-        return vec![vec!["disconnected".into()]];
-    };
-    vec![vec![
-        data.description.clone(),
-        data.severity.name().to_string(),
-        data.value.as_text(),
-    ]]
+fn slider_fraction(node: &WidgetNode, fraction: f64) -> f64 {
+    let inverted = node
+        .prop_str("orientation")
+        .is_some_and(|text| text.contains("Down") || text.contains("Left"))
+        || node
+            .prop_str("invertedAppearance")
+            .is_some_and(|text| text == "true" || text == "1");
+    if inverted {
+        1.0 - fraction
+    } else {
+        fraction
+    }
+}
+
+fn split_list(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .split([';', ','])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn is_numeric_text(class_name: &str) -> bool {

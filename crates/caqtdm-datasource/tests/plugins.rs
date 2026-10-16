@@ -4,10 +4,11 @@ use std::sync::Arc;
 use caqtdm_core::PutValue;
 use caqtdm_datasource::{
     build_archive_url, decode_bsread, decode_response, encode_bsread, encode_hello, encode_node_id,
-    encode_read_request, encode_request, exchange, fetch_archiver, fetch_bsread, parse_fixture,
-    read_node, samples_to_json, serve_archiver, serve_bsread, serve_loopback, serve_read,
-    BsMessage, BsreadSource, DataSource, EnvSource, GpsSource, Hub, InternSource, Mbap,
-    ModbusSource, NodeId, OpcuaSource, Pdu, RegisterMap, SimSource, READ_REQUEST, VARIANT_DOUBLE,
+    encode_read_request, encode_request, exchange, fetch_archiver, fetch_bsread, greeting,
+    parse_fixture, parse_greeting, read_node, recv_bsread, samples_to_json, seal_secure_chunk,
+    send_bsread, serve_archiver, serve_bsread, serve_loopback, serve_read, serve_zmtp, BsMessage,
+    BsreadSource, DataSource, EnvSource, GpsSource, Hub, InternSource, Mbap, ModbusSource, NodeId,
+    OpcuaSource, Pdu, RegisterMap, SimSource, POLICY_BASIC256SHA256, READ_REQUEST, VARIANT_DOUBLE,
 };
 
 #[test]
@@ -26,6 +27,32 @@ fn hub_routes_intern_writes() {
     let updates = hub.poll(0);
     let hit = updates.iter().find(|(i, _)| *i == sim).unwrap();
     assert!((hit.1.value.as_f64().unwrap() - 4.0).abs() < 1e-9);
+}
+
+#[test]
+fn demo_patterns_cover_the_catalog() {
+    let mut sim = SimSource::new("demo");
+    for name in [
+        "const:3.5",
+        "ramp:0:10:1000",
+        "square:1000",
+        "enum:Off,On",
+        "wave:4:1000",
+        "string:hello",
+        "const:95?alarm=1",
+    ] {
+        let spec = caqtdm_core::parse_channel(name, "demo");
+        sim.add_monitor(&spec).unwrap();
+    }
+    let updates = sim.poll(100);
+    assert_eq!(updates.len(), 7);
+    assert!((updates[0].data.value.as_f64().unwrap() - 3.5).abs() < 1e-9);
+    assert!(updates[1].data.value.as_f64().unwrap() > 0.0);
+    assert!(updates[2].data.value.as_f64().is_some());
+    assert!(!updates[3].data.enum_strings.is_empty());
+    assert_eq!(updates[4].data.value.as_f64_slice().len(), 4);
+    assert_eq!(updates[5].data.value.as_text(), "hello");
+    assert_eq!(updates[6].data.severity, caqtdm_core::Severity::Major);
 }
 
 #[test]
@@ -267,5 +294,38 @@ fn archive_json_opcua_read_and_bsread_frame() {
     let stop = Arc::new(AtomicBool::new(false));
     let addr = serve_bsread(message.clone(), Arc::clone(&stop)).unwrap();
     assert_eq!(fetch_bsread(addr).unwrap(), message);
+    stop.store(true, Ordering::Relaxed);
+}
+
+#[test]
+fn basic256sha256_chunk_and_zmtp_bsread() {
+    let key = [9u8; 32];
+    let sig = [4u8; 32];
+    let iv = [1u8; 16];
+    let body = b"read-request".to_vec();
+    let sealed = seal_secure_chunk(7, 3, 11, &body, &key, &sig, &iv).unwrap();
+    assert!(sealed
+        .windows(POLICY_BASIC256SHA256.len())
+        .any(|w| w == POLICY_BASIC256SHA256.as_bytes()));
+    assert!(!sealed.windows(body.len()).any(|w| w == body.as_slice()));
+    let (token, sequence, request, plain) =
+        caqtdm_datasource::open_secure_chunk(&sealed, &key, &sig).unwrap();
+    assert_eq!((token, sequence, request, plain), (7, 3, 11, body));
+    let mut tampered = sealed.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    assert!(caqtdm_datasource::open_secure_chunk(&tampered, &key, &sig).is_err());
+
+    let greet = greeting(false);
+    assert!(parse_greeting(&greet).is_ok());
+    let stop = Arc::new(AtomicBool::new(false));
+    let (addr, rx) = serve_zmtp(Arc::clone(&stop)).unwrap();
+    let message = BsMessage {
+        pulse_id: 9,
+        channel: "CH".into(),
+        value: 1.25,
+    };
+    send_bsread(addr, &message).unwrap();
+    assert_eq!(recv_bsread(&rx).unwrap(), message);
     stop.store(true, Ordering::Relaxed);
 }

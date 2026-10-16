@@ -20,16 +20,19 @@ mod intern;
 mod modbus;
 mod opcua;
 mod opcua_bin;
+mod opcua_sec;
 mod pattern;
 mod sim;
 mod source;
+mod zmtp;
 
 pub use archive::{
     build_archive_url, fetch_archiver, parse_archive_request, parse_archiver_json, parse_fixture,
     samples_to_json, serve_archiver, ArchiveRequest, ArchiveSample, ArchiveSource,
 };
 pub use bsread::{
-    decode_bsread, encode_bsread, fetch_bsread, serve_bsread, BsMessage, BsreadSource,
+    bsread_parts, decode_bsread, decode_bsread_parts, encode_bsread, fetch_bsread, serve_bsread,
+    BsMessage, BsreadSource,
 };
 pub use env::EnvSource;
 pub use error::DsError;
@@ -47,8 +50,12 @@ pub use opcua_bin::{
     encode_read_request, read_node, serve_read, NodeId, READ_REQUEST, READ_RESPONSE, STATUS_GOOD,
     VARIANT_DOUBLE,
 };
+pub use opcua_sec::{
+    open as open_secure_chunk, seal as seal_secure_chunk, POLICY_BASIC256SHA256, POLICY_NONE,
+};
 pub use sim::SimSource;
 pub use source::{DataSource, Update};
+pub use zmtp::{greeting, parse_greeting, recv_bsread, send_bsread, serve_zmtp};
 
 /// Register the plugins that do not need a network peer.
 ///

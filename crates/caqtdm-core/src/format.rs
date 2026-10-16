@@ -157,4 +157,16 @@ mod tests {
         let s = format_number(12345.0, FormatType::EngrNotation, 3);
         assert!(s.contains("e+03"), "{s}");
     }
+
+    #[test]
+    fn remaining_format_catalog() {
+        assert!(format_number(1.5, FormatType::Exponential, 2).contains("e+"));
+        assert_eq!(format_number(1.5, FormatType::String, 1), "1.5");
+        assert_eq!(format_number(3.9, FormatType::Enumeric, 0), "3");
+        assert_eq!(format_number(7.0, FormatType::UTruncated, 0), "7");
+        assert_eq!(format_number(1.5, FormatType::Sexagesimal, 0), "1:30:0");
+        assert!(format_number(1.5, FormatType::SexagesimalHms, 0).contains('h'));
+        assert!(format_number(1.5, FormatType::SexagesimalDms, 0).contains('d'));
+        assert_eq!(format_number(f64::INFINITY, FormatType::Decimal, 1), "inf");
+    }
 }

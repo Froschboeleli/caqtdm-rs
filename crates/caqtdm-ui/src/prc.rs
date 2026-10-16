@@ -52,7 +52,10 @@ pub fn parse_prc(text: &str) -> Result<DisplayFile, crate::error::UiError> {
             let class_name = match kind.as_str() {
                 "formWrite" | "textWrite" => "caTextEntry",
                 "formButton" | "messageButton" => "caMessageButton",
-                "menu" => "caMenu",
+                "menu" | "formMenu" => "caMenu",
+                "formLed" | "led" => "caLed",
+                "formSlider" | "slider" => "caSlider",
+                "formGauge" | "gauge" => "caMeter",
                 _ => "caLineEdit",
             };
             let mut node = WidgetNode::new(class_name, format!("prc_{row}"));
@@ -65,6 +68,12 @@ pub fn parse_prc(text: &str) -> Result<DisplayFile, crate::error::UiError> {
                 PropValue::Rect(Rect::new(8 + col * 180, 8 + grid_row * 28, 160, 24)),
             );
             node.set_prop("colorMode", PropValue::Enum("Alarm".into()));
+            if class_name == "caMenu" {
+                let items = parts.iter().skip(1).cloned().collect::<Vec<_>>().join(",");
+                if !items.is_empty() {
+                    node.set_prop("items", PropValue::String(items));
+                }
+            }
             root.children.push(node);
         }
         row += 1;

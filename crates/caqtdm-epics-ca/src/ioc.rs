@@ -1,7 +1,9 @@
-//! In-process Channel Access server for the scalar subset the client speaks.
+//! In-process Channel Access server.
 //!
 //! It answers UDP search, then TCP version, create-channel, access rights,
-//! read notify, write notify, and event add. Records are `DBR_DOUBLE`.
+//! read notify, write notify, and event add. Each record advertises its
+//! native DBR type. Reads, writes, and monitors use the type and count the
+//! client asked for, including waveforms.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -10,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::dbr::{decode_put, encode_dbr, Record, DBR_DOUBLE, DBR_TIME_DOUBLE};
+use crate::dbr::{decode_puts, encode_dbr, native_of, Record, DBR_STRING, DBR_TIME_DOUBLE};
 use crate::protocol::{
     search_reply, take_message, unpad_string, version_message, CaError, CaHeader, ACCESS_READ,
     ACCESS_WRITE, CMD_ACCESS_RIGHTS, CMD_CLEAR_CHANNEL, CMD_CLIENT_NAME, CMD_CREATE_CHAN,
@@ -29,6 +31,7 @@ struct Sub {
     sub_id: u32,
     sid: u32,
     dbr: u16,
+    count: u32,
     seen: u64,
 }
 
@@ -186,21 +189,20 @@ fn handle(
 fn create_channel(db: &Mutex<Database>, cid: u32, payload: &[u8]) -> Vec<u8> {
     let name = unpad_string(payload);
     let mut db = db.lock().expect("ca db");
-    if !db.records.contains_key(&name) {
-        let mut header = CaHeader::new(CMD_CREATE_CH_FAIL);
-        header.cid = cid;
-        return header.encode();
-    }
+    let (data_type, count) = match db.records.get(&name) {
+        Some(record) => (record.native, record.count()),
+        None => {
+            let mut header = CaHeader::new(CMD_CREATE_CH_FAIL);
+            header.cid = cid;
+            return header.encode();
+        }
+    };
     let sid = db.next_sid;
     db.next_sid += 1;
     db.by_sid.insert(sid, name);
     let mut header = CaHeader::new(CMD_CREATE_CHAN);
-    header.data_type = DBR_DOUBLE;
-    header.count = db
-        .records
-        .get(&unpad_string(payload))
-        .map(Record::count)
-        .unwrap_or(1);
+    header.data_type = data_type;
+    header.count = count;
     header.cid = cid;
     header.available = sid;
     let mut out = header.encode();
@@ -220,7 +222,7 @@ fn read_notify(db: &Mutex<Database>, header: CaHeader) -> Result<Option<Vec<u8>>
         return Ok(None);
     };
     let dbr = if header.data_type == 0 {
-        DBR_DOUBLE
+        record.native
     } else {
         header.data_type
     };
@@ -239,12 +241,34 @@ fn write_notify(
     header: CaHeader,
     payload: &[u8],
 ) -> Result<Option<Vec<u8>>, CaError> {
-    let value = decode_put(payload, DBR_DOUBLE)?;
+    let dbr = header.data_type;
+    let native = native_of(dbr);
+    let count = header.count.max(1);
     {
         let mut db = db.lock().expect("ca db");
         if let Some(name) = db.by_sid.get(&header.cid).cloned() {
             if let Some(record) = db.records.get_mut(&name) {
-                record.value = value;
+                if native == DBR_STRING {
+                    record.text = unpad_string(payload);
+                    if let Ok(value) = record.text.parse::<f64>() {
+                        record.value = value;
+                    }
+                } else {
+                    let values = decode_puts(payload, native, count)?;
+                    if let Some(first) = values.first().copied() {
+                        record.value = first;
+                    }
+                    if values.len() > 1 || !record.waveform.is_empty() {
+                        if record.waveform.len() < values.len() {
+                            record.waveform.resize(values.len(), 0.0);
+                        }
+                        for (index, value) in values.iter().enumerate() {
+                            if let Some(slot) = record.waveform.get_mut(index) {
+                                *slot = *value;
+                            }
+                        }
+                    }
+                }
                 record.generation = record.generation.wrapping_add(1);
             }
         }
@@ -271,10 +295,16 @@ fn event_add(
         sub_id: header.available,
         sid: header.cid,
         dbr: if header.data_type == 0 {
-            DBR_TIME_DOUBLE
+            let db = db.lock().expect("ca db");
+            db.by_sid
+                .get(&header.cid)
+                .and_then(|name| db.records.get(name))
+                .map(|record| record.native.saturating_add(14))
+                .unwrap_or(DBR_TIME_DOUBLE)
         } else {
             header.data_type
         },
+        count: header.count.max(1),
         seen: 0,
     });
     push_events(db, subs)
@@ -294,10 +324,10 @@ fn push_events(db: &Mutex<Database>, subs: &mut [Sub]) -> Result<Option<Vec<u8>>
             continue;
         }
         sub.seen = record.generation;
-        let payload = encode_dbr(record, sub.dbr, 1)?;
+        let payload = encode_dbr(record, sub.dbr, sub.count)?;
         let mut header = CaHeader::new(CMD_EVENT_ADD);
         header.data_type = sub.dbr;
-        header.count = 1;
+        header.count = sub.count;
         header.cid = sub.sid;
         header.available = sub.sub_id;
         out.extend_from_slice(&crate::protocol::encode_message(header, &payload));

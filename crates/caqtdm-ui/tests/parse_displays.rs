@@ -262,3 +262,97 @@ fn upstream_numeric_ui_parses_when_present() {
     assert!(display.root.count_class("caLineDraw") > 0);
     assert!(display.widget_count() > 20);
 }
+
+#[test]
+fn less_common_adl_edl_alh_and_prc_objects() {
+    let adl = r#"
+composite {
+  object { x=1 y=2 width=40 height=30 }
+  "image name"="mark.ppm"
+  text { textix="inside" object { x=3 y=4 width=10 height=8 } }
+  scale { object { x=0 y=12 width=20 height=8 } }
+}
+"#;
+    let display = load_str(adl, Path::new("extra.adl")).unwrap();
+    assert_eq!(display.root.children[0].class_name, "caFrame");
+    assert!(display.root.children[0]
+        .children
+        .iter()
+        .any(|child| child.class_name == "caLabel"));
+    assert!(display.root.children[0]
+        .children
+        .iter()
+        .any(|child| child.class_name == "caLinearGauge"));
+
+    let edl = r#"
+beginScreenProperties
+major 4
+minor 0
+endScreenProperties
+object activeByteClass
+beginObjectProperties
+x 1
+y 2
+w 40
+h 16
+controlPv "RF:BITS"
+endObjectProperties
+object activeImageClass
+beginObjectProperties
+x 0
+y 0
+w 8
+h 8
+file "cam.gif"
+endObjectProperties
+object shellCmdClass
+beginObjectProperties
+x 0
+y 20
+w 40
+h 16
+command "echo hi"
+endObjectProperties
+"#;
+    let display = load_str(edl, Path::new("extra.edl")).unwrap();
+    assert_eq!(display.root.count_class("caByte"), 1);
+    assert_eq!(display.root.count_class("caImage"), 1);
+    assert_eq!(display.root.count_class("caShellCommand"), 1);
+
+    let alh = "GROUP NULL vac\nCHANNEL p intern://P -\nALIAS vac:p\nFORCEPV intern://FORCE\n";
+    let display = load_str(alh, Path::new("extra.alh")).unwrap();
+    let mut alias = None;
+    display.root.walk(&mut |node| {
+        if node.class_name == "caLineEdit" {
+            alias = node.prop_str("alias").map(str::to_string);
+            assert_eq!(node.prop_str("forcePv"), Some("intern://FORCE"));
+        }
+    });
+    assert_eq!(alias.as_deref(), Some("vac:p"));
+
+    let prc = "#!grid 2\nVAC:LED formLed\nVAC:SET formMenu off on\n";
+    let display = load_str(prc, Path::new("extra.prc")).unwrap();
+    assert_eq!(display.root.count_class("caLed"), 1);
+    let menu = display
+        .root
+        .children
+        .iter()
+        .find(|node| node.class_name == "caMenu")
+        .unwrap();
+    assert_eq!(menu.prop_str("items"), Some("off,on"));
+}
+
+#[test]
+fn http_display_fetch() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = std::io::Read::read(&mut stream, &mut [0u8; 512]);
+            let body = b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+            let _ = std::io::Write::write_all(&mut stream, body);
+        }
+    });
+    let text = caqtdm_ui::fetch_http(&format!("http://{addr}/panel.ui")).unwrap();
+    assert_eq!(text, "hello");
+}

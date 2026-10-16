@@ -1,8 +1,9 @@
 use caqtdm_core::PutValue;
 use caqtdm_datasource::DataSource;
 use caqtdm_epics_pva::{
-    decode_header, decode_search_payload, decode_size, discover_frame, encode_size, search_frame,
-    PvaClient, PvaServer, PvaSource, FLAG_BIG_ENDIAN, MAGIC, VERSION,
+    decode_header, decode_search_payload, decode_size, discover_frame, encode_introspection,
+    encode_size, search_frame, NtScalar, PvaClient, PvaServer, PvaSource, FLAG_BIG_ENDIAN, MAGIC,
+    STRUCT_ID, VERSION,
 };
 
 #[test]
@@ -72,4 +73,29 @@ fn scalar_search_get_put_monitor() {
         }
     }
     assert!(found);
+}
+
+#[test]
+fn client_puts_and_gets_ntscalar_on_the_wire() {
+    let server = PvaServer::start(vec![("beam:current", 1.0)]).unwrap();
+    let mut client = PvaClient::connect(server.tcp).unwrap();
+    client.create("beam:current").unwrap();
+    let sample = NtScalar {
+        value: 4.5,
+        severity: 2,
+        status: 3,
+        message: "MAJOR".into(),
+        seconds: 1_700_000_000,
+        nanoseconds: 20,
+        user_tag: 9,
+    };
+    let wire = encode_introspection();
+    assert!(wire
+        .windows(STRUCT_ID.len())
+        .any(|w| w == STRUCT_ID.as_bytes()));
+    client.put_nt("beam:current", &sample).unwrap();
+    let got = client.get_nt("beam:current").unwrap();
+    assert_eq!(got, sample);
+    let scalar = client.get("beam:current").unwrap();
+    assert!((scalar - 4.5).abs() < 1e-9);
 }

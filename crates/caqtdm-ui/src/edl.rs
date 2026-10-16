@@ -129,6 +129,10 @@ fn widget_from_edl(block: &Block) -> WidgetNode {
         "xyGraphClass" | "activeXyPlotClass" => ("caCartesianPlot", None),
         "activeStripChartClass" => ("caStripPlot", None),
         "activeGroupClass" => ("caFrame", None),
+        "activeByteClass" => ("caByte", None),
+        "activeImageClass" => ("caImage", None),
+        "shellCmdClass" => ("caShellCommand", None),
+        "activeExitButtonClass" => ("caMessageButton", None),
         "Text" | "text" => ("caLabel", None),
         _ => ("caLabel", None),
     };
@@ -171,6 +175,16 @@ fn widget_from_edl(block: &Block) -> WidgetNode {
     }
     if let Some(form) = form {
         node.set_prop("form", PropValue::Enum(format!("caGraphics::Form::{form}")));
+    }
+    if class_name == "caImage" {
+        if let Some(file) = field(block, "file").or_else(|| field(block, "filePv")) {
+            node.set_prop("filename", PropValue::String(file.to_string()));
+        }
+    }
+    if class_name == "caShellCommand" {
+        if let Some(cmd) = field(block, "commandLabel").or_else(|| field(block, "command")) {
+            node.set_prop("label", PropValue::String(cmd.to_string()));
+        }
     }
     if class_name == "caRelatedDisplay" {
         if let Some(file) = field(block, "displayFileName").or_else(|| field(block, "file")) {

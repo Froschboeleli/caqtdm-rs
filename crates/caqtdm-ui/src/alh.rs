@@ -12,6 +12,7 @@ pub fn parse_alh(text: &str) -> Result<DisplayFile, crate::error::UiError> {
     // Stack of (indent, index path into the tree). The root is indent -1.
     let mut stack: Vec<(i32, Vec<usize>)> = vec![(-1, Vec::new())];
     let mut pending_section: Option<(Vec<usize>, String, String)> = None;
+    let mut last_channel: Option<Vec<usize>> = None;
 
     for raw in text.lines() {
         let indent = raw.chars().take_while(|c| *c == ' ' || *c == '\t').count() as i32;
@@ -83,7 +84,23 @@ pub fn parse_alh(text: &str) -> Result<DisplayFile, crate::error::UiError> {
                     PropValue::Rect(Rect::new(indent * 8, 0, 220, 22)),
                 );
                 let parent_path = stack.last().map(|(_, p)| p.clone()).unwrap_or_default();
-                push_child(&mut root, &parent_path, node);
+                let index = push_child(&mut root, &parent_path, node);
+                let mut path = parent_path;
+                path.push(index);
+                last_channel = Some(path);
+            }
+            "ALIAS" | "FORCEPV" | "SEVRPV" => {
+                let value = parts.next().unwrap_or("").to_string();
+                if let Some(path) = &last_channel {
+                    if let Some(node) = node_at(&mut root, path) {
+                        let key = match keyword {
+                            "ALIAS" => "alias",
+                            "FORCEPV" => "forcePv",
+                            _ => "sevrPv",
+                        };
+                        node.set_prop(key, PropValue::String(value));
+                    }
+                }
             }
             _ => {}
         }

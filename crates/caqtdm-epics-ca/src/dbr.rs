@@ -41,6 +41,10 @@ pub struct Record {
     /// Extra elements after [`Record::value`]. Empty means a scalar.
     pub waveform: Vec<f64>,
     pub enum_strings: Vec<String>,
+    /// Native DBR the soft IOC advertises on create-channel. `DBR_DOUBLE` by default.
+    pub native: u16,
+    /// Scalar string payload. Numeric records leave this empty.
+    pub text: String,
 }
 
 impl Record {
@@ -67,6 +71,8 @@ impl Record {
             generation: 1,
             waveform: Vec::new(),
             enum_strings: Vec::new(),
+            native: DBR_DOUBLE,
+            text: String::new(),
         }
     }
 
@@ -175,7 +181,11 @@ pub fn encode_dbr(record: &Record, dbr: u16, count: u32) -> Result<Vec<u8>, CaEr
     write_meta(&mut buf, record, dbr);
     let native = native_of(dbr);
     for index in 0..count {
-        write_native(&mut buf, native, record.element(index));
+        if native == DBR_STRING {
+            write_string(&mut buf, &string_at(record, index));
+        } else {
+            write_native(&mut buf, native, record.element(index));
+        }
     }
     Ok(buf)
 }
@@ -423,16 +433,30 @@ fn write_units(buf: &mut Vec<u8>, units: &str) {
     buf.extend_from_slice(&raw);
 }
 
+fn string_at(record: &Record, index: usize) -> String {
+    if index == 0 && !record.text.is_empty() {
+        record.text.clone()
+    } else {
+        let value = record.element(index);
+        if value.fract() == 0.0 && value.abs() < 1e15 {
+            format!("{}", value as i64)
+        } else {
+            format!("{value}")
+        }
+    }
+}
+
+fn write_string(buf: &mut Vec<u8>, text: &str) {
+    let mut raw = [0u8; MAX_STRING];
+    let bytes = text.as_bytes();
+    let n = bytes.len().min(MAX_STRING - 1);
+    raw[..n].copy_from_slice(&bytes[..n]);
+    buf.extend_from_slice(&raw);
+}
+
 fn write_native(buf: &mut Vec<u8>, native: u16, value: f64) {
     match native {
-        DBR_STRING => {
-            let mut raw = [0u8; MAX_STRING];
-            let text = format!("{value}");
-            let bytes = text.as_bytes();
-            let n = bytes.len().min(MAX_STRING - 1);
-            raw[..n].copy_from_slice(&bytes[..n]);
-            buf.extend_from_slice(&raw);
-        }
+        DBR_STRING => write_string(buf, &format!("{value}")),
         DBR_SHORT | DBR_ENUM => buf.extend_from_slice(&(value as i16).to_be_bytes()),
         DBR_FLOAT => buf.extend_from_slice(&(value as f32).to_be_bytes()),
         DBR_CHAR => buf.push(value as u8),
@@ -495,6 +519,18 @@ fn unpad(bytes: &[u8]) -> String {
 /// Decode a native write payload into a number.
 pub fn decode_put(bytes: &[u8], native: u16) -> Result<f64, CaError> {
     Ok(read_native(bytes, native)?.as_f64().unwrap_or(0.0))
+}
+
+/// Decode `count` native elements from a write payload.
+pub fn decode_puts(bytes: &[u8], native: u16, count: u32) -> Result<Vec<f64>, CaError> {
+    let size = value_size(native).max(1);
+    let count = count.max(1) as usize;
+    let mut out = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = index * size;
+        out.push(decode_put(bytes.get(start..).unwrap_or(&[]), native)?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

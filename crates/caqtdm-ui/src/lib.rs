@@ -17,7 +17,7 @@ pub use expand::expand_includes;
 pub use model::{
     assign_geometry, CustomWidget, DisplayFile, LayoutItem, LayoutNode, SourceFormat, WidgetNode,
 };
-pub use search::SearchPath;
+pub use search::{fetch_http, SearchPath};
 
 use std::path::Path;
 

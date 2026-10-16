@@ -1,9 +1,9 @@
-//! In-process PV Access peer for search plus scalar GET, PUT, and MONITOR.
+//! In-process PV Access peer for search, scalar GET/PUT/MONITOR, and NTScalar.
 //!
-//! The search reply is the pvxs SEARCH_RESPONSE shape. The TCP operations
-//! are the scalar subset documented in [`crate::proto`]: a status byte, a
-//! type code, and a little-endian double. This is enough for the display
-//! manager and for tests. It is not an NTScalar introspection server.
+//! The search reply is the pvxs SEARCH_RESPONSE shape. A GET or PUT whose
+//! subcommand is `SUB_GET` (or a short scalar body) still uses the scalar
+//! encoding. A GET with `SUB_INIT`, and a PUT whose body starts with the
+//! `epics:nt/NTScalar:1.0` field description, carry NTScalar on the wire.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -12,14 +12,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::ntscalar::{
+    decode_values, encode_full_bitset, encode_introspection, encode_values, NtScalar,
+};
 use crate::proto::{
     create_channel_response, decode_create_request, decode_scalar_body, decode_search_payload,
     frame, scalar_body, search_response, split_frame, PvaError, CMD_CREATE_CHANNEL, CMD_ECHO,
-    CMD_GET, CMD_MONITOR, CMD_PUT, CMD_SEARCH, SUB_DATA,
+    CMD_GET, CMD_MONITOR, CMD_PUT, CMD_SEARCH, SUB_DATA, SUB_INIT,
 };
 
 struct Record {
     value: f64,
+    severity: i32,
+    status: i32,
+    message: String,
+    seconds: i64,
+    nanoseconds: i32,
+    user_tag: i32,
     generation: u64,
 }
 
@@ -54,6 +63,12 @@ impl PvaServer {
                 name.to_string(),
                 Record {
                     value,
+                    severity: 0,
+                    status: 0,
+                    message: String::new(),
+                    seconds: 0,
+                    nanoseconds: 0,
+                    user_tag: 0,
                     generation: 1,
                 },
             );
@@ -188,19 +203,24 @@ fn handle(
             Ok(Some(create_channel_response(cid, sid)))
         }
         CMD_GET => {
-            let (sid, ioid, _sub, _) = split_op(payload)?;
-            let value = value_of(db, sid).unwrap_or(0.0);
-            Ok(Some(op_reply(
-                CMD_GET,
-                sid,
-                ioid,
-                _sub,
-                &scalar_body(value),
-            )))
+            let (sid, ioid, sub, _) = split_op(payload)?;
+            let body = if sub & SUB_INIT != 0 {
+                nt_body(&nt_of(db, sid))
+            } else {
+                scalar_body(value_of(db, sid).unwrap_or(0.0))
+            };
+            Ok(Some(op_reply(CMD_GET, sid, ioid, sub, &body)))
         }
         CMD_PUT => {
             let (sid, ioid, sub, extra) = split_op(payload)?;
-            if let Ok(value) = decode_scalar_body(extra) {
+            if let Some(nt) = nt_from_extra(extra) {
+                let mut db = db.lock().expect("pva db");
+                if let Some(name) = db.by_sid.get(&sid).cloned() {
+                    if let Some(record) = db.records.get_mut(&name) {
+                        apply_nt(record, &nt);
+                    }
+                }
+            } else if let Ok(value) = decode_scalar_body(extra) {
                 let mut db = db.lock().expect("pva db");
                 if let Some(name) = db.by_sid.get(&sid).cloned() {
                     if let Some(record) = db.records.get_mut(&name) {
@@ -233,6 +253,59 @@ fn handle(
         }
         _ => Ok(None),
     }
+}
+
+fn apply_nt(record: &mut Record, nt: &NtScalar) {
+    record.value = nt.value;
+    record.severity = nt.severity;
+    record.status = nt.status;
+    record.message = nt.message.clone();
+    record.seconds = nt.seconds;
+    record.nanoseconds = nt.nanoseconds;
+    record.user_tag = nt.user_tag;
+    record.generation = record.generation.wrapping_add(1);
+}
+
+fn nt_of(db: &Mutex<Database>, sid: u32) -> NtScalar {
+    let db = db.lock().expect("pva db");
+    let record = db.by_sid.get(&sid).and_then(|name| db.records.get(name));
+    match record {
+        Some(record) => NtScalar {
+            value: record.value,
+            severity: record.severity,
+            status: record.status,
+            message: record.message.clone(),
+            seconds: record.seconds,
+            nanoseconds: record.nanoseconds,
+            user_tag: record.user_tag,
+        },
+        None => NtScalar {
+            value: 0.0,
+            severity: 3,
+            status: 0,
+            message: "missing".into(),
+            seconds: 0,
+            nanoseconds: 0,
+            user_tag: 0,
+        },
+    }
+}
+
+fn nt_body(value: &NtScalar) -> Vec<u8> {
+    let mut body = encode_introspection();
+    body.extend_from_slice(&encode_full_bitset());
+    body.extend_from_slice(&encode_values(value));
+    body
+}
+
+fn nt_from_extra(extra: &[u8]) -> Option<NtScalar> {
+    let intro = encode_introspection();
+    if extra.len() <= intro.len() || extra.get(..intro.len()) != Some(intro.as_slice()) {
+        return None;
+    }
+    let rest = &extra[intro.len()..];
+    let size = *rest.first()? as usize;
+    decode_values(rest.get(1 + size..)?).ok()
 }
 
 fn value_of(db: &Mutex<Database>, sid: u32) -> Option<f64> {

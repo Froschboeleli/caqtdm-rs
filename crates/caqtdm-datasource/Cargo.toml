@@ -9,3 +9,8 @@ description = "Control-system plugins for the caQtDM Rust rewrite"
 
 [dependencies]
 caqtdm-core.workspace = true
+aes = "0.8"
+cbc = "0.1"
+cipher = "0.4"
+hmac = "0.12"
+sha2 = "0.10"

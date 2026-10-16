@@ -89,6 +89,9 @@ fn widget_from_adl(object: &Node) -> WidgetNode {
         "byte" => ("caByte", None),
         "image" => ("caImage", None),
         "composite" => ("caFrame", None),
+        "scale" => ("caLinearGauge", None),
+        "bar monitor" => ("caThermo", None),
+        "dynamic symbol" => ("caGraphics", None),
         _ => ("caGraphics", None),
     };
     let mut node = WidgetNode::new(class_name, unique_name(&object.name));
@@ -175,7 +178,55 @@ fn widget_from_adl(object: &Node) -> WidgetNode {
             PropValue::String(points.replace(['(', ')'], "").replace(' ', ";")),
         );
     }
+    if class_name == "caImage" {
+        if let Some(file) = scalar(object, "image name").or_else(|| scalar(object, "name")) {
+            node.set_prop("filename", PropValue::String(file.to_string()));
+        }
+    }
+    for field in &object.fields {
+        if let Value::Group(child) = &field.value {
+            if is_adl_widget(&child.name) {
+                node.children.push(widget_from_adl(child));
+            }
+        }
+    }
     node
+}
+
+fn is_adl_widget(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "text"
+            | "rectangle"
+            | "oval"
+            | "circle"
+            | "arc"
+            | "line"
+            | "triangle"
+            | "arrow"
+            | "polyline"
+            | "polygon"
+            | "related display"
+            | "shell command"
+            | "message button"
+            | "menu"
+            | "choice button"
+            | "text entry"
+            | "text update"
+            | "valuator"
+            | "wheel switch"
+            | "meter"
+            | "bar"
+            | "indicator"
+            | "strip chart"
+            | "cartesian plot"
+            | "byte"
+            | "image"
+            | "composite"
+            | "scale"
+            | "dynamic symbol"
+            | "bar monitor"
+    )
 }
 
 fn apply_basic(node: &mut WidgetNode, object: &Node) {

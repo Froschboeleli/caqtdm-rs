@@ -98,6 +98,33 @@ pub struct BsMessage {
     pub value: f64,
 }
 
+pub fn bsread_parts(message: &BsMessage) -> [Vec<u8>; 3] {
+    let main = format!(
+        "{{\"htype\":\"bsr_m-1.1\",\"pulse_id\":{}}}",
+        message.pulse_id
+    );
+    let data_header = format!(
+        "{{\"htype\":\"bsr_d-1.1\",\"channels\":[{{\"name\":\"{}\",\"type\":\"float64\"}}]}}",
+        message.channel
+    );
+    [
+        main.into_bytes(),
+        data_header.into_bytes(),
+        message.value.to_le_bytes().to_vec(),
+    ]
+}
+
+pub fn decode_bsread_parts(parts: &[Vec<u8>]) -> Result<BsMessage, DsError> {
+    if parts.len() < 3 {
+        return Err(DsError::new("bsread multipart is short"));
+    }
+    let mut packed = Vec::new();
+    for part in parts.iter().take(3) {
+        push_part(&mut packed, part);
+    }
+    decode_bsread(&packed)
+}
+
 pub fn encode_bsread(message: &BsMessage) -> Vec<u8> {
     let main = format!(
         "{{\"htype\":\"bsr_m-1.1\",\"pulse_id\":{}}}",

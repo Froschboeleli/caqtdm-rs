@@ -84,6 +84,19 @@ impl Image {
         }
     }
 
+    pub fn stroke_circle(&mut self, cx: i32, cy: i32, radius: i32, color: Color) {
+        let r2 = radius * radius;
+        let inner = (radius - 1).max(0) * (radius - 1).max(0);
+        for y in cy - radius..=cy + radius {
+            for x in cx - radius..=cx + radius {
+                let d = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+                if d <= r2 && d >= inner {
+                    self.put(x, y, color);
+                }
+            }
+        }
+    }
+
     pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
         let mut x = x0;
         let mut y = y0;
@@ -230,6 +243,7 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             y_min,
             y_max,
             x_ticks,
+            cursors,
         } => {
             paint_plot(
                 image,
@@ -243,8 +257,15 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                     y_min: *y_min,
                     y_max: *y_max,
                     x_ticks: *x_ticks,
+                    cursors,
                 },
             );
+        }
+        VisualKind::Clock { analog: true } => {
+            let cx = rect.x + rect.width / 2;
+            let cy = rect.y + rect.height / 2;
+            let radius = (rect.width.min(rect.height) / 2 - 2).max(2);
+            image.stroke_circle(cx, cy, radius, visual.foreground);
         }
         VisualKind::Tabs { labels, current } => {
             paint_tabs(image, rect, visual, labels, *current);
@@ -305,6 +326,12 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 image.text(rect.x + 2, y, &ch.to_string(), visual.foreground);
                 y += visual.font_px.max(8);
             }
+        } else if visual.text.contains('\n') {
+            let mut y = rect.y + 2;
+            for line in visual.text.lines().take(8) {
+                image.text(rect.x + 2, y, line, visual.foreground);
+                y += visual.font_px.max(8);
+            }
         } else {
             image.text(rect.x + 2, rect.y + 2, &visual.text, visual.foreground);
         }
@@ -319,6 +346,7 @@ struct PlotPaint<'a> {
     y_min: f64,
     y_max: f64,
     x_ticks: u32,
+    cursors: &'a [f64],
 }
 
 fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotPaint<'_>) {
@@ -367,6 +395,16 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             series_color(index, visual.foreground),
             plot_paint.y_min,
             plot_paint.y_max,
+        );
+    }
+    for cursor in plot_paint.cursors {
+        let x = plot.x + (cursor.clamp(0.0, 1.0) * f64::from(plot.width - 1)) as i32;
+        image.line(
+            x,
+            plot.y,
+            x,
+            plot.y + plot.height - 1,
+            Color::rgb(220, 40, 40),
         );
     }
 }
@@ -615,5 +653,35 @@ mod tests {
         let image = paint(&[picture]);
         assert_eq!(image.pixel(0, 0).unwrap().r, 255);
         assert_eq!(image.pixel(1, 0).unwrap().b, 255);
+    }
+
+    #[test]
+    fn plot_cursor_and_analog_clock_are_drawn() {
+        let mut plot = visual(
+            VisualKind::Plot {
+                series: vec![vec![0.0, 10.0]],
+                title: "t".into(),
+                title_x: String::new(),
+                title_y: String::new(),
+                y_min: 0.0,
+                y_max: 10.0,
+                x_ticks: 2,
+                cursors: vec![0.0],
+            },
+            "",
+            Color::rgb(0, 180, 0),
+        );
+        plot.rect = Rect::new(0, 0, 80, 60);
+        plot.class_name = "caCartesianPlot".into();
+        let mut clock = visual(
+            VisualKind::Clock { analog: true },
+            "",
+            Color::rgb(0, 180, 0),
+        );
+        clock.rect = Rect::new(0, 70, 20, 20);
+        clock.class_name = "caClock".into();
+        let image = paint(&[plot, clock]);
+        assert_eq!(image.pixel(4, 30).unwrap().r, 220);
+        assert!(image.pixel(10, 72).unwrap().g > 100);
     }
 }

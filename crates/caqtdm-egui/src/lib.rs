@@ -105,7 +105,7 @@ impl eframe::App for Viewer {
             if response.clicked() || response.drag_stopped() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(hit) = hit_test(&visuals, pos) {
-                        self.handle(hit, pos);
+                        self.handle(hit, pos, response.drag_stopped());
                     }
                 }
             }
@@ -114,7 +114,7 @@ impl eframe::App for Viewer {
 }
 
 impl Viewer {
-    fn handle(&mut self, visual: Visual, pos: egui::Pos2) {
+    fn handle(&mut self, visual: Visual, pos: egui::Pos2, dragged: bool) {
         let action = match &visual.kind {
             VisualKind::Bits { value, count, .. } if visual.class_name == "caByteController" => {
                 Action::SetNumber {
@@ -126,6 +126,28 @@ impl Viewer {
                         visual.rect.x,
                         visual.rect.width,
                     ),
+                }
+            }
+            VisualKind::Plot { y_min, y_max, .. } => {
+                if dragged {
+                    let (lo, hi) = if y_max > y_min {
+                        (*y_min, *y_max)
+                    } else {
+                        (0.0, 100.0)
+                    };
+                    let span = visual.rect.height.max(1) as f32;
+                    let fraction = ((pos.y - visual.rect.y as f32) / span).clamp(0.0, 1.0) as f64;
+                    let mid = lo + (hi - lo) * (1.0 - fraction);
+                    let half = (hi - lo) / 4.0;
+                    Action::Zoom {
+                        id: visual.id,
+                        y_min: mid - half,
+                        y_max: mid + half,
+                    }
+                } else {
+                    let span = visual.rect.width.max(1) as f32;
+                    let at = ((pos.x - visual.rect.x as f32) / span).clamp(0.0, 1.0) as f64;
+                    Action::PlaceCursor { id: visual.id, at }
                 }
             }
             VisualKind::Slider { min, max, .. } => {

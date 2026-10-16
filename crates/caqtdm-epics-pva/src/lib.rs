@@ -1,10 +1,10 @@
 //! PV Access support for the display manager.
 //!
 //! Search frames match the pvxs byte layout (header, size-prefixed strings,
-//! wildcard address of 16 zero bytes). GET, PUT, and MONITOR still use a
-//! small scalar body so the existing loopback stays stable. `ntscalar`
-//! encodes the pvData `epics:nt/NTScalar:1.0` field description and its
-//! leaf values. `epics-pva-rs` is edition 2024 and is not linked.
+//! wildcard address of 16 zero bytes). Scalar GET, PUT, and MONITOR stay on
+//! the small scalar body. `get_nt` and `put_nt` put
+//! `epics:nt/NTScalar:1.0` on the wire. `epics-pva-rs` is edition 2024 and
+//! is not linked.
 
 mod client;
 mod ntscalar;

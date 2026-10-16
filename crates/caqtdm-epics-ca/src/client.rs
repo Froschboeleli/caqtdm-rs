@@ -1,7 +1,8 @@
-//! Blocking Channel Access client for the scalar subset.
+//! Blocking Channel Access client.
 //!
-//! Search is one UDP round trip. The TCP session then creates the channel,
-//! reads `DBR_CTRL_DOUBLE`, writes a native double, and subscribes with
+//! Search is one UDP round trip. The TCP session creates the channel, then
+//! reads, writes, and subscribes with the DBR type the caller asks for.
+//! The convenience methods still use `DBR_CTRL_DOUBLE`, native double, and
 //! `DBR_TIME_DOUBLE`.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -11,7 +12,10 @@ use std::time::Duration;
 
 use caqtdm_core::ChannelData;
 
-use crate::dbr::{decode_dbr, DBR_CTRL_DOUBLE, DBR_DOUBLE, DBR_TIME_DOUBLE};
+use crate::dbr::{
+    decode_dbr, encode_dbr, native_of, Record, DBR_CTRL_DOUBLE, DBR_DOUBLE, DBR_STRING,
+    DBR_TIME_DOUBLE,
+};
 use crate::protocol::{
     decode_search_reply, search_message, take_message, version_message, CaError, CaHeader,
     ACCESS_READ, CMD_ACCESS_RIGHTS, CMD_CREATE_CHAN, CMD_CREATE_CH_FAIL, CMD_EVENT_ADD,
@@ -122,11 +126,15 @@ impl CaClient {
     }
 
     pub fn read(&mut self, name: &str) -> Result<ChannelData, CaError> {
+        self.read_dbr(name, DBR_CTRL_DOUBLE, 1)
+    }
+
+    pub fn read_dbr(&mut self, name: &str, dbr: u16, count: u32) -> Result<ChannelData, CaError> {
         let sid = self.sid(name)?;
         let ioid = self.alloc_ioid();
         let mut header = CaHeader::new(CMD_READ_NOTIFY);
-        header.data_type = DBR_CTRL_DOUBLE;
-        header.count = 1;
+        header.data_type = dbr;
+        header.count = count.max(1);
         header.cid = sid;
         header.available = ioid;
         self.write_msg(header, &[])?;
@@ -142,24 +150,56 @@ impl CaClient {
     }
 
     pub fn write_double(&mut self, name: &str, value: f64) -> Result<(), CaError> {
+        self.write_values(name, DBR_DOUBLE, &[value])
+    }
+
+    pub fn write_values(&mut self, name: &str, dbr: u16, values: &[f64]) -> Result<(), CaError> {
+        let native = native_of(dbr);
+        let mut payload = Vec::new();
+        for value in values {
+            let record = Record::new("", *value);
+            payload.extend(encode_dbr(&record, native, 1)?);
+        }
+        self.write_payload(name, native, values.len().max(1) as u32, &payload)
+    }
+
+    pub fn write_text(&mut self, name: &str, text: &str) -> Result<(), CaError> {
+        let mut raw = [0u8; 40];
+        let bytes = text.as_bytes();
+        let n = bytes.len().min(39);
+        raw[..n].copy_from_slice(&bytes[..n]);
+        self.write_payload(name, DBR_STRING, 1, &raw)
+    }
+
+    fn write_payload(
+        &mut self,
+        name: &str,
+        dbr: u16,
+        count: u32,
+        payload: &[u8],
+    ) -> Result<(), CaError> {
         let sid = self.sid(name)?;
         let ioid = self.alloc_ioid();
         let mut header = CaHeader::new(CMD_WRITE_NOTIFY);
-        header.data_type = DBR_DOUBLE;
-        header.count = 1;
+        header.data_type = dbr;
+        header.count = count;
         header.cid = sid;
         header.available = ioid;
-        self.write_msg(header, &value.to_be_bytes())?;
+        self.write_msg(header, payload)?;
         let _ = self.read_matching(|h| h.command == CMD_WRITE_NOTIFY && h.available == ioid)?;
         Ok(())
     }
 
     pub fn subscribe(&mut self, name: &str) -> Result<u32, CaError> {
+        self.subscribe_dbr(name, DBR_TIME_DOUBLE, 1)
+    }
+
+    pub fn subscribe_dbr(&mut self, name: &str, dbr: u16, count: u32) -> Result<u32, CaError> {
         let sid = self.sid(name)?;
         let sub_id = self.alloc_ioid();
         let mut header = CaHeader::new(CMD_EVENT_ADD);
-        header.data_type = DBR_TIME_DOUBLE;
-        header.count = 1;
+        header.data_type = dbr;
+        header.count = count.max(1);
         header.cid = sid;
         header.available = sub_id;
         self.write_msg(

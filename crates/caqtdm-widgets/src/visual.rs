@@ -63,6 +63,8 @@ pub enum VisualKind {
         y_min: f64,
         y_max: f64,
         x_ticks: u32,
+        /// Horizontal cursor positions as fractions of the plot width, 0 to 1.
+        cursors: Vec<f64>,
     },
     Waterfall {
         rows: Vec<Vec<f64>>,
@@ -134,8 +136,30 @@ pub enum Effect {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    Press { id: u32 },
-    SetNumber { id: u32, value: f64 },
-    SetText { id: u32, text: String },
-    Choose { id: u32, index: usize },
+    Press {
+        id: u32,
+    },
+    SetNumber {
+        id: u32,
+        value: f64,
+    },
+    SetText {
+        id: u32,
+        text: String,
+    },
+    Choose {
+        id: u32,
+        index: usize,
+    },
+    /// Rubber-band zoom. Replaces the plot's Y window until the next zoom.
+    Zoom {
+        id: u32,
+        y_min: f64,
+        y_max: f64,
+    },
+    /// Drop a vertical cursor. `at` is a fraction of the plot width.
+    PlaceCursor {
+        id: u32,
+        at: f64,
+    },
 }

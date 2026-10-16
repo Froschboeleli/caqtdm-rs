@@ -1,14 +1,22 @@
-//! Blocking client for the scalar PV Access subset.
+//! Blocking PV Access client.
+//!
+//! [`PvaClient::get`] and [`PvaClient::put`] keep the scalar body. [`PvaClient::get_nt`]
+//! asks for an `epics:nt/NTScalar:1.0` field description, and [`PvaClient::put_nt`]
+//! sends that description plus the leaf values.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
 
+use crate::ntscalar::{
+    decode_introspection, decode_values, encode_full_bitset, encode_introspection, encode_values,
+    NtScalar,
+};
 use crate::proto::{
     create_channel_request, decode_header, decode_scalar_body, decode_search_response, op_request,
     scalar_body, search_frame, split_frame, PvaError, CMD_CREATE_CHANNEL, CMD_GET, CMD_MONITOR,
-    CMD_PUT, SUB_GET,
+    CMD_PUT, SUB_GET, SUB_INIT,
 };
 
 pub struct PvaClient {
@@ -90,6 +98,44 @@ impl PvaClient {
         let (_cmd, payload) =
             self.read_matching(|cmd, payload| cmd == CMD_GET && ioid_of(payload) == Some(ioid))?;
         decode_scalar_body(&payload[9..])
+    }
+
+    /// GET with `SUB_INIT`. The reply is the NTScalar introspection, a bitset, and leaf values.
+    pub fn get_nt(&mut self, name: &str) -> Result<NtScalar, PvaError> {
+        let sid = self.sid(name)?;
+        let ioid = self.alloc();
+        self.stream
+            .write_all(&op_request(CMD_GET, sid, ioid, SUB_INIT, &[]))?;
+        let (_cmd, payload) =
+            self.read_matching(|cmd, payload| cmd == CMD_GET && ioid_of(payload) == Some(ioid))?;
+        let body = payload.get(9..).unwrap_or(&[]);
+        decode_introspection(body)?;
+        let intro = encode_introspection();
+        if body.len() < intro.len() || &body[..intro.len()] != intro.as_slice() {
+            return Err(PvaError::new("GET reply is not NTScalar"));
+        }
+        let rest = &body[intro.len()..];
+        let size = *rest
+            .first()
+            .ok_or_else(|| PvaError::new("NTScalar bitset missing"))? as usize;
+        decode_values(
+            rest.get(1 + size..)
+                .ok_or_else(|| PvaError::new("NTScalar values missing"))?,
+        )
+    }
+
+    /// PUT an NTScalar field description and its leaf values.
+    pub fn put_nt(&mut self, name: &str, value: &NtScalar) -> Result<(), PvaError> {
+        let sid = self.sid(name)?;
+        let ioid = self.alloc();
+        let mut extra = encode_introspection();
+        extra.extend_from_slice(&encode_full_bitset());
+        extra.extend_from_slice(&encode_values(value));
+        self.stream
+            .write_all(&op_request(CMD_PUT, sid, ioid, 0, &extra))?;
+        let _ =
+            self.read_matching(|cmd, payload| cmd == CMD_PUT && ioid_of(payload) == Some(ioid))?;
+        Ok(())
     }
 
     pub fn put(&mut self, name: &str, value: f64) -> Result<(), PvaError> {

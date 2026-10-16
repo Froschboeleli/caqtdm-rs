@@ -7,6 +7,9 @@ members = [
     "crates/caqtdm-epics-ca",
     "crates/caqtdm-epics-pva",
     "crates/caqtdm-widgets",
+    "crates/caqtdm-paint",
+    "crates/caqtdm-plugin",
+    "crates/caqtdm-plugin-example",
 ]
 
 [workspace.package]
@@ -25,3 +28,5 @@ caqtdm-datasource = { path = "crates/caqtdm-datasource" }
 caqtdm-epics-ca = { path = "crates/caqtdm-epics-ca" }
 caqtdm-epics-pva = { path = "crates/caqtdm-epics-pva" }
 caqtdm-widgets = { path = "crates/caqtdm-widgets" }
+caqtdm-paint = { path = "crates/caqtdm-paint" }
+caqtdm-plugin = { path = "crates/caqtdm-plugin" }

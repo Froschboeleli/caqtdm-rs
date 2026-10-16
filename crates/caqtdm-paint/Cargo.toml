@@ -1,0 +1,12 @@
+[package]
+name = "caqtdm-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Software rasterizer for caQtDM visuals"
+
+[dependencies]
+caqtdm-core.workspace = true
+caqtdm-widgets.workspace = true

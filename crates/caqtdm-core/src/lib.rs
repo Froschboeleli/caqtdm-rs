@@ -21,5 +21,5 @@ pub use color::{alarm_color, medm_color, Color};
 pub use format::{format_number, FormatType};
 pub use geometry::{Point, Rect, Size};
 pub use macros::{apply_macros, parse_macro_list, MacroMap};
-pub use property::PropValue;
+pub use property::{FontSpec, PropValue};
 pub use value::{ChannelData, Limits, PutValue, PvValue};

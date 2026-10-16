@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/caqtdm-core",
+    "crates/caqtdm-ui",
 ]
 
 [workspace.package]
@@ -15,3 +16,4 @@ rust-version = "1.85"
 thiserror = "2"
 regex = "1"
 caqtdm-core = { path = "crates/caqtdm-core" }
+caqtdm-ui = { path = "crates/caqtdm-ui" }

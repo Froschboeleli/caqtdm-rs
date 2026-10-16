@@ -1,0 +1,12 @@
+[package]
+name = "caqtdm-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parsers for caQtDM display files: Qt .ui, MEDM .adl, EDM .edl, alarm-handler .alh, and .prc grids."
+rust-version.workspace = true
+
+[dependencies]
+caqtdm-core.workspace = true
+quick-xml = "0.37"
+thiserror.workspace = true

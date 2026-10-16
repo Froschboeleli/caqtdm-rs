@@ -39,8 +39,8 @@ pub fn parse_adl(text: &str) -> Result<DisplayFile, UiError> {
     for object in objects {
         if object.name == "display" || object.name == "file" {
             apply_display(&mut root, &object);
-        } else {
-            root.children.push(widget_from_adl(&object));
+        } else if let Some(widget) = widget_from_adl(&object) {
+            root.children.push(widget);
         }
     }
     Ok(DisplayFile {
@@ -66,34 +66,9 @@ fn apply_display(root: &mut WidgetNode, object: &Node) {
     }
 }
 
-fn widget_from_adl(object: &Node) -> WidgetNode {
+fn widget_from_adl(object: &Node) -> Option<WidgetNode> {
     let kind = object.name.to_ascii_lowercase();
-    let (class_name, form) = match kind.as_str() {
-        "text" => ("caLabel", None),
-        "rectangle" | "oval" | "circle" | "arc" | "line" | "triangle" | "arrow" => {
-            ("caGraphics", Some(kind.as_str()))
-        }
-        "polyline" | "polygon" => ("caPolyLine", None),
-        "related display" => ("caRelatedDisplay", None),
-        "shell command" => ("caShellCommand", None),
-        "message button" => ("caMessageButton", None),
-        "menu" => ("caMenu", None),
-        "choice button" => ("caChoice", None),
-        "text entry" => ("caTextEntry", None),
-        "text update" => ("caLineEdit", None),
-        "valuator" | "wheel switch" => ("caSlider", None),
-        "meter" => ("caMeter", None),
-        "bar" | "indicator" => ("caThermo", None),
-        "strip chart" => ("caStripPlot", None),
-        "cartesian plot" => ("caCartesianPlot", None),
-        "byte" => ("caByte", None),
-        "image" => ("caImage", None),
-        "composite" => ("caFrame", None),
-        "scale" => ("caLinearGauge", None),
-        "bar monitor" => ("caThermo", None),
-        "dynamic symbol" => ("caGraphics", None),
-        _ => ("caGraphics", None),
-    };
+    let (class_name, form) = adl_class(&kind)?;
     let mut node = WidgetNode::new(class_name, unique_name(&object.name));
     if let Some(group) = group(object, "object") {
         node.set_prop("geometry", PropValue::Rect(rect_from(group)));
@@ -126,7 +101,9 @@ fn widget_from_adl(object: &Node) -> WidgetNode {
         for field in &object.fields {
             if let Value::Group(child) = &field.value {
                 if group(child, "object").is_some() && child.name != "object" {
-                    node.children.push(widget_from_adl(child));
+                    if let Some(child) = widget_from_adl(child) {
+                        node.children.push(child);
+                    }
                 }
             }
         }
@@ -186,11 +163,44 @@ fn widget_from_adl(object: &Node) -> WidgetNode {
     for field in &object.fields {
         if let Value::Group(child) = &field.value {
             if is_adl_widget(&child.name) {
-                node.children.push(widget_from_adl(child));
+                if let Some(child) = widget_from_adl(child) {
+                    node.children.push(child);
+                }
             }
         }
     }
-    node
+    Some(node)
+}
+
+/// MEDM objects from `parseFuncTable`, plus the composite children caQtDM
+/// still draws. A name that is not in that set is skipped. Upstream's
+/// `getNextElement` returns null for it and does not emit a widget.
+fn adl_class(kind: &str) -> Option<(&'static str, Option<&str>)> {
+    Some(match kind {
+        "text" => ("caLabel", None),
+        "rectangle" | "oval" | "circle" | "arc" | "line" | "triangle" | "arrow" => {
+            ("caGraphics", Some(kind))
+        }
+        "polyline" | "polygon" | "falling line" | "rising line" => ("caPolyLine", None),
+        "related display" => ("caRelatedDisplay", None),
+        "shell command" => ("caShellCommand", None),
+        "message button" => ("caMessageButton", None),
+        "menu" => ("caMenu", None),
+        "choice button" | "button" => ("caChoice", None),
+        "text entry" => ("caTextEntry", None),
+        "text update" => ("caLineEdit", None),
+        "valuator" | "wheel switch" => ("caSlider", None),
+        "meter" => ("caMeter", None),
+        "bar" | "indicator" | "bar monitor" => ("caThermo", None),
+        "strip chart" => ("caStripPlot", None),
+        "cartesian plot" => ("caCartesianPlot", None),
+        "byte" => ("caByte", None),
+        "image" => ("caImage", None),
+        "composite" => ("caFrame", None),
+        "scale" => ("caLinearGauge", None),
+        "dynamic symbol" => ("caGraphics", None),
+        _ => return None,
+    })
 }
 
 fn is_adl_widget(name: &str) -> bool {
@@ -226,6 +236,9 @@ fn is_adl_widget(name: &str) -> bool {
             | "scale"
             | "dynamic symbol"
             | "bar monitor"
+            | "falling line"
+            | "rising line"
+            | "button"
     )
 }
 
@@ -397,14 +410,24 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_name(&mut self) -> Result<String, UiError> {
-        match self.bump().cloned() {
-            Some(Tok::String(s) | Tok::Ident(s)) => Ok(s),
-            other => Err(UiError::msg(format!(
-                "expected a name at token {}, got {other:?}, context {:?}",
-                self.pos,
-                &self.tokens[self.pos.saturating_sub(4)..self.tokens.len().min(self.pos + 4)]
-            ))),
+        let mut name = match self.bump().cloned() {
+            Some(Tok::String(s) | Tok::Ident(s)) => s,
+            other => {
+                return Err(UiError::msg(format!(
+                    "expected a name at token {}, got {other:?}, context {:?}",
+                    self.pos,
+                    &self.tokens[self.pos.saturating_sub(4)..self.tokens.len().min(self.pos + 4)]
+                )))
+            }
+        };
+        // MEDM object names such as "falling line" and "related display" are
+        // several words. A name ends at '=' or '{'.
+        while let Some(Tok::Ident(extra)) = self.tokens.get(self.pos).cloned() {
+            name.push(' ');
+            name.push_str(&extra);
+            self.pos += 1;
         }
+        Ok(name)
     }
 
     fn expect_lbrace(&mut self) -> Result<(), UiError> {

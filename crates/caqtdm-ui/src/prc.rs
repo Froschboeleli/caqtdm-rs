@@ -42,7 +42,8 @@ pub fn parse_prc(text: &str) -> Result<DisplayFile, crate::error::UiError> {
                 "geometry",
                 PropValue::Rect(Rect::new(8, 8 + row * 28, 360, 24)),
             );
-            if let Some(color) = flag_value(&parts, "-fg") {
+            if let Some(color) = flag_value(&parts, "-comfg").or_else(|| flag_value(&parts, "-fg"))
+            {
                 if let Some(c) = Color::parse(&color) {
                     label.set_prop("foreground", PropValue::Color(c));
                 }
@@ -50,12 +51,17 @@ pub fn parse_prc(text: &str) -> Result<DisplayFile, crate::error::UiError> {
             root.children.push(label);
         } else {
             let class_name = match kind.as_str() {
-                "formWrite" | "textWrite" => "caTextEntry",
-                "formButton" | "messageButton" => "caMessageButton",
-                "menu" | "formMenu" => "caMenu",
+                "formWrite" | "textWrite" | "text" | "entry" | "wheelSwitch" | "setRdbk"
+                | "mactrl" => "caTextEntry",
+                "formButton" | "messageButton" | "messagebutton" => "caMessageButton",
+                "menu" | "formMenu" | "menuButton" => "caMenu",
+                "choiceButton" => "caChoice",
                 "formLed" | "led" => "caLed",
                 "formSlider" | "slider" => "caSlider",
                 "formGauge" | "gauge" => "caMeter",
+                "binary" => "caToggleButton",
+                "bar" => "caThermo",
+                "separator" => "caGraphics",
                 _ => "caLineEdit",
             };
             let mut node = WidgetNode::new(class_name, format!("prc_{row}"));

@@ -27,7 +27,8 @@ pub struct Session {
     pending: BTreeMap<String, f64>,
     toggles: BTreeMap<String, bool>,
     tabs: BTreeMap<String, usize>,
-    zooms: BTreeMap<String, (f64, f64)>,
+    /// x fraction lo/hi, then y data lo/hi.
+    zooms: BTreeMap<String, (f64, f64, f64, f64)>,
     cursors: BTreeMap<String, Vec<f64>>,
     alarm_log: VecDeque<Vec<String>>,
     last_severity: BTreeMap<String, Severity>,
@@ -144,9 +145,19 @@ impl Session {
                 Vec::new()
             }
             Action::Choose { index, .. } => self.choose(&node, index),
-            Action::Zoom { y_min, y_max, .. } => {
-                self.zooms.insert(node.name.clone(), (y_min, y_max));
-                self.log.push(format!("zoom {} {y_min} {y_max}", node.name));
+            Action::Zoom {
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                ..
+            } => {
+                self.zooms
+                    .insert(node.name.clone(), (x_min, x_max, y_min, y_max));
+                self.log.push(format!(
+                    "zoom {} x {x_min} {x_max} y {y_min} {y_max}",
+                    node.name
+                ));
                 Vec::new()
             }
             Action::PlaceCursor { at, .. } => {
@@ -378,7 +389,9 @@ impl Session {
                     .is_some_and(|s| s.eq_ignore_ascii_case("Polygon")),
             },
             "caCartesianPlot" | "caStripPlot" => {
-                let (y_min, y_max) = self.zooms.get(&node.name).copied().unwrap_or((
+                let (x_min, x_max, y_min, y_max) = self.zooms.get(&node.name).copied().unwrap_or((
+                    0.0,
+                    1.0,
                     node.prop_f64("YaxisLimitsMin_1").unwrap_or(f64::NAN),
                     node.prop_f64("YaxisLimitsMax_1").unwrap_or(f64::NAN),
                 ));
@@ -387,6 +400,8 @@ impl Session {
                     title: node.prop_str("Title").unwrap_or("").to_string(),
                     title_x: node.prop_str("TitleX").unwrap_or("").to_string(),
                     title_y: node.prop_str("TitleY").unwrap_or("").to_string(),
+                    x_min,
+                    x_max,
                     y_min,
                     y_max,
                     x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
@@ -956,6 +971,8 @@ fn scan_kind(node: &WidgetNode, data: Option<&ChannelData>, width: u32, height: 
         title: node.prop_str("Title").unwrap_or("").to_string(),
         title_x: String::new(),
         title_y: String::new(),
+        x_min: 0.0,
+        x_max: 1.0,
         y_min: f64::NAN,
         y_max: f64::NAN,
         x_ticks: 2,

@@ -11,6 +11,7 @@
 //! bsread stand-ins.
 
 mod archive;
+mod archive_sites;
 mod bsread;
 mod env;
 mod error;
@@ -20,6 +21,7 @@ mod intern;
 mod modbus;
 mod opcua;
 mod opcua_bin;
+mod opcua_handshake;
 mod opcua_sec;
 mod pattern;
 mod sim;
@@ -29,6 +31,11 @@ mod zmtp;
 pub use archive::{
     build_archive_url, fetch_archiver, parse_archive_request, parse_archiver_json, parse_fixture,
     samples_to_json, serve_archiver, ArchiveRequest, ArchiveSample, ArchiveSource,
+};
+pub use archive_sites::{
+    apply_gmv, decode_gmv_reply, decode_gmv_request, encode_gmv_reply, encode_gmv_request,
+    fetch_gmv, gmv_window, hipa_query, parse_sf_response, post_sf, pro_query, serve_gmv, serve_sf,
+    sf_query, GmvQuery, GmvSample, SfSample, HIPA_HOST, PRO_HOST,
 };
 pub use bsread::{
     bsread_parts, decode_bsread, decode_bsread_parts, encode_bsread, fetch_bsread, serve_bsread,
@@ -50,12 +57,19 @@ pub use opcua_bin::{
     encode_read_request, read_node, serve_read, NodeId, READ_REQUEST, READ_RESPONSE, STATUS_GOOD,
     VARIANT_DOUBLE,
 };
+pub use opcua_handshake::{
+    client_finish, client_open, identity_named, p_sha256, public_from_cert, server_accept,
+    thumbprint, ChannelKeys, Identity,
+};
 pub use opcua_sec::{
     open as open_secure_chunk, seal as seal_secure_chunk, POLICY_BASIC256SHA256, POLICY_NONE,
 };
 pub use sim::SimSource;
 pub use source::{DataSource, Update};
-pub use zmtp::{greeting, parse_greeting, recv_bsread, send_bsread, serve_zmtp};
+pub use zmtp::{
+    greeting, greeting_for, mechanism_of, parse_greeting, recv_bsread, send_bsread,
+    send_bsread_curve, send_bsread_plain, serve_curve, serve_plain, serve_zmtp, CurveIdentity,
+};
 
 /// Register the plugins that do not need a network peer.
 ///

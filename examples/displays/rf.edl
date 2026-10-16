@@ -8,7 +8,7 @@ h 140
 title "RF"
 endScreenProperties
 
-object activeXTextClass
+object activeXTextDspClass
 beginObjectProperties
 major 4
 minor 0

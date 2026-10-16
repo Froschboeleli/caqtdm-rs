@@ -9,4 +9,9 @@ rust-version.workspace = true
 [dependencies]
 caqtdm-core.workspace = true
 quick-xml = "0.37"
+rustls = "0.23"
 thiserror.workspace = true
+
+[dev-dependencies]
+rcgen = "0.12"
+rustls = "0.23"

@@ -135,12 +135,18 @@ impl Viewer {
                     } else {
                         (0.0, 100.0)
                     };
-                    let span = visual.rect.height.max(1) as f32;
-                    let fraction = ((pos.y - visual.rect.y as f32) / span).clamp(0.0, 1.0) as f64;
-                    let mid = lo + (hi - lo) * (1.0 - fraction);
+                    let y_span = visual.rect.height.max(1) as f32;
+                    let y_fraction =
+                        ((pos.y - visual.rect.y as f32) / y_span).clamp(0.0, 1.0) as f64;
+                    let mid = lo + (hi - lo) * (1.0 - y_fraction);
                     let half = (hi - lo) / 4.0;
+                    let x_span = visual.rect.width.max(1) as f32;
+                    let x_fraction =
+                        ((pos.x - visual.rect.x as f32) / x_span).clamp(0.0, 1.0) as f64;
                     Action::Zoom {
                         id: visual.id,
+                        x_min: (x_fraction - 0.25).clamp(0.0, 1.0),
+                        x_max: (x_fraction + 0.25).clamp(0.0, 1.0),
                         y_min: mid - half,
                         y_max: mid + half,
                     }

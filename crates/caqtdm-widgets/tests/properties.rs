@@ -311,6 +311,8 @@ fn each_widget_honors_the_properties_an_author_sets() {
         .any(|line| line.contains("put intern://G = 1")));
     session.act(Action::Zoom {
         id: id("plot"),
+        x_min: 0.25,
+        x_max: 0.75,
         y_min: 1.0,
         y_max: 2.0,
     });
@@ -325,12 +327,14 @@ fn each_widget_honors_the_properties_an_author_sets() {
         .unwrap();
     match plot.kind {
         VisualKind::Plot {
+            x_min,
+            x_max,
             y_min,
             y_max,
             cursors,
             ..
         } => {
-            assert_eq!((y_min, y_max), (1.0, 2.0));
+            assert_eq!((x_min, x_max, y_min, y_max), (0.25, 0.75, 1.0, 2.0));
             assert_eq!(cursors, vec![0.25]);
         }
         other => panic!("{other:?}"),

@@ -168,7 +168,7 @@ endObjectProperties
 "#;
     let display = load_str(edl, Path::new("rf.edl")).unwrap();
     assert_eq!(display.root.rect.width, 320);
-    assert_eq!(display.root.count_class("caLineEdit"), 1);
+    assert_eq!(display.root.count_class("caLabel"), 1);
     assert_eq!(display.root.count_class("caRelatedDisplay"), 1);
     display.root.walk(&mut |w| {
         if w.class_name == "caRelatedDisplay" {
@@ -355,4 +355,158 @@ fn http_display_fetch() {
     });
     let text = caqtdm_ui::fetch_http(&format!("http://{addr}/panel.ui")).unwrap();
     assert_eq!(text, "hello");
+}
+
+#[test]
+fn unrecognized_medm_and_edm_objects_follow_upstream() {
+    let adl = r#"
+mystery {
+  object { x=1 y=1 width=8 height=8 }
+  textix="should not appear"
+}
+button {
+  object { x=0 y=0 width=40 height=16 }
+}
+falling line {
+  object { x=0 y=20 width=10 height=10 }
+}
+"#;
+    let display = load_str(adl, Path::new("odd.adl")).unwrap();
+    assert_eq!(display.root.children.len(), 2);
+    assert_eq!(display.root.count_class("caChoice"), 1);
+    assert_eq!(display.root.count_class("caPolyLine"), 1);
+    assert!(!display
+        .root
+        .children
+        .iter()
+        .any(|child| child.class_name == "caGraphics"));
+
+    let edl = r#"
+4 0 1
+beginScreenProperties
+w 200
+h 200
+endScreenProperties
+object activeXTextClass
+beginObjectProperties
+x 10
+y 12
+w 40
+h 16
+value {
+  "Hello"
+}
+endObjectProperties
+object notARealClass
+beginObjectProperties
+x 0
+y 0
+w 10
+h 10
+value "nope"
+endObjectProperties
+object activeMessageBoxClass
+beginObjectProperties
+x 0
+y 0
+w 10
+h 10
+endObjectProperties
+object activeExitButtonClass
+beginObjectProperties
+x 0
+y 30
+w 10
+h 10
+endObjectProperties
+object activeRadioButtonClass
+beginObjectProperties
+x 0
+y 40
+w 80
+h 40
+controlPv "RF:MODE"
+orientation 0
+endObjectProperties
+object ByteClass
+beginObjectProperties
+x 0
+y 80
+w 64
+h 16
+controlPv "RF:BITS"
+numBits 8
+endObjectProperties
+object activeLineClass
+beginObjectProperties
+x 4
+y 8
+w 20
+h 20
+lineColor index 14
+numPoints 2
+xPoints {
+0 4
+1 24
+}
+yPoints {
+0 8
+1 18
+}
+endObjectProperties
+"#;
+    let display = load_str(edl, Path::new("odd.edl")).unwrap();
+    assert_eq!(display.root.count_class("caLabel"), 1);
+    assert_eq!(display.root.children.len(), 4);
+    display.root.walk(&mut |node| {
+        if node.class_name == "caLabel" {
+            assert_eq!(node.prop_str("text"), Some("Hello"));
+        }
+        if node.class_name == "caByte" {
+            assert_eq!(node.prop_str("channel"), Some("RF:BITS"));
+        }
+        if node.class_name == "caPolyLine" {
+            assert_eq!(node.prop_str("xyPairs"), Some("0,0;20,10"));
+        }
+        if node.class_name == "caChoice" {
+            assert_eq!(node.prop_str("channel"), Some("RF:MODE"));
+        }
+    });
+}
+
+#[test]
+fn https_display_fetch_uses_rustls() {
+    use std::sync::Arc;
+
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::ServerConfig;
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert_der = cert.serialize_der().unwrap();
+    let key_der = cert.serialize_private_key_der();
+    let server_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(cert_der.clone())],
+            PrivateKeyDer::Pkcs8(key_der.into()),
+        )
+        .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = Arc::new(server_config);
+    std::thread::spawn(move || {
+        let (mut tcp, _) = listener.accept().unwrap();
+        let mut conn = rustls::ServerConnection::new(config).unwrap();
+        let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+        let _ = std::io::Read::read(&mut tls, &mut [0u8; 1024]);
+        let body = b"HTTP/1.0 200 OK\r\nContent-Length: 7\r\n\r\npanel-1";
+        let _ = std::io::Write::write_all(&mut tls, body);
+        let _ = std::io::Write::flush(&mut tls);
+    });
+    let text = caqtdm_ui::fetch_https(
+        &format!("https://localhost:{}/panel.ui", addr.port()),
+        &[cert_der.as_slice()],
+    )
+    .unwrap();
+    assert_eq!(text, "panel-1");
 }

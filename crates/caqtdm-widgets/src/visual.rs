@@ -60,6 +60,9 @@ pub enum VisualKind {
         title: String,
         title_x: String,
         title_y: String,
+        /// Sample-index window as fractions of the series, 0 to 1.
+        x_min: f64,
+        x_max: f64,
         y_min: f64,
         y_max: f64,
         x_ticks: u32,
@@ -151,9 +154,12 @@ pub enum Action {
         id: u32,
         index: usize,
     },
-    /// Rubber-band zoom. Replaces the plot's Y window until the next zoom.
+    /// Rubber-band zoom. `x_min`/`x_max` are fractions of the sample index.
+    /// `y_min`/`y_max` are data values. Both replace the plot window.
     Zoom {
         id: u32,
+        x_min: f64,
+        x_max: f64,
         y_min: f64,
         y_max: f64,
     },

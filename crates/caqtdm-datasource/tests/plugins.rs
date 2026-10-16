@@ -329,3 +329,133 @@ fn basic256sha256_chunk_and_zmtp_bsread() {
     assert_eq!(recv_bsread(&rx).unwrap(), message);
     stop.store(true, Ordering::Relaxed);
 }
+
+#[test]
+fn hipa_pro_and_sf_retrievers_round_trip() {
+    use caqtdm_datasource::{
+        apply_gmv, encode_gmv_reply, fetch_gmv, gmv_window, hipa_query, post_sf, pro_query,
+        serve_gmv, serve_sf, sf_query, HIPA_HOST, PRO_HOST,
+    };
+
+    let (day, maxval) = gmv_window(3_600, 2);
+    assert_eq!(day, 0);
+    let hipa = hipa_query("MHP1", 26, 100, maxval);
+    let pro = pro_query("MHP1", 26, 100, maxval);
+    assert_eq!(hipa.host, HIPA_HOST);
+    assert_eq!(pro.host, PRO_HOST);
+    assert_eq!(hipa.logid, "U");
+    assert_eq!(hipa.tau, -99);
+    assert_ne!(hipa.host, pro.host);
+
+    let mut values = vec![1.5f32, 2.5, 3.5, 9.0, 4.5, 5.5];
+    let times = vec![10, 20, 30, 40, 50, 8];
+    let errs = vec![0i16, 0, -1, 0, 1, 0];
+    values.resize(maxval as usize, 0.0);
+    let mut times = times;
+    times.resize(maxval as usize, 0);
+    let mut errs = errs;
+    errs.resize(maxval as usize, 0);
+    times[maxval as usize - 1] = 8;
+    let samples = apply_gmv(&values, &times, &errs);
+    assert_eq!(samples.len(), 6);
+    assert_eq!(samples[2].value, 2.5);
+
+    let reply = encode_gmv_reply(8, &values, &times, &errs);
+    let stop = Arc::new(AtomicBool::new(false));
+    let (addr, rx) = serve_gmv(reply, Arc::clone(&stop)).unwrap();
+    let got = fetch_gmv(addr, &pro).unwrap();
+    assert_eq!(got[0].value, 1.5);
+    assert_eq!(got[2].value, 2.5);
+    let seen = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    assert_eq!(seen.host, PRO_HOST);
+    assert_eq!(seen.device, "MHP1");
+    stop.store(true, Ordering::Relaxed);
+
+    let query = sf_query("SF:VAC", 1_700_000_000.0, 1_700_000_100.0, None, Some(2));
+    assert!(query.contains("\"format\":\"json\""));
+    assert!(query.contains("\"name\":\"SF:VAC\""));
+    assert!(query.contains("\"nrOfBins\" : 2"));
+    let body = r#"[{"channel":{"name":"SF:VAC","backend":"sf-archiverappliance"},"data":[{"globalSeconds":"1700000090","value":{"mean":1.25}},{"globalSeconds":"1700000095","value":{"mean":1.5}}]}]"#;
+    let stop = Arc::new(AtomicBool::new(false));
+    let (addr, posted) = serve_sf(body.into(), Arc::clone(&stop)).unwrap();
+    let samples = post_sf(addr, &query).unwrap();
+    assert_eq!(samples.len(), 2);
+    assert!((samples[0].y - 1.25).abs() < 1e-9);
+    assert!(samples[0].x < 0.0);
+    let sent = posted
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(sent.contains("SF:VAC"));
+    stop.store(true, Ordering::Relaxed);
+}
+
+#[test]
+fn opcua_open_secure_channel_derives_matching_keys() {
+    use caqtdm_datasource::{
+        client_finish, client_open, identity_named, open_secure_chunk, seal_secure_chunk,
+        server_accept,
+    };
+
+    let client = identity_named("client").unwrap();
+    let server = identity_named("server").unwrap();
+    let nonce = b"client-nonce-32-bytes-pad-pad!!!";
+    let server_nonce = b"server-nonce-32-bytes-pad-pad!!!";
+    assert_eq!(nonce.len(), 32);
+    let opn = client_open(&client, &server.cert_der, nonce).unwrap();
+    assert!(opn.starts_with(b"OPNF"));
+    assert!(!opn.windows(nonce.len()).any(|window| window == nonce));
+    let (reply, server_keys) = server_accept(&server, &opn, server_nonce).unwrap();
+    let client_keys = client_finish(&client, &reply, nonce).unwrap();
+    assert_eq!(client_keys, server_keys);
+    assert_eq!(client_keys.channel_id, 7);
+    assert_eq!(client_keys.token_id, 3);
+    let sealed = seal_secure_chunk(
+        client_keys.token_id,
+        1,
+        1,
+        b"read",
+        &client_keys.client_enc,
+        &client_keys.client_sign,
+        &client_keys.client_iv,
+    )
+    .unwrap();
+    let opened =
+        open_secure_chunk(&sealed, &server_keys.client_enc, &server_keys.client_sign).unwrap();
+    assert_eq!(opened.3, b"read");
+    let mut tampered = opn.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    assert!(server_accept(&server, &tampered, server_nonce).is_err());
+}
+
+#[test]
+fn zmtp_plain_and_curve_carry_bsread() {
+    use caqtdm_datasource::{
+        send_bsread_curve, send_bsread_plain, serve_curve, serve_plain, CurveIdentity,
+    };
+
+    let message = BsMessage {
+        pulse_id: 11,
+        channel: "CH".into(),
+        value: 2.5,
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let (addr, rx) = serve_plain("operator".into(), "beam".into(), Arc::clone(&stop)).unwrap();
+    send_bsread_plain(addr, "operator", "beam", &message).unwrap();
+    assert_eq!(recv_bsread(&rx).unwrap(), message);
+    stop.store(true, Ordering::Relaxed);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let (addr, _rx) = serve_plain("operator".into(), "beam".into(), Arc::clone(&stop)).unwrap();
+    assert!(send_bsread_plain(addr, "operator", "wrong", &message).is_err());
+    stop.store(true, Ordering::Relaxed);
+
+    let server = CurveIdentity::generate();
+    let server_public = server.public.clone();
+    let client = CurveIdentity::generate();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (addr, rx) = serve_curve(server, Arc::clone(&stop)).unwrap();
+    send_bsread_curve(addr, &server_public, &client, &message).unwrap();
+    assert_eq!(recv_bsread(&rx).unwrap(), message);
+    stop.store(true, Ordering::Relaxed);
+}

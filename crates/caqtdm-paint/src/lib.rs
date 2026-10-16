@@ -240,6 +240,8 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             title,
             title_x,
             title_y,
+            x_min,
+            x_max,
             y_min,
             y_max,
             x_ticks,
@@ -254,6 +256,8 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                     title,
                     title_x,
                     title_y,
+                    x_min: *x_min,
+                    x_max: *x_max,
                     y_min: *y_min,
                     y_max: *y_max,
                     x_ticks: *x_ticks,
@@ -343,6 +347,8 @@ struct PlotPaint<'a> {
     title: &'a str,
     title_x: &'a str,
     title_y: &'a str,
+    x_min: f64,
+    x_max: f64,
     y_min: f64,
     y_max: f64,
     x_ticks: u32,
@@ -393,8 +399,12 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             plot,
             samples,
             series_color(index, visual.foreground),
-            plot_paint.y_min,
-            plot_paint.y_max,
+            (
+                plot_paint.x_min,
+                plot_paint.x_max,
+                plot_paint.y_min,
+                plot_paint.y_max,
+            ),
         );
     }
     for cursor in plot_paint.cursors {
@@ -484,24 +494,34 @@ fn paint_series_scaled(
     rect: Rect,
     samples: &[f64],
     color: Color,
-    y_min: f64,
-    y_max: f64,
+    window: (f64, f64, f64, f64),
 ) {
     if samples.len() < 2 || rect.width < 2 || rect.height < 2 {
         return;
     }
+    let (x_min, x_max, y_min, y_max) = window;
+    let last = samples.len() - 1;
+    let mut start = (x_min.clamp(0.0, 1.0) * last as f64).round() as usize;
+    let mut end = (x_max.clamp(0.0, 1.0) * last as f64).round() as usize;
+    if end <= start {
+        start = 0;
+        end = last;
+    }
+    end = end.min(last);
+    let window = &samples[start..=end];
     let (min, max) = if y_max > y_min {
         (y_min, y_max)
     } else {
         (
-            samples.iter().copied().fold(f64::INFINITY, f64::min),
-            samples.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            window.iter().copied().fold(f64::INFINITY, f64::min),
+            window.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         )
     };
     let span = if max > min { max - min } else { 1.0 };
     let mut prev = None;
-    for (i, sample) in samples.iter().enumerate() {
-        let x = rect.x + ((i as f64) / (samples.len() as f64) * f64::from(rect.width - 1)) as i32;
+    let denom = (window.len() - 1).max(1) as f64;
+    for (i, sample) in window.iter().enumerate() {
+        let x = rect.x + ((i as f64) / denom * f64::from(rect.width - 1)) as i32;
         let y = rect.y + rect.height
             - 1
             - (((sample - min) / span) * f64::from(rect.height - 1)) as i32;
@@ -663,6 +683,8 @@ mod tests {
                 title: "t".into(),
                 title_x: String::new(),
                 title_y: String::new(),
+                x_min: 0.0,
+                x_max: 1.0,
                 y_min: 0.0,
                 y_max: 10.0,
                 x_ticks: 2,
@@ -683,5 +705,58 @@ mod tests {
         let image = paint(&[plot, clock]);
         assert_eq!(image.pixel(4, 30).unwrap().r, 220);
         assert!(image.pixel(10, 72).unwrap().g > 100);
+    }
+
+    #[test]
+    fn plot_zoom_windows_both_axes() {
+        // Plot interior is (4, 18, 72, 32). With y from 0 to 10, sample 2 lands
+        // on y=43 and sample 8 lands on y=25, both inside the frame.
+        let mut wide = visual(
+            VisualKind::Plot {
+                series: vec![vec![2.0, 2.0, 2.0, 8.0, 8.0]],
+                title: String::new(),
+                title_x: String::new(),
+                title_y: String::new(),
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 10.0,
+                x_ticks: 1,
+                cursors: Vec::new(),
+            },
+            "",
+            Color::rgb(0, 180, 220),
+        );
+        wide.rect = Rect::new(0, 0, 80, 60);
+        wide.class_name = "caCartesianPlot".into();
+        let full = paint(&[wide.clone()]);
+        assert!(full.pixel(8, 43).unwrap().b > 150);
+        assert!(full.pixel(8, 25).unwrap().b < 100);
+
+        if let VisualKind::Plot { x_min, x_max, .. } = &mut wide.kind {
+            *x_min = 0.75;
+            *x_max = 1.0;
+        }
+        let x_zoomed = paint(&[wide.clone()]);
+        assert!(x_zoomed.pixel(8, 25).unwrap().b > 150, "x window");
+        assert!(x_zoomed.pixel(8, 43).unwrap().b < 100, "x window");
+
+        if let VisualKind::Plot {
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            ..
+        } = &mut wide.kind
+        {
+            *x_min = 0.0;
+            *x_max = 1.0;
+            *y_min = 6.0;
+            *y_max = 10.0;
+        }
+        let y_zoomed = paint(&[wide]);
+        // Sample 8 moves from y=25 to y=34 when the y window is 6..10.
+        assert!(y_zoomed.pixel(60, 34).unwrap().b > 150, "y window");
+        assert!(y_zoomed.pixel(60, 25).unwrap().b < 100, "y window");
     }
 }

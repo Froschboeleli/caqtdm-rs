@@ -26,6 +26,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "caqtdm-epics-ca"
+version = "0.1.0"
+dependencies = [
+ "caqtdm-core",
+ "caqtdm-datasource",
+]
+
+[[package]]
 name = "caqtdm-ui"
 version = "0.1.0"
 dependencies = [

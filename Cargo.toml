@@ -4,6 +4,7 @@ members = [
     "crates/caqtdm-core",
     "crates/caqtdm-ui",
     "crates/caqtdm-datasource",
+    "crates/caqtdm-epics-ca",
 ]
 
 [workspace.package]
@@ -19,3 +20,4 @@ regex = "1"
 caqtdm-core = { path = "crates/caqtdm-core" }
 caqtdm-ui = { path = "crates/caqtdm-ui" }
 caqtdm-datasource = { path = "crates/caqtdm-datasource" }
+caqtdm-epics-ca = { path = "crates/caqtdm-epics-ca" }

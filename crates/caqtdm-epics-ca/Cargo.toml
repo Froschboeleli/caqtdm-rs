@@ -1,0 +1,12 @@
+[package]
+name = "caqtdm-epics-ca"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "EPICS Channel Access codec, soft IOC, and client"
+
+[dependencies]
+caqtdm-core.workspace = true
+caqtdm-datasource.workspace = true

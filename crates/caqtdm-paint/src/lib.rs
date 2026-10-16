@@ -1,8 +1,10 @@
 //! Headless rasterizer. Tests and `caqtdm paint` use it so a display can be
 //! checked without a GPU. The egui viewer draws the same [`Visual`] list.
 
-use caqtdm_core::{Color, Rect};
-use caqtdm_widgets::{ShapeForm, Visual, VisualKind};
+use caqtdm_core::{Color, Point, Rect};
+use caqtdm_widgets::{cell_rect, ShapeForm, Visual, VisualKind};
+
+mod font;
 
 /// RGBA image, top-left origin, row-major.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,21 @@ impl Image {
         }
     }
 
+    pub fn line_width(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, width: i32, color: Color) {
+        let radius = (width.max(1) - 1) / 2;
+        if radius == 0 {
+            self.line(x0, y0, x1, y1, color);
+            return;
+        }
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= radius * radius {
+                    self.line(x0 + dx, y0 + dy, x1 + dx, y1 + dy, color);
+                }
+            }
+        }
+    }
+
     pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
         let mut x = x0;
         let mut y = y0;
@@ -126,7 +143,7 @@ impl Image {
         let mut cursor = x;
         for ch in text.chars().take(80) {
             blit_glyph(self, cursor, y, ch, color);
-            cursor += 6;
+            cursor += font::ADVANCE;
         }
     }
 
@@ -142,7 +159,16 @@ impl Image {
 
 /// Paint every visible widget. The image is large enough to hold them.
 pub fn paint(visuals: &[Visual]) -> Image {
-    let (width, height) = bounds(visuals);
+    paint_in(visuals, 0, 0)
+}
+
+/// Paint into a canvas of `width` by `height`. A zero size uses the widget bounds.
+pub fn paint_in(visuals: &[Visual], width: u32, height: u32) -> Image {
+    let (width, height) = if width > 0 && height > 0 {
+        (width, height)
+    } else {
+        bounds(visuals)
+    };
     let mut image = Image::new(width, height, Color::rgb(40, 44, 52));
     for visual in visuals.iter().filter(|v| v.visible) {
         paint_one(&mut image, visual);
@@ -174,14 +200,30 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             );
             image.fill_rect(filled, visual.foreground);
         }
-        VisualKind::Thermo { fraction }
-        | VisualKind::Gauge {
+        VisualKind::Gauge {
             fraction,
             circular: false,
         } => {
+            let w = ((rect.width as f64) * fraction) as i32;
+            image.fill_rect(Rect::new(rect.x, rect.y, w, rect.height), visual.foreground);
+        }
+        VisualKind::Thermo { fraction, bands } => {
             let h = ((rect.height as f64) * fraction) as i32;
             let filled = Rect::new(rect.x, rect.y + rect.height - h, rect.width, h);
             image.fill_rect(filled, visual.foreground);
+            for band in bands {
+                let y = rect.y + rect.height
+                    - 1
+                    - (band.at.clamp(0.0, 1.0) * f64::from(rect.height - 1)) as i32;
+                let color = if band.major {
+                    Color::rgb(255, 0, 0)
+                } else {
+                    Color::rgb(255, 220, 0)
+                };
+                for x in rect.x + 1..rect.x + rect.width - 1 {
+                    image.put(x, y, color);
+                }
+            }
         }
         VisualKind::Gauge {
             fraction,
@@ -211,30 +253,25 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 color,
             );
         }
-        VisualKind::Shape { form, filled } => paint_shape(image, rect, *form, *filled, visual),
-        VisualKind::Polyline { points, closed } => {
-            if points.len() >= 2 {
-                for pair in points.windows(2) {
-                    image.line(
-                        rect.x + pair[0].x,
-                        rect.y + pair[0].y,
-                        rect.x + pair[1].x,
-                        rect.y + pair[1].y,
-                        visual.foreground,
-                    );
-                }
-                if *closed {
-                    let last = points.len() - 1;
-                    image.line(
-                        rect.x + points[last].x,
-                        rect.y + points[last].y,
-                        rect.x + points[0].x,
-                        rect.y + points[0].y,
-                        visual.foreground,
-                    );
-                }
-            }
-        }
+        VisualKind::Shape {
+            form,
+            filled,
+            start_angle,
+            span_angle,
+        } => paint_shape(
+            image,
+            rect,
+            *form,
+            *filled,
+            *start_angle,
+            *span_angle,
+            visual,
+        ),
+        VisualKind::Polyline {
+            points,
+            closed,
+            width,
+        } => paint_polyline(image, rect, points, *closed, *width, visual.foreground),
         VisualKind::Plot {
             series,
             title,
@@ -244,6 +281,9 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             x_max,
             y_min,
             y_max,
+            y2_min,
+            y2_max,
+            log_y,
             x_ticks,
             cursors,
         } => {
@@ -260,17 +300,39 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                     x_max: *x_max,
                     y_min: *y_min,
                     y_max: *y_max,
+                    y2_min: *y2_min,
+                    y2_max: *y2_max,
+                    log_y: *log_y,
                     x_ticks: *x_ticks,
                     cursors,
                 },
             );
         }
-        VisualKind::Clock { analog: true } => {
-            let cx = rect.x + rect.width / 2;
-            let cy = rect.y + rect.height / 2;
-            let radius = (rect.width.min(rect.height) / 2 - 2).max(2);
-            image.stroke_circle(cx, cy, radius, visual.foreground);
+        VisualKind::Waterfall { rows, min, max } => {
+            paint_waterfall(image, rect, rows, *min, *max);
         }
+        VisualKind::Choice {
+            items,
+            selected,
+            columns,
+            inverse,
+        } => paint_buttons(
+            image,
+            rect,
+            visual,
+            items,
+            (*columns, *inverse, Some(*selected)),
+        ),
+        VisualKind::Grid { columns, cells } => {
+            let labels: Vec<String> = cells.iter().map(|cell| cell.label.clone()).collect();
+            paint_buttons(image, rect, visual, &labels, (*columns, false, None));
+        }
+        VisualKind::Clock {
+            analog: true,
+            hour,
+            minute,
+            second,
+        } => paint_clock(image, rect, *hour, *minute, *second, visual.foreground),
         VisualKind::Tabs { labels, current } => {
             paint_tabs(image, rect, visual, labels, *current);
         }
@@ -320,9 +382,14 @@ fn paint_one(image: &mut Image, visual: &Visual) {
     if !visual.text.is_empty()
         && !matches!(
             visual.kind,
-            VisualKind::Frame | VisualKind::Plot { .. } | VisualKind::Tabs { .. }
+            VisualKind::Frame
+                | VisualKind::Plot { .. }
+                | VisualKind::Tabs { .. }
+                | VisualKind::Choice { .. }
+                | VisualKind::Grid { .. }
+                | VisualKind::Waterfall { .. }
+                | VisualKind::Clock { analog: true, .. }
         )
-        && visual.class_name != "caChoice"
     {
         if visual.rotation % 180 == 90 {
             let mut y = rect.y + 2;
@@ -351,6 +418,9 @@ struct PlotPaint<'a> {
     x_max: f64,
     y_min: f64,
     y_max: f64,
+    y2_min: f64,
+    y2_max: f64,
+    log_y: bool,
     x_ticks: u32,
     cursors: &'a [f64],
 }
@@ -394,17 +464,18 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         );
     }
     for (index, samples) in plot_paint.series.iter().enumerate() {
+        let (lo, hi) = if index > 0 && plot_paint.y2_max > plot_paint.y2_min {
+            (plot_paint.y2_min, plot_paint.y2_max)
+        } else {
+            (plot_paint.y_min, plot_paint.y_max)
+        };
         paint_series_scaled(
             image,
             plot,
             samples,
             series_color(index, visual.foreground),
-            (
-                plot_paint.x_min,
-                plot_paint.x_max,
-                plot_paint.y_min,
-                plot_paint.y_max,
-            ),
+            (plot_paint.x_min, plot_paint.x_max, lo, hi),
+            plot_paint.log_y,
         );
     }
     for cursor in plot_paint.cursors {
@@ -422,7 +493,7 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
 fn paint_tabs(image: &mut Image, rect: Rect, visual: &Visual, labels: &[String], current: usize) {
     let mut x = rect.x + 2;
     for (index, label) in labels.iter().enumerate() {
-        let width = (label.len() as i32 * 6 + 8).max(16);
+        let width = (label.len() as i32 * font::ADVANCE + 8).max(16);
         let tab = Rect::new(x, rect.y + 1, width, 14);
         if index == current {
             image.fill_rect(tab, visual.foreground);
@@ -459,32 +530,280 @@ fn blit_rgba(image: &mut Image, rect: Rect, rgba: &[u8], width: u32, height: u32
     }
 }
 
-fn paint_shape(image: &mut Image, rect: Rect, form: ShapeForm, filled: bool, visual: &Visual) {
+fn paint_shape(
+    image: &mut Image,
+    rect: Rect,
+    form: ShapeForm,
+    filled: bool,
+    start_angle: i32,
+    span_angle: i32,
+    visual: &Visual,
+) {
+    let cx = rect.x + rect.width / 2;
+    let cy = rect.y + rect.height / 2;
+    let color = visual.foreground;
     match form {
         ShapeForm::Circle => {
             let r = rect.width.min(rect.height) / 2;
             if filled {
-                image.fill_circle(
-                    rect.x + rect.width / 2,
-                    rect.y + rect.height / 2,
-                    r,
-                    visual.foreground,
-                );
+                image.fill_circle(cx, cy, r, color);
             } else {
-                image.stroke_rect(rect, visual.foreground);
+                image.stroke_circle(cx, cy, r.max(1), color);
             }
         }
         ShapeForm::Line => image.line(
             rect.x,
             rect.y,
-            rect.x + rect.width,
-            rect.y + rect.height,
-            visual.foreground,
+            rect.x + rect.width - 1,
+            rect.y + rect.height - 1,
+            color,
         ),
-        _ => {
+        ShapeForm::Triangle => {
+            fill_triangle(
+                image,
+                [
+                    (cx, rect.y + 2),
+                    (rect.x + 2, rect.y + rect.height - 3),
+                    (rect.x + rect.width - 3, rect.y + rect.height - 3),
+                ],
+                color,
+            );
+        }
+        ShapeForm::Arrow => {
+            let y = cy;
+            let x0 = rect.x + 2;
+            let x1 = rect.x + rect.width - 3;
+            image.line(x0, y, x1, y, color);
+            image.line(x1, y, x1 - 8, y - 6, color);
+            image.line(x1, y, x1 - 8, y + 6, color);
             if filled {
-                image.fill_rect(rect, visual.foreground);
+                fill_triangle(image, [(x1, y), (x1 - 8, y - 6), (x1 - 8, y + 6)], color);
             }
+        }
+        ShapeForm::Arc => {
+            let radius = (rect.width.min(rect.height) / 2 - 2).max(2);
+            paint_arc(
+                image,
+                cx,
+                cy,
+                radius,
+                (start_angle, span_angle, filled),
+                color,
+            );
+        }
+        ShapeForm::Rectangle => {
+            if filled {
+                image.fill_rect(rect, color);
+            }
+        }
+    }
+}
+
+fn paint_polyline(
+    image: &mut Image,
+    rect: Rect,
+    points: &[Point],
+    closed: bool,
+    width: i32,
+    color: Color,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    for pair in points.windows(2) {
+        image.line_width(
+            rect.x + pair[0].x,
+            rect.y + pair[0].y,
+            rect.x + pair[1].x,
+            rect.y + pair[1].y,
+            width,
+            color,
+        );
+    }
+    if closed {
+        let last = points.len() - 1;
+        image.line_width(
+            rect.x + points[last].x,
+            rect.y + points[last].y,
+            rect.x + points[0].x,
+            rect.y + points[0].y,
+            width,
+            color,
+        );
+    }
+}
+
+fn paint_clock(image: &mut Image, rect: Rect, hour: u32, minute: u32, second: u32, color: Color) {
+    let cx = rect.x + rect.width / 2;
+    let cy = rect.y + rect.height / 2;
+    let radius = (rect.width.min(rect.height) / 2 - 2).max(4);
+    image.stroke_circle(cx, cy, radius, color);
+    let hour_angle = f64::from(hour % 12) * 30.0 + f64::from(minute) * 0.5;
+    hand(image, cx, cy, f64::from(radius) * 0.5, hour_angle, color);
+    hand(
+        image,
+        cx,
+        cy,
+        f64::from(radius) * 0.75,
+        f64::from(minute) * 6.0,
+        color,
+    );
+    hand(
+        image,
+        cx,
+        cy,
+        f64::from(radius) * 0.85,
+        f64::from(second) * 6.0,
+        color,
+    );
+}
+
+fn hand(image: &mut Image, cx: i32, cy: i32, length: f64, degrees_from_12: f64, color: Color) {
+    let rad = degrees_from_12.to_radians();
+    let x1 = cx + (rad.sin() * length) as i32;
+    let y1 = cy - (rad.cos() * length) as i32;
+    image.line(cx, cy, x1, y1, color);
+}
+
+fn paint_arc(
+    image: &mut Image,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    angles: (i32, i32, bool),
+    color: Color,
+) {
+    let (start, span, filled) = angles;
+    let span = if span == 0 { 90 } else { span };
+    let steps = span.abs().max(1);
+    if filled {
+        let r2 = radius * radius;
+        for y in cy - radius..=cy + radius {
+            for x in cx - radius..=cx + radius {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy > r2 {
+                    continue;
+                }
+                let deg = (dx as f64).atan2(-(dy as f64)).to_degrees();
+                if angle_inside(deg, f64::from(start), f64::from(span)) {
+                    image.put(x, y, color);
+                }
+            }
+        }
+    }
+    for step in 0..=steps {
+        let deg = f64::from(start) + f64::from(span) * (f64::from(step) / f64::from(steps));
+        let rad = deg.to_radians();
+        let x = cx + (rad.cos() * f64::from(radius)) as i32;
+        let y = cy - (rad.sin() * f64::from(radius)) as i32;
+        image.put(x, y, color);
+    }
+}
+
+fn angle_inside(deg: f64, start: f64, span: f64) -> bool {
+    let norm = |mut angle: f64| {
+        while angle < 0.0 {
+            angle += 360.0;
+        }
+        while angle >= 360.0 {
+            angle -= 360.0;
+        }
+        angle
+    };
+    let from = norm(start);
+    let delta = norm(deg - from);
+    if span >= 0.0 {
+        delta <= span
+    } else {
+        delta >= norm(span)
+    }
+}
+
+fn fill_triangle(image: &mut Image, points: [(i32, i32); 3], color: Color) {
+    let (ax, ay) = points[0];
+    let (bx, by) = points[1];
+    let (cx, cy) = points[2];
+    let min_x = ax.min(bx).min(cx);
+    let max_x = ax.max(bx).max(cx);
+    let min_y = ay.min(by).min(cy);
+    let max_y = ay.max(by).max(cy);
+    let area = edge(ax, ay, bx, by, cx, cy);
+    if area == 0 {
+        return;
+    }
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let w0 = edge(bx, by, cx, cy, x, y);
+            let w1 = edge(cx, cy, ax, ay, x, y);
+            let w2 = edge(ax, ay, bx, by, x, y);
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            };
+            if inside {
+                image.put(x, y, color);
+            }
+        }
+    }
+}
+
+fn edge(ax: i32, ay: i32, bx: i32, by: i32, cx: i32, cy: i32) -> i32 {
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+fn paint_buttons(
+    image: &mut Image,
+    rect: Rect,
+    visual: &Visual,
+    labels: &[String],
+    layout: (u32, bool, Option<usize>),
+) {
+    let (columns, inverse, selected) = layout;
+    let count = labels.len();
+    for index in 0..count {
+        let cell = cell_rect(rect, index, count, columns, inverse);
+        let on = selected == Some(index) || selected.is_none();
+        let inset = Rect::new(
+            cell.x + 1,
+            cell.y + 1,
+            (cell.width - 2).max(1),
+            (cell.height - 2).max(1),
+        );
+        if on {
+            image.fill_rect(inset, visual.foreground);
+        } else {
+            image.stroke_rect(inset, visual.foreground);
+        }
+        if let Some(label) = labels.get(index) {
+            let ink = if on {
+                visual.background
+            } else {
+                visual.foreground
+            };
+            image.text(inset.x + 2, inset.y + 2, label, ink);
+        }
+    }
+}
+
+fn paint_waterfall(image: &mut Image, rect: Rect, rows: &[Vec<f64>], min: f64, max: f64) {
+    if rows.is_empty() || rect.width < 2 || rect.height < 2 {
+        return;
+    }
+    let span = if max > min { max - min } else { 1.0 };
+    let row_h = (rect.height / rows.len() as i32).max(1);
+    for (row_index, row) in rows.iter().enumerate() {
+        if row.is_empty() {
+            continue;
+        }
+        let y0 = rect.y + row_index as i32 * row_h;
+        let col_w = (rect.width / row.len() as i32).max(1);
+        for (col, sample) in row.iter().enumerate() {
+            let t = ((sample - min) / span).clamp(0.0, 1.0);
+            let color = Color::rgb((255.0 * t) as u8, 0, (255.0 * (1.0 - t)) as u8);
+            let x0 = rect.x + col as i32 * col_w;
+            image.fill_rect(Rect::new(x0, y0, col_w, row_h), color);
         }
     }
 }
@@ -495,6 +814,7 @@ fn paint_series_scaled(
     samples: &[f64],
     color: Color,
     window: (f64, f64, f64, f64),
+    log_y: bool,
 ) {
     if samples.len() < 2 || rect.width < 2 || rect.height < 2 {
         return;
@@ -518,13 +838,24 @@ fn paint_series_scaled(
         )
     };
     let span = if max > min { max - min } else { 1.0 };
+    let log_min = if log_y && min <= 0.0 { 1e-6 } else { min };
+    let log_max = if log_y && max <= log_min {
+        log_min * 10.0
+    } else {
+        max
+    };
     let mut prev = None;
     let denom = (window.len() - 1).max(1) as f64;
     for (i, sample) in window.iter().enumerate() {
         let x = rect.x + ((i as f64) / denom * f64::from(rect.width - 1)) as i32;
-        let y = rect.y + rect.height
-            - 1
-            - (((sample - min) / span) * f64::from(rect.height - 1)) as i32;
+        let frac = if log_y {
+            let sample = if *sample <= 0.0 { log_min } else { *sample };
+            (sample.log10() - log_min.log10()) / (log_max.log10() - log_min.log10())
+        } else {
+            (sample - min) / span
+        };
+        let y =
+            rect.y + rect.height - 1 - (frac.clamp(0.0, 1.0) * f64::from(rect.height - 1)) as i32;
         if let Some((px, py)) = prev {
             image.line(px, py, x, y, color);
         }
@@ -547,72 +878,21 @@ fn series_color(index: usize, first: Color) -> Color {
 }
 
 fn blit_glyph(image: &mut Image, x: i32, y: i32, ch: char, color: Color) {
-    let rows = glyph(ch);
+    let rows = font::glyph(ch);
     for (row, bits) in rows.iter().enumerate() {
-        for col in 0..5 {
-            if bits & (1 << (4 - col)) != 0 {
+        for col in 0..font::WIDTH {
+            if bits & (1 << (7 - col)) != 0 {
                 image.put(x + col, y + row as i32, color);
             }
         }
     }
 }
 
-fn glyph(ch: char) -> [u8; 7] {
-    let ch = ch.to_ascii_uppercase();
-    match ch {
-        ' ' => [0, 0, 0, 0, 0, 0, 0],
-        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        '2' => [0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F],
-        '3' => [0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E],
-        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        '6' => [0x0E, 0x10, 0x1E, 0x11, 0x11, 0x11, 0x0E],
-        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E],
-        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        'C' => [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        'D' => [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
-        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        'G' => [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'I' => [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        'J' => [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
-        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        'M' => [0x11, 0x1B, 0x15, 0x11, 0x11, 0x11, 0x11],
-        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
-        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        'Q' => [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        'S' => [0x0E, 0x11, 0x10, 0x0E, 0x01, 0x11, 0x0E],
-        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11],
-        'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
-        'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-        '.' => [0, 0, 0, 0, 0, 0x04, 0x04],
-        ':' => [0, 0x04, 0x04, 0, 0x04, 0x04, 0],
-        '-' => [0, 0, 0, 0x1F, 0, 0, 0],
-        '+' => [0, 0x04, 0x04, 0x1F, 0x04, 0x04, 0],
-        '/' => [0x01, 0x02, 0x04, 0x08, 0x10, 0, 0],
-        '%' => [0x19, 0x1A, 0x02, 0x04, 0x0B, 0x13, 0x13],
-        '(' | ')' => [0x04, 0x08, 0x08, 0x08, 0x08, 0x08, 0x04],
-        _ => [0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use caqtdm_core::Severity;
-    use caqtdm_widgets::VisualKind;
+    use caqtdm_core::{Point, Severity};
+    use caqtdm_widgets::{ShapeForm, VisualKind};
 
     fn visual(kind: VisualKind, text: &str, fg: Color) -> Visual {
         Visual {
@@ -687,6 +967,9 @@ mod tests {
                 x_max: 1.0,
                 y_min: 0.0,
                 y_max: 10.0,
+                y2_min: f64::NAN,
+                y2_max: f64::NAN,
+                log_y: false,
                 x_ticks: 2,
                 cursors: vec![0.0],
             },
@@ -696,7 +979,12 @@ mod tests {
         plot.rect = Rect::new(0, 0, 80, 60);
         plot.class_name = "caCartesianPlot".into();
         let mut clock = visual(
-            VisualKind::Clock { analog: true },
+            VisualKind::Clock {
+                analog: true,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            },
             "",
             Color::rgb(0, 180, 0),
         );
@@ -721,6 +1009,9 @@ mod tests {
                 x_max: 1.0,
                 y_min: 0.0,
                 y_max: 10.0,
+                y2_min: f64::NAN,
+                y2_max: f64::NAN,
+                log_y: false,
                 x_ticks: 1,
                 cursors: Vec::new(),
             },
@@ -758,5 +1049,277 @@ mod tests {
         // Sample 8 moves from y=25 to y=34 when the y window is 6..10.
         assert!(y_zoomed.pixel(60, 34).unwrap().b > 150, "y window");
         assert!(y_zoomed.pixel(60, 25).unwrap().b < 100, "y window");
+    }
+
+    fn plot_visual(kind: VisualKind, class_name: &str) -> Visual {
+        let mut drawn = visual(kind, "", Color::rgb(0, 180, 220));
+        drawn.rect = Rect::new(0, 0, 80, 60);
+        drawn.class_name = class_name.into();
+        drawn
+    }
+
+    fn series_plot(series: Vec<Vec<f64>>, y: (f64, f64), y2: (f64, f64), log_y: bool) -> Visual {
+        plot_visual(
+            VisualKind::Plot {
+                series,
+                title: String::new(),
+                title_x: String::new(),
+                title_y: String::new(),
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: y.0,
+                y_max: y.1,
+                y2_min: y2.0,
+                y2_max: y2.1,
+                log_y,
+                x_ticks: 1,
+                cursors: Vec::new(),
+            },
+            "caCartesianPlot",
+        )
+    }
+
+    #[test]
+    fn log_scale_lifts_the_middle_decade() {
+        // Interior is (4, 18, 72, 32). Value 10 of 1..100 is near the bottom on a
+        // linear axis (y=46) and at mid scale on log10 (y=33).
+        let linear = paint(&[series_plot(
+            vec![vec![1.0, 10.0, 100.0]],
+            (1.0, 100.0),
+            (f64::NAN, f64::NAN),
+            false,
+        )]);
+        let logged = paint(&[series_plot(
+            vec![vec![1.0, 10.0, 100.0]],
+            (1.0, 100.0),
+            (f64::NAN, f64::NAN),
+            true,
+        )]);
+        assert!(linear.pixel(39, 47).unwrap().b > 150, "linear decade");
+        assert!(linear.pixel(39, 34).unwrap().b < 100, "linear decade");
+        assert!(logged.pixel(39, 34).unwrap().b > 150, "log decade");
+        assert!(logged.pixel(39, 47).unwrap().b < 100, "log decade");
+    }
+
+    #[test]
+    fn second_y_axis_places_the_second_curve() {
+        let image = paint(&[series_plot(
+            vec![vec![2.0, 2.0], vec![500.0, 500.0]],
+            (0.0, 10.0),
+            (0.0, 1000.0),
+            false,
+        )]);
+        let left = image.pixel(20, 43).unwrap();
+        assert!(left.b > 150 && left.r < 80, "first axis");
+        let right = image.pixel(20, 34).unwrap();
+        assert!(right.r > 200 && right.b < 100, "second axis {right:?}");
+    }
+
+    #[test]
+    fn strip_window_paints_only_the_kept_samples() {
+        // Last two samples are 3 and 4. The left edge sits on 3 (y=40), not on an
+        // earlier 1 (y=46).
+        let drawn = paint(&[series_plot(
+            vec![vec![3.0, 4.0]],
+            (0.0, 10.0),
+            (f64::NAN, f64::NAN),
+            false,
+        )]);
+        assert!(drawn.pixel(8, 40).unwrap().b > 150, "recent sample");
+        assert!(
+            drawn.pixel(8, 46).unwrap().b < 100,
+            "older sample is outside the span"
+        );
+    }
+
+    #[test]
+    fn shapes_clock_gauges_and_buttons_are_distinct_pixels() {
+        let fg = Color::rgb(0, 80, 220);
+        let mut triangle = visual(
+            VisualKind::Shape {
+                form: ShapeForm::Triangle,
+                filled: true,
+                start_angle: 0,
+                span_angle: 90,
+            },
+            "",
+            fg,
+        );
+        triangle.rect = Rect::new(0, 0, 40, 40);
+        let mut arrow = visual(
+            VisualKind::Shape {
+                form: ShapeForm::Arrow,
+                filled: true,
+                start_angle: 0,
+                span_angle: 90,
+            },
+            "",
+            fg,
+        );
+        arrow.rect = Rect::new(50, 0, 60, 30);
+        let mut arc = visual(
+            VisualKind::Shape {
+                form: ShapeForm::Arc,
+                filled: false,
+                start_angle: 0,
+                span_angle: 90,
+            },
+            "",
+            fg,
+        );
+        arc.rect = Rect::new(0, 50, 40, 40);
+        let mut clock = visual(
+            VisualKind::Clock {
+                analog: true,
+                hour: 3,
+                minute: 0,
+                second: 0,
+            },
+            "",
+            fg,
+        );
+        clock.rect = Rect::new(120, 0, 80, 80);
+        let mut gauge = visual(
+            VisualKind::Gauge {
+                fraction: 0.5,
+                circular: false,
+            },
+            "",
+            fg,
+        );
+        gauge.rect = Rect::new(0, 100, 80, 20);
+        let mut dial = visual(
+            VisualKind::Gauge {
+                fraction: 0.0,
+                circular: true,
+            },
+            "",
+            fg,
+        );
+        dial.rect = Rect::new(90, 100, 80, 80);
+        let mut meter = visual(VisualKind::Meter { fraction: 0.0 }, "", fg);
+        meter.rect = Rect::new(180, 100, 80, 80);
+        let mut thermo = visual(
+            VisualKind::Thermo {
+                fraction: 0.25,
+                bands: vec![caqtdm_widgets::ThermoBand {
+                    at: 0.8,
+                    major: true,
+                }],
+            },
+            "",
+            fg,
+        );
+        thermo.rect = Rect::new(270, 0, 20, 80);
+        let mut choice = visual(
+            VisualKind::Choice {
+                items: vec!["Off".into(), "On".into()],
+                selected: 0,
+                columns: 1,
+                inverse: false,
+            },
+            "",
+            fg,
+        );
+        choice.rect = Rect::new(0, 190, 40, 40);
+        choice.class_name = "caChoice".into();
+        let mut menu = visual(
+            VisualKind::Grid {
+                columns: 2,
+                cells: vec![
+                    caqtdm_widgets::GridCell {
+                        label: "A".into(),
+                        file: "a.ui".into(),
+                        args: String::new(),
+                    },
+                    caqtdm_widgets::GridCell {
+                        label: "B".into(),
+                        file: "b.ui".into(),
+                        args: String::new(),
+                    },
+                ],
+            },
+            "",
+            fg,
+        );
+        menu.rect = Rect::new(50, 190, 40, 20);
+        menu.class_name = "caRowColMenu".into();
+        let mut fall = visual(
+            VisualKind::Waterfall {
+                rows: vec![vec![0.0, 100.0]],
+                min: 0.0,
+                max: 100.0,
+            },
+            "",
+            fg,
+        );
+        fall.rect = Rect::new(100, 190, 40, 20);
+        let mut pen = visual(
+            VisualKind::Polyline {
+                points: vec![Point { x: 2, y: 10 }, Point { x: 36, y: 10 }],
+                closed: false,
+                width: 3,
+            },
+            "",
+            Color::rgb(255, 0, 0),
+        );
+        pen.rect = Rect::new(160, 190, 40, 24);
+        pen.background = Color::rgb(10, 10, 10);
+
+        let image = paint(&[
+            triangle, arrow, arc, clock, gauge, dial, meter, thermo, choice, menu, fall, pen,
+        ]);
+        assert!(image.pixel(20, 24).unwrap().b > 150, "triangle center");
+        assert!(image.pixel(8, 8).unwrap().b < 40, "triangle corner");
+        assert!(image.pixel(107, 15).unwrap().b > 150, "arrow tip");
+        assert!(image.pixel(70, 4).unwrap().b < 40, "above the shaft");
+        assert!(image.pixel(38, 70).unwrap().b > 150, "arc at 3 o'clock");
+        assert!(image.pixel(20, 70).unwrap().b < 40, "arc center");
+        assert!(image.pixel(172, 40).unwrap().b > 150, "hour hand at 3");
+        assert!(image.pixel(160, 24).unwrap().b > 150, "minute hand at 12");
+        assert!(image.pixel(148, 40).unwrap().b < 40, "no hand at 9");
+        assert!(image.pixel(10, 110).unwrap().b > 150, "linear bar");
+        assert!(image.pixel(60, 110).unwrap().b < 40, "empty linear bar");
+        assert!(image.pixel(111, 140).unwrap().b > 150, "circular needle");
+        assert!(image.pixel(130, 120).unwrap().b < 40, "above the needle");
+        assert!(image.pixel(201, 140).unwrap().b > 150, "meter needle");
+        assert_eq!(image.pixel(280, 70).unwrap().b, 220, "thermo bar");
+        assert_eq!(
+            (
+                image.pixel(280, 16).unwrap().r,
+                image.pixel(280, 16).unwrap().b
+            ),
+            (255, 0),
+            "alarm band"
+        );
+        assert!(image.pixel(10, 200).unwrap().b > 150, "selected choice");
+        assert!(image.pixel(10, 220).unwrap().b < 40, "other choice");
+        assert!(image.pixel(55, 200).unwrap().b > 150, "left menu cell");
+        assert!(
+            image.pixel(70, 200).unwrap().b < 40,
+            "gap between menu cells"
+        );
+        assert!(image.pixel(85, 200).unwrap().b > 150, "right menu cell");
+        let cold = image.pixel(110, 200).unwrap();
+        let hot = image.pixel(130, 200).unwrap();
+        assert!(cold.b > 200 && cold.r < 20, "low intensity");
+        assert!(hot.r > 200 && hot.b < 20, "high intensity");
+        assert_eq!(image.pixel(180, 200).unwrap().r, 255, "pen");
+        assert_eq!(image.pixel(180, 201).unwrap().r, 255, "pen width");
+    }
+
+    #[test]
+    fn lowercase_is_a_different_glyph_from_uppercase() {
+        let upper = font::glyph('H');
+        let lower = font::glyph('e');
+        assert_ne!(upper, lower);
+        assert!(upper.iter().take(7).any(|row| *row != 0));
+        assert_eq!(lower[1], 0, "e sits below the cap height");
+        assert!(lower[4] != 0);
+        assert!(font::glyph('g')[10] != 0, "g has a descender");
+        assert_eq!(font::HEIGHT, 12);
+        let image = paint(&[visual(VisualKind::Label, "He", Color::rgb(0, 0, 0))]);
+        let gap = image.pixel(4 + font::WIDTH, 6).unwrap();
+        assert_eq!((gap.r, gap.g, gap.b), (10, 10, 10), "letter spacing");
     }
 }

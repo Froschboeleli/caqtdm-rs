@@ -3,7 +3,7 @@
 //! Channel values, alarm color, visibility, calc, and writes live here so the
 //! egui viewer and the software rasterizer share one behavior.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use caqtdm_core::{
     alarm_color, apply_macros, eval_calc, eval_visibility, format_number, CalcInputs, ChannelData,
@@ -12,7 +12,7 @@ use caqtdm_core::{
 use caqtdm_datasource::Hub;
 use caqtdm_ui::WidgetNode;
 
-use crate::visual::{Action, Effect, ShapeForm, Visual, VisualKind};
+use crate::visual::{Action, Effect, GridCell, ShapeForm, ThermoBand, TreeRow, Visual, VisualKind};
 
 const HISTORY: usize = 240;
 
@@ -30,6 +30,8 @@ pub struct Session {
     /// x fraction lo/hi, then y data lo/hi.
     zooms: BTreeMap<String, (f64, f64, f64, f64)>,
     cursors: BTreeMap<String, Vec<f64>>,
+    /// Alarm-tree group names that are folded shut.
+    collapsed: BTreeSet<String>,
     alarm_log: VecDeque<Vec<String>>,
     last_severity: BTreeMap<String, Severity>,
     pub log: Vec<String>,
@@ -54,6 +56,7 @@ impl Session {
             tabs: BTreeMap::new(),
             zooms: BTreeMap::new(),
             cursors: BTreeMap::new(),
+            collapsed: BTreeSet::new(),
             alarm_log: VecDeque::new(),
             last_severity: BTreeMap::new(),
             log: Vec::new(),
@@ -124,7 +127,8 @@ impl Session {
             | Action::SetText { id, .. }
             | Action::Choose { id, .. }
             | Action::Zoom { id, .. }
-            | Action::PlaceCursor { id, .. } => *id,
+            | Action::PlaceCursor { id, .. }
+            | Action::ToggleGroup { id, .. } => *id,
         };
         let Some(node) = self.nodes.get(id as usize).cloned() else {
             return Vec::new();
@@ -132,6 +136,7 @@ impl Session {
         match action {
             Action::Press { .. } => self.press(&node),
             Action::SetNumber { value, .. } => {
+                let value = clamp_entry(&node, value);
                 if node.class_name == "caApplyNumeric" {
                     self.pending.insert(node.name.clone(), value);
                     self.log.push(format!("pending {} = {value}", node.name));
@@ -163,6 +168,10 @@ impl Session {
             Action::PlaceCursor { at, .. } => {
                 self.cursors.entry(node.name.clone()).or_default().push(at);
                 self.log.push(format!("cursor {} {at}", node.name));
+                Vec::new()
+            }
+            Action::ToggleGroup { index, .. } => {
+                self.toggle_group(&node, index);
                 Vec::new()
             }
         }
@@ -245,11 +254,23 @@ impl Session {
     }
 
     fn choose(&mut self, node: &WidgetNode, index: usize) -> Vec<Effect> {
-        if node.class_name == "caMenu"
-            || node.class_name == "caChoice"
-            || node.class_name == "caRowColMenu"
-            || node.class_name == "QComboBox"
-        {
+        if node.class_name == "caChoice" {
+            let start = node.prop_f64("startBit").unwrap_or(0.0).max(0.0) as usize;
+            self.write_number(node, (start + index) as f64);
+            return Vec::new();
+        }
+        if node.class_name == "caRowColMenu" {
+            let cells = grid_cells(node);
+            if let Some(cell) = cells.get(index) {
+                self.log.push(format!("open {} {}", cell.file, cell.args));
+                return vec![Effect::Open {
+                    file: cell.file.clone(),
+                    macros: cell.args.clone(),
+                }];
+            }
+            return Vec::new();
+        }
+        if node.class_name == "caMenu" || node.class_name == "QComboBox" {
             self.write_number(node, index as f64);
             return Vec::new();
         }
@@ -344,11 +365,14 @@ impl Session {
             "caApplyNumeric" => VisualKind::Entry { writable: true },
             "caMessageButton" | "QPushButton" | "QToolButton" => VisualKind::Button,
             "caRowColMenu" => {
-                let items = split_list(node.prop_str("labels").or_else(|| node.prop_str("items")));
-                if items.is_empty() {
+                let cells = grid_cells(node);
+                if cells.is_empty() {
                     VisualKind::Button
                 } else {
-                    VisualKind::Menu { items, selected: 0 }
+                    VisualKind::Grid {
+                        columns: rowcol_columns(node, cells.len()),
+                        cells,
+                    }
                 }
             }
             "caToggleButton" | "QCheckBox" | "QRadioButton" => VisualKind::Toggle {
@@ -371,7 +395,10 @@ impl Session {
                 fraction,
                 circular: true,
             },
-            "caThermo" | "QProgressBar" => VisualKind::Thermo { fraction },
+            "caThermo" | "QProgressBar" => VisualKind::Thermo {
+                fraction,
+                bands: thermo_bands(node, data, min, max),
+            },
             "caMeter" => VisualKind::Meter { fraction },
             "caLed" => VisualKind::Led {
                 on: led_on(node, value),
@@ -381,65 +408,67 @@ impl Session {
                 filled: node
                     .enum_tail("fillstyle")
                     .is_none_or(|s| !s.eq_ignore_ascii_case("Outline")),
+                start_angle: node.prop_f64("startAngle").unwrap_or(0.0) as i32,
+                span_angle: node.prop_f64("spanAngle").unwrap_or(90.0) as i32,
             },
             "caPolyLine" => VisualKind::Polyline {
                 points: polyline_points(node),
                 closed: node
                     .enum_tail("polystyle")
                     .is_some_and(|s| s.eq_ignore_ascii_case("Polygon")),
+                width: 1,
             },
-            "caCartesianPlot" | "caStripPlot" => {
-                let (x_min, x_max, y_min, y_max) = self.zooms.get(&node.name).copied().unwrap_or((
-                    0.0,
-                    1.0,
-                    node.prop_f64("YaxisLimitsMin_1").unwrap_or(f64::NAN),
-                    node.prop_f64("YaxisLimitsMax_1").unwrap_or(f64::NAN),
-                ));
-                VisualKind::Plot {
-                    series: self.plot_series(node),
-                    title: node.prop_str("Title").unwrap_or("").to_string(),
-                    title_x: node.prop_str("TitleX").unwrap_or("").to_string(),
-                    title_y: node.prop_str("TitleY").unwrap_or("").to_string(),
-                    x_min,
-                    x_max,
-                    y_min,
-                    y_max,
-                    x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
-                    cursors: self.cursors.get(&node.name).cloned().unwrap_or_default(),
-                }
-            }
+            "caCartesianPlot" | "caStripPlot" => self.plot_kind(node),
             "caScan2D" => scan_kind(
                 node,
                 data,
                 self.axis_count(node, "channelWidth"),
                 self.axis_count(node, "channelHeight"),
             ),
-            "caWaterfallPlot" => VisualKind::Waterfall {
-                rows: self.waterfall_rows(node),
-            },
+            "caWaterfallPlot" => {
+                let rows = self.waterfall_rows(node);
+                let (min, max) = waterfall_limits(node, &rows);
+                VisualKind::Waterfall { rows, min, max }
+            }
             "caByte" | "caByteController" | "caBitnames" => VisualKind::Bits {
                 value: value as u32,
                 count: bit_count(node),
                 names: bit_names(node),
             },
             "caTable" | "caWaveTable" => VisualKind::Table {
-                cells: table_cells(node, data),
+                cells: self.table_cells(node),
             },
-            "caMenu" | "caChoice" | "QComboBox" => VisualKind::Menu {
+            "caMenu" | "QComboBox" => VisualKind::Menu {
                 items: menu_items(node, data),
                 selected: value.max(0.0) as usize,
             },
+            "caChoice" => {
+                let (items, selected) = choice_items(node, data, value);
+                let (columns, inverse) = choice_layout(node, items.len());
+                VisualKind::Choice {
+                    items,
+                    selected,
+                    columns,
+                    inverse,
+                }
+            }
             "caRelatedDisplay" | "caMimeDisplay" => VisualKind::Related {
                 entries: related_entries(node),
             },
             "caShellCommand" | "caScriptButton" => VisualKind::Command {
                 line: shell_line(node),
             },
-            "caClock" => VisualKind::Clock {
-                analog: node
-                    .enum_tail("timeType")
-                    .is_some_and(|t| t.eq_ignore_ascii_case("Analog")),
-            },
+            "caClock" => {
+                let (hour, minute, second) = clock_parts(self.now_ms);
+                VisualKind::Clock {
+                    analog: node
+                        .enum_tail("timeType")
+                        .is_some_and(|t| t.eq_ignore_ascii_case("Analog")),
+                    hour,
+                    minute,
+                    second,
+                }
+            }
             "caDoubleTabWidget" | "QTabWidget" => VisualKind::Tabs {
                 labels: tab_labels(node),
                 current: self.tabs.get(&node.name).copied().unwrap_or_else(|| {
@@ -461,27 +490,16 @@ impl Session {
             },
             "caCalc" => VisualKind::Label,
             "caInclude" => VisualKind::Frame,
-            "caAlarmTree" => VisualKind::Table {
-                cells: self.alarm_tree_cells(node),
+            "caAlarmTree" => VisualKind::Tree {
+                rows: self.alarm_tree_rows(node),
             },
             "caAlarmLog" => VisualKind::Table {
                 cells: self.alarm_rows(data),
             },
             "caLineDraw" => VisualKind::Polyline {
-                points: self
-                    .history
-                    .get(node.prop_str("channel").unwrap_or(""))
-                    .map(|s| {
-                        s.iter()
-                            .enumerate()
-                            .map(|(i, v)| caqtdm_core::Point {
-                                x: i as i32,
-                                y: *v as i32,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                points: self.line_draw_points(node),
                 closed: false,
+                width: node.prop_f64("frameLineWidth").unwrap_or(1.0).max(1.0) as i32,
             },
             _ => VisualKind::Unknown,
         }
@@ -574,6 +592,33 @@ impl Session {
             .and_then(|raw| self.cache.get(raw))
     }
 
+    fn plot_kind(&self, node: &WidgetNode) -> VisualKind {
+        let (axis_min, axis_max) = axis_pair(node, 0);
+        let (y2_min, y2_max) = axis_pair(node, 1);
+        let (x_min, x_max, y_min, y_max) = self
+            .zooms
+            .get(&node.name)
+            .copied()
+            .unwrap_or((0.0, 1.0, axis_min, axis_max));
+        VisualKind::Plot {
+            series: self.plot_series(node),
+            title: node.prop_str("Title").unwrap_or("").to_string(),
+            title_x: node.prop_str("TitleX").unwrap_or("").to_string(),
+            title_y: node.prop_str("TitleY").unwrap_or("").to_string(),
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            y2_min,
+            y2_max,
+            log_y: node
+                .enum_tail("YAxisType")
+                .is_some_and(|mode| mode.eq_ignore_ascii_case("log10")),
+            x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
+            cursors: self.cursors.get(&node.name).cloned().unwrap_or_default(),
+        }
+    }
+
     fn plot_series(&self, node: &WidgetNode) -> Vec<Vec<f64>> {
         let span = if node.class_name == "caStripPlot" {
             node.prop_f64("timeSpan")
@@ -601,11 +646,89 @@ impl Session {
     }
 
     fn waterfall_rows(&self, node: &WidgetNode) -> Vec<Vec<f64>> {
-        node_channels(node)
+        let mut rows: Vec<Vec<f64>> = node_channels(node)
             .first()
             .and_then(|raw| self.waterfall.get(raw))
             .map(|rows| rows.iter().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(limit) = node.prop_f64("NumberOfTraces") {
+            let limit = limit.max(0.0) as usize;
+            if limit > 0 && rows.len() > limit {
+                rows = rows.split_off(rows.len() - limit);
+            }
+        }
+        rows
+    }
+
+    fn line_draw_points(&self, node: &WidgetNode) -> Vec<caqtdm_core::Point> {
+        let raw = node.prop_str("channel").unwrap_or("");
+        let samples: Vec<f64> = self
+            .history
+            .get(raw)
+            .map(|series| series.iter().copied().collect())
+            .unwrap_or_default();
+        if samples.is_empty() {
+            return Vec::new();
+        }
+        let (min, max) = limits_of(node, self.cache.get(raw));
+        let width = node.rect.width.max(1);
+        let height = node.rect.height.max(1);
+        let last = samples.len().saturating_sub(1).max(1) as f64;
+        samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                let x = if samples.len() == 1 {
+                    0
+                } else {
+                    ((index as f64) / last * f64::from(width - 1)) as i32
+                };
+                let y = height - 1 - (fraction(*sample, min, max) * f64::from(height - 1)) as i32;
+                caqtdm_core::Point { x, y }
+            })
+            .collect()
+    }
+
+    fn table_cells(&self, node: &WidgetNode) -> Vec<Vec<String>> {
+        let channels = node_channels(node);
+        if node.class_name == "caWaveTable" {
+            let data = channels.first().and_then(|raw| self.cache.get(raw));
+            return wave_table(node, data);
+        }
+        let columns: Vec<Vec<String>> = channels
+            .iter()
+            .map(|raw| column_text(node, self.cache.get(raw)))
+            .collect();
+        if columns.is_empty() {
+            return vec![vec!["---".into()]];
+        }
+        let rows = columns.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        (0..rows)
+            .map(|row| {
+                columns
+                    .iter()
+                    .map(|column| column.get(row).cloned().unwrap_or_default())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn toggle_group(&mut self, node: &WidgetNode, index: usize) {
+        let rows = self.alarm_tree_rows(node);
+        let Some(row) = rows.get(index) else {
+            return;
+        };
+        if !row.group {
+            return;
+        }
+        if !self.collapsed.remove(&row.name) {
+            self.collapsed.insert(row.name.clone());
+        }
+        self.log.push(format!(
+            "tree {} {}",
+            row.name,
+            self.collapsed.contains(&row.name)
+        ));
     }
 
     fn propagate_rescale(&mut self) {
@@ -659,33 +782,56 @@ impl Session {
         collect(&self.root, &mut self.nodes);
     }
 
-    fn alarm_tree_cells(&self, node: &WidgetNode) -> Vec<Vec<String>> {
+    fn alarm_tree_rows(&self, node: &WidgetNode) -> Vec<TreeRow> {
         let mut rows = Vec::new();
         fn walk(
             node: &WidgetNode,
+            depth: u32,
             cache: &BTreeMap<String, ChannelData>,
-            rows: &mut Vec<Vec<String>>,
+            collapsed: &BTreeSet<String>,
+            rows: &mut Vec<TreeRow>,
         ) {
-            if node.class_name != "caAlarmTree" && node.class_name != "caFrame" {
+            let group = node.class_name != "caAlarmTree" && !node.children.is_empty();
+            let open = !collapsed.contains(&node.name);
+            if node.class_name != "caAlarmTree" {
                 let channel = node.prop_str("channel").unwrap_or("").to_string();
                 let severity = cache
                     .get(&channel)
                     .map(|data| data.severity.name().to_string())
                     .unwrap_or_else(|| "n/a".into());
-                rows.push(vec![
-                    node.name.clone(),
-                    channel,
-                    node.prop_str("mask").unwrap_or("").to_string(),
-                    severity,
-                ]);
+                rows.push(TreeRow {
+                    name: node.name.clone(),
+                    depth,
+                    group,
+                    open,
+                    cells: vec![
+                        node.name.clone(),
+                        channel,
+                        node.prop_str("mask").unwrap_or("").to_string(),
+                        severity,
+                    ],
+                });
             }
-            for child in &node.children {
-                walk(child, cache, rows);
+            if node.class_name == "caAlarmTree" || open {
+                let next = if node.class_name == "caAlarmTree" {
+                    depth
+                } else {
+                    depth + 1
+                };
+                for child in &node.children {
+                    walk(child, next, cache, collapsed, rows);
+                }
             }
         }
-        walk(node, &self.cache, &mut rows);
+        walk(node, 0, &self.cache, &self.collapsed, &mut rows);
         if rows.is_empty() {
-            rows.push(vec!["empty".into()]);
+            rows.push(TreeRow {
+                name: "empty".into(),
+                depth: 0,
+                group: false,
+                open: true,
+                cells: vec!["empty".into()],
+            });
         }
         rows
     }
@@ -764,10 +910,20 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
         "outputA",
         "outputB",
         "channels",
+        "channels_1",
+        "channels_2",
+        "channels_3",
+        "channels_4",
+        "channels_5",
+        "channels_6",
     ] {
         if let Some(prop) = node.prop(key) {
-            if key == "channels" {
-                out.extend(prop.as_string_list());
+            if key == "channels" || key.starts_with("channels_") {
+                for item in prop.as_string_list() {
+                    if !item.is_empty() && !out.contains(&item) {
+                        out.push(item);
+                    }
+                }
             } else if let Some(text) = prop.as_str() {
                 if !text.is_empty() {
                     out.push(text.to_string());
@@ -975,6 +1131,9 @@ fn scan_kind(node: &WidgetNode, data: Option<&ChannelData>, width: u32, height: 
         x_max: 1.0,
         y_min: f64::NAN,
         y_max: f64::NAN,
+        y2_min: f64::NAN,
+        y2_max: f64::NAN,
+        log_y: false,
         x_ticks: 2,
         cursors: Vec::new(),
     }
@@ -1140,16 +1299,38 @@ fn shell_line(node: &WidgetNode) -> String {
     }
 }
 
-fn table_cells(node: &WidgetNode, data: Option<&ChannelData>) -> Vec<Vec<String>> {
-    let _ = node;
+fn column_text(node: &WidgetNode, data: Option<&ChannelData>) -> Vec<String> {
     let Some(data) = data else {
-        return vec![vec!["---".into()]];
+        return vec!["---".into()];
     };
+    let prec = precision_of(node, Some(data));
     match &data.value {
-        PvValue::Doubles(v) => v.iter().map(|n| vec![n.to_string()]).collect(),
-        PvValue::Strings(v) => v.iter().map(|s| vec![s.clone()]).collect(),
-        other => vec![vec![other.as_text()]],
+        PvValue::Doubles(values) => values
+            .iter()
+            .map(|n| format_number(*n, FormatType::Decimal, prec))
+            .collect(),
+        PvValue::Strings(values) => values.clone(),
+        other => vec![other.as_text()],
     }
+}
+
+fn wave_table(node: &WidgetNode, data: Option<&ChannelData>) -> Vec<Vec<String>> {
+    let values = column_text(node, data);
+    let columns = node.prop_f64("numberOfColumns").unwrap_or(1.0).max(1.0) as usize;
+    let rows = node.prop_f64("numberOfRows").map(|n| n.max(1.0) as usize);
+    let rows = rows.unwrap_or_else(|| values.len().div_ceil(columns).max(1));
+    (0..rows)
+        .map(|row| {
+            (0..columns)
+                .map(|column| {
+                    values
+                        .get(row * columns + column)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn slider_fraction(node: &WidgetNode, fraction: f64) -> f64 {
@@ -1203,13 +1384,174 @@ fn is_monitor(class_name: &str) -> bool {
     )
 }
 
-fn format_clock(now_ms: u64) -> String {
+fn clock_parts(now_ms: u64) -> (u32, u32, u32) {
     let secs = now_ms / 1000;
     let tod = secs % 86_400;
-    let hour = tod / 3600;
-    let min = (tod % 3600) / 60;
-    let sec = tod % 60;
-    format!("{hour:02}:{min:02}:{sec:02}")
+    let hour = (tod / 3600) as u32;
+    let minute = ((tod % 3600) / 60) as u32;
+    let second = (tod % 60) as u32;
+    (hour, minute, second)
+}
+
+fn format_clock(now_ms: u64) -> String {
+    let (hour, minute, second) = clock_parts(now_ms);
+    format!("{hour:02}:{minute:02}:{second:02}")
+}
+
+fn clamp_entry(node: &WidgetNode, value: f64) -> f64 {
+    if node.class_name != "caNumeric" && node.class_name != "caApplyNumeric" {
+        return value;
+    }
+    if node
+        .enum_tail("limitsMode")
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("User"))
+    {
+        let min = node.prop_f64("minValue").unwrap_or(f64::NEG_INFINITY);
+        let max = node.prop_f64("maxValue").unwrap_or(f64::INFINITY);
+        return value.clamp(min, max);
+    }
+    value
+}
+
+fn thermo_bands(
+    _node: &WidgetNode,
+    data: Option<&ChannelData>,
+    min: f64,
+    max: f64,
+) -> Vec<ThermoBand> {
+    if max <= min {
+        return Vec::new();
+    }
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    let mut bands = Vec::new();
+    for (at, major) in [
+        (data.limits.lower_warning, false),
+        (data.limits.upper_warning, false),
+        (data.limits.lower_alarm, true),
+        (data.limits.upper_alarm, true),
+    ] {
+        if at.is_finite() {
+            bands.push(ThermoBand {
+                at: fraction(at, min, max),
+                major,
+            });
+        }
+    }
+    bands
+}
+
+fn axis_pair(node: &WidgetNode, index: u32) -> (f64, f64) {
+    let n = index + 1;
+    let min = node.prop_f64(&format!("YaxisLimitsMin_{n}"));
+    let max = node.prop_f64(&format!("YaxisLimitsMax_{n}"));
+    if min.is_some() || max.is_some() {
+        return (min.unwrap_or(f64::NAN), max.unwrap_or(f64::NAN));
+    }
+    if let Some(text) = node.prop_str("YaxisLimits") {
+        let nums: Vec<f64> = text
+            .split([';', ','])
+            .filter_map(|part| part.trim().parse().ok())
+            .collect();
+        let slot = index as usize * 2;
+        if nums.len() >= slot + 2 {
+            return (nums[slot], nums[slot + 1]);
+        }
+    }
+    (f64::NAN, f64::NAN)
+}
+
+fn waterfall_limits(node: &WidgetNode, rows: &[Vec<f64>]) -> (f64, f64) {
+    let min = node.prop_f64("IntensityMin");
+    let max = node.prop_f64("IntensityMax");
+    if let (Some(min), Some(max)) = (min, max) {
+        if max > min {
+            return (min, max);
+        }
+    }
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for row in rows {
+        for sample in row {
+            lo = lo.min(*sample);
+            hi = hi.max(*sample);
+        }
+    }
+    if hi > lo {
+        (lo, hi)
+    } else {
+        (0.0, 1.0)
+    }
+}
+
+fn choice_items(node: &WidgetNode, data: Option<&ChannelData>, value: f64) -> (Vec<String>, usize) {
+    let all = menu_items(node, data);
+    let start = node.prop_f64("startBit").unwrap_or(0.0).max(0.0) as usize;
+    let end = node
+        .prop_f64("endBit")
+        .map(|bit| bit.max(0.0) as usize)
+        .unwrap_or(all.len().saturating_sub(1));
+    let items = if all.is_empty() {
+        vec!["0".into(), "1".into()]
+    } else if start < all.len() {
+        let end = end.min(all.len() - 1);
+        if start <= end {
+            all[start..=end].to_vec()
+        } else {
+            all
+        }
+    } else {
+        all
+    };
+    let selected = value.max(0.0) as usize;
+    let selected = selected
+        .saturating_sub(start)
+        .min(items.len().saturating_sub(1));
+    (items, selected)
+}
+
+fn choice_layout(node: &WidgetNode, count: usize) -> (u32, bool) {
+    let count = count.max(1);
+    match node.enum_tail("stackingMode").unwrap_or("Row") {
+        "Column" => (count as u32, false),
+        "RowInverse" => (1, true),
+        "RowColumn" => {
+            let lines = (count as f64).sqrt().ceil().max(2.0) as usize;
+            (count.div_ceil(lines).max(1) as u32, false)
+        }
+        _ => (1, false),
+    }
+}
+
+fn grid_cells(node: &WidgetNode) -> Vec<GridCell> {
+    let labels = split_list(node.prop_str("labels"));
+    let files = split_list(node.prop_str("files"));
+    let args = split_list(node.prop_str("args"));
+    let count = if !labels.is_empty() && !files.is_empty() && !args.is_empty() {
+        labels.len().min(files.len()).min(args.len())
+    } else {
+        labels.len().max(files.len())
+    };
+    (0..count)
+        .map(|index| GridCell {
+            label: labels.get(index).cloned().unwrap_or_default(),
+            file: files.get(index).cloned().unwrap_or_default(),
+            args: args.get(index).cloned().unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn rowcol_columns(node: &WidgetNode, count: usize) -> u32 {
+    let count = count.max(1);
+    match node.enum_tail("stacking").unwrap_or("Row") {
+        "Column" => count as u32,
+        "RowColumn" => {
+            let lines = (count as f64).sqrt().ceil().max(2.0) as usize;
+            count.div_ceil(lines).max(1) as u32
+        }
+        _ => 1,
+    }
 }
 
 /// Classes the runtime knows how to draw. The list is the contract the CLI

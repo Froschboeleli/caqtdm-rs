@@ -115,6 +115,268 @@ fn config_print_attach_and_http() {
 fn help_and_bad_file() {
     let help = execute(&args(&["help"])).unwrap();
     assert!(help.contains("-macro"));
+    assert!(help.contains("-server"));
+    assert!(help.contains("-web_instance_limit"));
+    assert!(help.contains("-stylefile"));
+    assert!(help.contains("-emptycache"));
     let err = execute(&args(&["validate", "missing-display.ui"])).unwrap_err();
     assert!(!err.is_empty());
+    let unknown = execute(&args(&["-notAFlag"])).unwrap_err();
+    assert!(unknown.contains("unexpected argument -notAFlag"));
+}
+
+#[test]
+fn server_flags_are_reported_and_clamped() {
+    let limited = execute(&args(&[
+        "config",
+        "-web_instance_limit",
+        "9000",
+        "-web_timeout",
+        "80",
+        "-server_port",
+        "14000",
+        "-displayFont",
+        "Helvetica",
+        "-x",
+        "-style",
+        "fusion",
+        "-noMsg",
+        "-noResize",
+        "-dg",
+        "30x16+10+20",
+        "-option",
+        "bsmodulo=10,bsoffset=3",
+        "-web_launcher_root_file",
+        "root.ui",
+        "-web_interaction_timeout",
+        "-host",
+        "127.0.0.1",
+    ]))
+    .unwrap();
+    assert!(limited.contains("web_limit=5000"));
+    assert!(limited.contains("web_timeout=80"));
+    assert!(limited.contains("web_port=14001"));
+    assert!(limited.contains("font=Helvetica"));
+    assert!(limited.contains("execute_only=true"));
+    assert!(limited.contains("style=fusion"));
+    assert!(limited.contains("noMsg=true"));
+    assert!(limited.contains("noResize=true"));
+    assert!(limited.contains("geometry=30x16"));
+    assert!(limited.contains("option.bsmodulo=10"));
+    assert!(limited.contains("option.bsoffset=3"));
+    assert!(limited.contains("root=root.ui"));
+    assert!(limited.contains("interaction=true"));
+    assert!(limited.contains("host=127.0.0.1"));
+
+    let disabled = execute(&args(&["config", "-web_timeout", "30"])).unwrap();
+    assert!(disabled.contains("web_timeout=0"));
+
+    let zero = execute(&args(&["config", "-web_instance_limit", "0"])).unwrap_err();
+    assert!(zero.contains("at least 1"));
+
+    let http = execute(&args(&["-httpconfig"])).unwrap();
+    assert!(http.contains("httpconfig=true"));
+    assert!(http.contains("control_system="));
+}
+
+#[test]
+fn stylefile_geometry_and_url_change_the_result() {
+    let dir = std::env::temp_dir().join(format!("caqtdm-flags-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ui = dir.join("label.ui");
+    std::fs::write(
+        &ui,
+        r#"<?xml version="1.0"?>
+<ui version="4.0"><class>Form</class>
+<widget class="QWidget" name="Form">
+ <property name="geometry"><rect><x>0</x><y>0</y><width>40</width><height>20</height></rect></property>
+ <widget class="caLabel" name="letter">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>40</width><height>20</height></rect></property>
+  <property name="text"><string>A</string></property>
+ </widget>
+</widget></ui>"#,
+    )
+    .unwrap();
+    let css = dir.join("red.qss");
+    std::fs::write(&css, "color: #ff0000;\n").unwrap();
+    let ppm = dir.join("label.ppm");
+    execute(&args(&[
+        "paint",
+        ui.to_str().unwrap(),
+        "-stylefile",
+        css.to_str().unwrap(),
+        "-dg",
+        "40x20",
+        "-o",
+        ppm.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let bytes = std::fs::read(&ppm).unwrap();
+    assert!(bytes.starts_with(b"P6\n40 20\n"));
+    let (r, g, b) = ppm_rgb(&bytes, 3, 2);
+    assert_eq!((r, g, b), (255, 0, 0));
+    let (r, g, b) = ppm_rgb(&bytes, 10, 10);
+    assert_eq!((r, g, b), (236, 236, 236));
+
+    let small = dir.join("small.ppm");
+    let painted = execute(&args(&[
+        ui.to_str().unwrap(),
+        "-savetoimage",
+        small.to_str().unwrap(),
+        "-displayGeometry",
+        "30x16",
+    ]))
+    .unwrap();
+    assert!(painted.contains("30x16"));
+    assert!(std::fs::read(&small).unwrap().starts_with(b"P6\n30 16\n"));
+
+    let extra = dir.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(
+        extra.join("child.ui"),
+        r#"<?xml version="1.0"?>
+<ui version="4.0"><class>Form</class>
+<widget class="QWidget" name="Form">
+ <widget class="caLabel" name="fromurl">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>40</width><height>16</height></rect></property>
+  <property name="text"><string>FROMURL</string></property>
+ </widget>
+</widget></ui>"#,
+    )
+    .unwrap();
+    let parent = dir.join("parent.ui");
+    std::fs::write(
+        &parent,
+        r#"<?xml version="1.0"?>
+<ui version="4.0"><class>Form</class>
+<widget class="QWidget" name="Form">
+ <widget class="caInclude" name="inc">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>40</width><height>16</height></rect></property>
+  <property name="filename"><string>child.ui</string></property>
+ </widget>
+</widget></ui>"#,
+    )
+    .unwrap();
+    let missing = execute(&args(&["dump", parent.to_str().unwrap()])).unwrap_err();
+    assert!(missing.contains("included display not found"));
+    let dumped = execute(&args(&[
+        "dump",
+        parent.to_str().unwrap(),
+        "-url",
+        extra.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(dumped.contains("caLabel"));
+    assert!(dumped.contains("fromurl"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn serve_limit_and_sampling_options() {
+    use std::net::SocketAddr;
+
+    let text = execute(&args(&[
+        "-server",
+        "-server_port",
+        "0",
+        "-web_server_port",
+        "0",
+        "-web_instance_limit",
+        "1",
+        "-noMsg",
+        "-noResize",
+        "-style",
+        "fusion",
+        "-web_allow_insecure_cashell_commands",
+        "-web_timeout",
+        "90",
+    ]))
+    .unwrap();
+    let mut lines = text.lines();
+    let http: SocketAddr = lines
+        .next()
+        .unwrap()
+        .trim_start_matches("http ")
+        .parse()
+        .unwrap();
+    let attach: SocketAddr = lines
+        .next()
+        .unwrap()
+        .trim_start_matches("attach ")
+        .parse()
+        .unwrap();
+    assert_ne!(http, attach);
+    let page = http_retry(http);
+    assert!(page.contains("200"));
+    assert!(page.contains("caQtDM"));
+    assert!(page.contains("style=fusion"));
+    assert!(page.contains("noMsg=true"));
+    assert!(page.contains("noResize=true"));
+    assert!(page.contains("shell=true"));
+    assert!(page.contains("web_limit=1"));
+    assert!(page.contains("web_timeout=90"));
+    let busy = http_retry(http);
+    assert!(busy.contains("503"));
+    assert!(busy.contains("busy"));
+    let _ = attach;
+
+    assert_eq!(
+        caqtdm_app::sampled_pulse(&args(&["config"]), 1000).unwrap(),
+        100
+    );
+    assert_eq!(
+        caqtdm_app::sampled_pulse(
+            &args(&["config", "-option", "bsmodulo=10,bsoffset=3"]),
+            1000
+        )
+        .unwrap(),
+        103
+    );
+}
+
+#[test]
+fn empty_cache_deletes_the_cached_file() {
+    let dir = std::env::temp_dir().join("caqtdm-display-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("stale-{}", std::process::id()));
+    std::fs::write(&file, b"old").unwrap();
+    let text = execute(&args(&["config", "-emptycache"])).unwrap();
+    assert!(!file.exists());
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("emptycache="))
+        .unwrap();
+    let count: usize = line.trim_start_matches("emptycache=").parse().unwrap();
+    assert!(count >= 1);
+}
+
+fn http_retry(addr: std::net::SocketAddr) -> String {
+    let mut last = String::new();
+    for _ in 0..40 {
+        match caqtdm_app::http_get(addr) {
+            Ok(page) => return page,
+            Err(err) => {
+                last = err.to_string();
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    }
+    panic!("http {addr}: {last}");
+}
+
+fn ppm_rgb(bytes: &[u8], x: u32, y: u32) -> (u8, u8, u8) {
+    let data_at = bytes
+        .windows(5)
+        .position(|window| window == b"\n255\n")
+        .unwrap()
+        + 5;
+    let header = std::str::from_utf8(&bytes[..data_at]).unwrap();
+    let mut lines = header.split('\n');
+    assert_eq!(lines.next(), Some("P6"));
+    let size = lines.next().unwrap();
+    let width: u32 = size.split_whitespace().next().unwrap().parse().unwrap();
+    let i = ((y * width + x) * 3) as usize;
+    let px = &bytes[data_at + i..data_at + i + 3];
+    (px[0], px[1], px[2])
 }

@@ -13,4 +13,7 @@ mod visual;
 
 pub use image::{decode_image, decode_ppm, load_image_notes};
 pub use runtime::{supported_classes, toggled_bit_value, Session};
-pub use visual::{Action, Effect, ShapeForm, Visual, VisualKind};
+pub use visual::{
+    cell_at, cell_rect, Action, Effect, GridCell, ShapeForm, ThermoBand, TreeRow, Visual,
+    VisualKind,
+};

@@ -127,7 +127,10 @@ fn each_widget_honors_the_properties_an_author_sets() {
     mime.set_prop("labels", PropValue::String("open".into()));
     mime.set_prop("files", PropValue::String("other.ui".into()));
     let mut rowcol = leaf("caRowColMenu", "rowcol", "intern://M");
-    rowcol.set_prop("labels", PropValue::String("a,b".into()));
+    rowcol.set_prop("labels", PropValue::String("a;b".into()));
+    rowcol.set_prop("files", PropValue::String("one.ui;two.ui".into()));
+    rowcol.set_prop("args", PropValue::String("A=1;B=2".into()));
+    rowcol.set_prop("stacking", PropValue::Enum("Column".into()));
     let mut cam = leaf("caCamera", "cam", "");
     cam.set_prop("channelData", PropValue::String("intern://CAM16".into()));
     cam.set_prop("channelWidth", PropValue::Double(2.0));
@@ -159,7 +162,7 @@ fn each_widget_honors_the_properties_an_author_sets() {
     let visuals = session.visuals();
     let by = |name: &str| visuals.iter().find(|v| v.name == name).unwrap().clone();
 
-    assert!(by("numeric").text.contains("e+"));
+    assert_eq!(by("numeric").text, "1.20e+03");
     assert_eq!(by("label").text, "hello");
     assert!(by("lines").text.contains('\n'));
     assert_eq!(by("hex").text, "0xff");
@@ -185,7 +188,7 @@ fn each_widget_honors_the_properties_an_author_sets() {
         }
     }
     match by("thermo").kind {
-        VisualKind::Thermo { fraction } => assert!((fraction - 0.25).abs() < 1e-9),
+        VisualKind::Thermo { fraction, .. } => assert!((fraction - 0.25).abs() < 1e-9),
         other => panic!("{other:?}"),
     }
     match by("meter").kind {
@@ -193,21 +196,21 @@ fn each_widget_honors_the_properties_an_author_sets() {
         other => panic!("{other:?}"),
     }
     match by("shape").kind {
-        VisualKind::Shape { form, filled } => {
+        VisualKind::Shape { form, filled, .. } => {
             assert_eq!(form, ShapeForm::Circle);
             assert!(filled);
         }
         other => panic!("{other:?}"),
     }
     match by("poly").kind {
-        VisualKind::Polyline { points, closed } => {
+        VisualKind::Polyline { points, closed, .. } => {
             assert_eq!(points.len(), 2);
             assert!(closed);
         }
         other => panic!("{other:?}"),
     }
     match by("clock").kind {
-        VisualKind::Clock { analog } => assert!(analog),
+        VisualKind::Clock { analog, .. } => assert!(analog),
         other => panic!("{other:?}"),
     }
     match by("bits").kind {
@@ -226,7 +229,7 @@ fn each_widget_honors_the_properties_an_author_sets() {
         other => panic!("{other:?}"),
     }
     match by("fall").kind {
-        VisualKind::Waterfall { rows } => assert!(!rows.is_empty()),
+        VisualKind::Waterfall { rows, .. } => assert!(!rows.is_empty()),
         other => panic!("{other:?}"),
     }
     match by("scan").kind {
@@ -246,7 +249,7 @@ fn each_widget_honors_the_properties_an_author_sets() {
         other => panic!("{other:?}"),
     }
     match by("tree").kind {
-        VisualKind::Table { cells } => assert_eq!(cells[0][3], "MAJOR"),
+        VisualKind::Tree { rows } => assert_eq!(rows[0].cells[3], "MAJOR"),
         other => panic!("{other:?}"),
     }
     match by("log").kind {
@@ -254,11 +257,14 @@ fn each_widget_honors_the_properties_an_author_sets() {
         other => panic!("{other:?}"),
     }
     match by("strip").kind {
-        VisualKind::Plot { series, .. } => assert_eq!(series[0].len(), 2),
+        VisualKind::Plot { series, .. } => assert_eq!(series[0], vec![3.0, 4.0]),
         other => panic!("{other:?}"),
     }
     match by("rowcol").kind {
-        VisualKind::Menu { items, .. } => assert_eq!(items, vec!["a".to_string(), "b".into()]),
+        VisualKind::Grid { columns, cells } => {
+            assert_eq!(columns, 2);
+            assert_eq!(cells[1].file, "two.ui");
+        }
         other => panic!("{other:?}"),
     }
     match by("cam").kind {
@@ -363,12 +369,23 @@ fn each_widget_honors_the_properties_an_author_sets() {
             macros: String::new()
         }]
     );
-    session.act(Action::Choose {
+    let opened = session.act(Action::Choose {
         id: id("rowcol"),
         index: 1,
+    });
+    assert_eq!(
+        opened,
+        vec![Effect::Open {
+            file: "two.ui".into(),
+            macros: "B=2".into(),
+        }]
+    );
+    session.act(Action::SetNumber {
+        id: id("numeric"),
+        value: 7.5,
     });
     assert!(session
         .log
         .iter()
-        .any(|line| line.contains("put intern://M = 1")));
+        .any(|line| line.contains("put intern://N = 7.5")));
 }

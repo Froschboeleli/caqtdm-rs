@@ -80,10 +80,33 @@ fn env_overlay_and_gps_clock() {
     assert!(env.set_value(&spec, &PutValue::String("x".into())).is_err());
 
     let mut gps = GpsSource::new();
-    let spec = caqtdm_core::parse_channel("utc", "gps");
-    gps.add_monitor(&spec).unwrap();
+    for name in ["utc", "lat", "lon", "alt", "sats"] {
+        gps.add_monitor(&caqtdm_core::parse_channel(name, "gps"))
+            .unwrap();
+    }
     let updates = gps.poll(1_700_000_000_000);
-    assert!(updates[0].data.value.as_text().ends_with('Z'));
+    let value = |name: &str| {
+        updates
+            .iter()
+            .find(|update| update.data.description.ends_with(name))
+            .unwrap()
+            .data
+            .value
+            .clone()
+    };
+    assert!(value("utc").as_text().ends_with('Z'));
+    assert_eq!(value("lat").as_f64(), Some(47.3769));
+    assert_eq!(value("lon").as_f64(), Some(8.5417));
+    assert_eq!(value("alt").as_f64(), Some(408.0));
+    assert_eq!(value("sats").as_f64(), Some(8.0));
+    let lat = caqtdm_core::parse_channel("lat", "gps");
+    gps.set_value(&lat, &PutValue::Double(1.25)).unwrap();
+    let moved = gps.poll(1_700_000_000_000);
+    let lat = moved
+        .iter()
+        .find(|update| update.data.description.ends_with("lat"))
+        .unwrap();
+    assert_eq!(lat.data.value.as_f64(), Some(1.25));
 }
 
 #[test]

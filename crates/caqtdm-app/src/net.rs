@@ -13,14 +13,34 @@ use std::time::Duration;
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub fn serve_http(stop: Arc<AtomicBool>) -> std::io::Result<std::net::SocketAddr> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
+    serve_http_at("127.0.0.1:0".parse().unwrap(), stop, "caQtDM\n", 5000)
+}
+
+/// Bind the status page. `limit` is the number of HTTP requests to answer
+/// before later clients get 503. `status` is the body of `GET /`.
+pub fn serve_http_at(
+    addr: std::net::SocketAddr,
+    stop: Arc<AtomicBool>,
+    status: impl Into<String>,
+    limit: usize,
+) -> std::io::Result<std::net::SocketAddr> {
+    let listener = TcpListener::bind(addr)?;
+    let bound = listener.local_addr()?;
     listener.set_nonblocking(true)?;
+    let status = Arc::new(status.into());
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let _ = handle_http(stream);
+                    let n = seen.fetch_add(1, Ordering::Relaxed);
+                    let body = if limit > 0 && n >= limit {
+                        "busy\n".to_string()
+                    } else {
+                        (*status).clone()
+                    };
+                    let code = if body.starts_with("busy") { 503 } else { 200 };
+                    let _ = handle_http(stream, code, &body);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
@@ -29,10 +49,10 @@ pub fn serve_http(stop: Arc<AtomicBool>) -> std::io::Result<std::net::SocketAddr
             }
         }
     });
-    Ok(addr)
+    Ok(bound)
 }
 
-fn handle_http(mut stream: TcpStream) -> std::io::Result<()> {
+fn handle_http(mut stream: TcpStream, code: u16, body: &str) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_millis(400)))?;
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf)?;
@@ -50,9 +70,13 @@ fn handle_http(mut stream: TcpStream) -> std::io::Result<()> {
         }
         return Ok(());
     }
-    let body = "caQtDM\n";
+    let reason = if code == 200 {
+        "OK"
+    } else {
+        "Service Unavailable"
+    };
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(response.as_bytes())
@@ -87,7 +111,14 @@ pub fn websocket_accept(key: &str) -> String {
 }
 
 pub fn serve_attach(stop: Arc<AtomicBool>) -> std::io::Result<std::net::SocketAddr> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
+    serve_attach_at("127.0.0.1:0".parse().unwrap(), stop)
+}
+
+pub fn serve_attach_at(
+    addr: std::net::SocketAddr,
+    stop: Arc<AtomicBool>,
+) -> std::io::Result<std::net::SocketAddr> {
+    let listener = TcpListener::bind(addr)?;
     let addr = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     std::thread::spawn(move || {

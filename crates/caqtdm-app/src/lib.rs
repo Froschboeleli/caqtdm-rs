@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use caqtdm_core::parse_macro_list;
-use caqtdm_datasource::{register_builtin, Hub};
+use caqtdm_core::PropValue;
+use caqtdm_datasource::{register_builtin, BsreadSource, DataSource, Hub};
 use caqtdm_epics_ca::CaSource;
 use caqtdm_epics_pva::PvaSource;
-use caqtdm_paint::paint;
+use caqtdm_paint::paint_in;
 use caqtdm_ui::{expand_includes, load_path, SearchPath, WidgetNode};
 use caqtdm_widgets::{load_image_notes, supported_classes, Session};
 
@@ -20,7 +21,8 @@ mod net;
 
 pub use config::ConfigFile;
 pub use net::{
-    attach_to, http_get, serve_attach, serve_http, websocket_accept, websocket_roundtrip,
+    attach_to, http_get, serve_attach, serve_attach_at, serve_http, serve_http_at,
+    websocket_accept, websocket_roundtrip,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,27 @@ struct Options {
     pva: Option<SocketAddr>,
     macro_file: Option<PathBuf>,
     attach: Option<SocketAddr>,
+    no_msg: bool,
+    no_resize: bool,
+    execute_only: bool,
+    http_config: bool,
+    empty_cache: bool,
+    web_interaction: bool,
+    allow_insecure_shell: bool,
+    server: bool,
+    style: String,
+    style_file: Option<PathBuf>,
+    display_font: String,
+    geometry: Option<(u32, u32)>,
+    url: String,
+    host: String,
+    server_port: u16,
+    web_port: u16,
+    web_port_set: bool,
+    web_timeout: u64,
+    web_limit: usize,
+    launcher_root: String,
+    options: Vec<(String, String)>,
 }
 
 pub fn execute(args: &[String]) -> Result<String, String> {
@@ -69,33 +92,9 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             });
             Ok(lines.join("\n"))
         }
-        "paint" | "print" => {
-            let path = require_file(&options, "paint")?;
-            let display = load_display(&path, &options)?;
-            let mut session = Session::open(
-                display.root,
-                standard_hub(&options),
-                &parse_macro_list(&options.macros),
-            );
-            session.allow_shell = options.execute_shell;
-            session.tick(0);
-            let mut visuals = session.visuals();
-            let mut search = SearchPath::from_file(&path);
-            if let Some(parent) = path.parent() {
-                search.push(parent);
-            }
-            load_image_notes(&mut visuals, |note| {
-                search.find(note).and_then(|file| std::fs::read(file).ok())
-            });
-            let image = paint(&visuals);
-            let dest = options
-                .output
-                .clone()
-                .unwrap_or_else(|| path.with_extension("ppm"));
-            std::fs::write(&dest, image.to_ppm()).map_err(|e| e.to_string())?;
-            Ok(format!("wrote {}", dest.display()))
-        }
+        "paint" | "print" => paint_display(&options),
         "config" => Ok(config_text(&options)),
+        "serve" => serve_flags(&options),
         "run" => {
             let path = require_file(&options, "run")?;
             if let Some(addr) = options.attach {
@@ -132,14 +131,78 @@ fn load_display(path: &Path, options: &Options) -> Result<caqtdm_ui::DisplayFile
     if let Some(parent) = path.parent() {
         search.push(parent);
     }
+    if let Some(dir) = url_directory(&options.url) {
+        search.push(dir);
+    }
     let macros = parse_macro_list(&options.macros);
     expand_includes(&mut display.root, &search, &macros).map_err(|e| e.to_string())?;
+    if let Some(style) = &options.style_file {
+        let css = std::fs::read_to_string(style)
+            .map_err(|err| format!("style file {}: {err}", style.display()))?;
+        apply_stylesheet(&mut display.root, &css);
+    }
     Ok(display)
+}
+
+fn paint_display(options: &Options) -> Result<String, String> {
+    let path = require_file(options, "paint")?;
+    let display = load_display(&path, options)?;
+    let mut session = Session::open(
+        display.root,
+        standard_hub(options),
+        &parse_macro_list(&options.macros),
+    );
+    session.allow_shell = options.execute_shell;
+    session.tick(0);
+    let mut visuals = session.visuals();
+    let mut search = SearchPath::from_file(&path);
+    if let Some(parent) = path.parent() {
+        search.push(parent);
+    }
+    load_image_notes(&mut visuals, |note| {
+        search.find(note).and_then(|file| std::fs::read(file).ok())
+    });
+    let (width, height) = options.geometry.unwrap_or((0, 0));
+    let image = paint_in(&visuals, width, height);
+    let dest = options
+        .output
+        .clone()
+        .unwrap_or_else(|| path.with_extension("ppm"));
+    std::fs::write(&dest, image.to_ppm()).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "wrote {} {}x{}",
+        dest.display(),
+        image.width,
+        image.height
+    ))
+}
+
+fn apply_stylesheet(node: &mut WidgetNode, css: &str) {
+    if node.prop_str("styleSheet").is_none() {
+        node.set_prop("styleSheet", PropValue::String(css.to_string()));
+    }
+    for child in &mut node.children {
+        apply_stylesheet(child, css);
+    }
+}
+
+fn url_directory(url: &str) -> Option<&Path> {
+    let path = Path::new(url);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn standard_hub(options: &Options) -> Hub {
     let mut hub = Hub::new(&options.control_system);
     register_builtin(&mut hub);
+    let modulo = option_u64(options, "bsmodulo");
+    let offset = option_u64(options, "bsoffset");
+    if modulo > 1 || offset > 0 {
+        hub.register(Box::new(BsreadSource::with_sampling(modulo, offset)));
+    }
     match options.ca {
         Some(addr) => match CaSource::connect(addr) {
             Ok(source) => hub.register(Box::new(source)),
@@ -175,8 +238,8 @@ fn dump_node(node: &WidgetNode, depth: usize, out: &mut String) {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<Options, String> {
-    let mut options = Options {
+fn default_options() -> Options {
+    Options {
         command: String::new(),
         file: None,
         macros: String::new(),
@@ -187,34 +250,113 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         pva: None,
         macro_file: None,
         attach: None,
-    };
+        no_msg: false,
+        no_resize: false,
+        execute_only: false,
+        http_config: false,
+        empty_cache: false,
+        web_interaction: false,
+        allow_insecure_shell: false,
+        server: false,
+        style: String::new(),
+        style_file: None,
+        display_font: String::new(),
+        geometry: None,
+        url: String::new(),
+        host: "127.0.0.1".into(),
+        server_port: 0,
+        web_port: 0,
+        web_port_set: false,
+        web_timeout: 0,
+        web_limit: 1000,
+        launcher_root: String::new(),
+        options: Vec::new(),
+    }
+}
+
+fn parse_args(args: &[String]) -> Result<Options, String> {
+    let mut options = default_options();
     let mut i = 1;
     while i < args.len() {
         let arg = args[i].as_str();
         match arg {
             "-h" | "--help" | "-help" => options.command = "help".into(),
             "--execute-shell" => options.execute_shell = true,
-            "-macro" | "--macro" | "-macrodefs" | "-cs" | "--cs" | "-o" | "--output"
-            | "-display" | "--ca" | "--pva" | "-config" | "-attach" => {
+            "-noMsg" => options.no_msg = true,
+            "-noResize" => options.no_resize = true,
+            "-x" => options.execute_only = true,
+            "-httpconfig" => options.http_config = true,
+            "-emptycache" => options.empty_cache = true,
+            "-web_interaction_timeout" => options.web_interaction = true,
+            "-web_allow_insecure_cashell_commands" => options.allow_insecure_shell = true,
+            "-server" => options.server = true,
+            "-print" => options.command = "print".into(),
+            "-macro"
+            | "--macro"
+            | "-macrodefs"
+            | "-cs"
+            | "--cs"
+            | "-o"
+            | "--output"
+            | "-display"
+            | "--ca"
+            | "--pva"
+            | "-config"
+            | "-attach"
+            | "-style"
+            | "-stylefile"
+            | "-displayFont"
+            | "-dg"
+            | "-displayGeometry"
+            | "-url"
+            | "-option"
+            | "-server_port"
+            | "-web_server_port"
+            | "-web_timeout"
+            | "-web_instance_limit"
+            | "-host"
+            | "-web_launcher_root_file"
+            | "-savetoimage" => {
                 let value = args
                     .get(i + 1)
-                    .ok_or_else(|| format!("{arg} needs a value"))?;
+                    .ok_or_else(|| format!("{arg} needs a value"))?
+                    .clone();
                 match arg {
-                    "-macro" | "--macro" => options.macros = value.clone(),
+                    "-macro" | "--macro" => options.macros = value,
                     "-macrodefs" => options.macro_file = Some(PathBuf::from(value)),
-                    "-cs" | "--cs" => options.control_system = value.clone(),
-                    "-o" | "--output" => options.output = Some(PathBuf::from(value)),
+                    "-cs" | "--cs" => options.control_system = value,
+                    "-o" | "--output" | "-savetoimage" => {
+                        options.output = Some(PathBuf::from(&value));
+                        if arg == "-savetoimage" && options.command.is_empty() {
+                            options.command = "paint".into();
+                        }
+                    }
                     "-display" => options.file = Some(PathBuf::from(value)),
-                    "--ca" => options.ca = Some(parse_addr(value)?),
-                    "--pva" => options.pva = Some(parse_addr(value)?),
-                    "-config" => apply_config(&mut options, Path::new(value))?,
-                    "-attach" => options.attach = Some(parse_addr(value)?),
+                    "--ca" => options.ca = Some(parse_addr(&value)?),
+                    "--pva" => options.pva = Some(parse_addr(&value)?),
+                    "-config" => apply_config(&mut options, Path::new(&value))?,
+                    "-attach" => options.attach = Some(parse_addr(&value)?),
+                    "-style" => options.style = value,
+                    "-stylefile" => options.style_file = Some(PathBuf::from(value)),
+                    "-displayFont" => options.display_font = value,
+                    "-dg" | "-displayGeometry" => options.geometry = Some(parse_geometry(&value)?),
+                    "-url" => options.url = value,
+                    "-option" => options.options = parse_option_list(&value)?,
+                    "-server_port" => options.server_port = parse_port(&value)?,
+                    "-web_server_port" => {
+                        options.web_port = parse_port(&value)?;
+                        options.web_port_set = true;
+                    }
+                    "-web_timeout" => options.web_timeout = parse_timeout(&value)?,
+                    "-web_instance_limit" => options.web_limit = parse_limit(&value)?,
+                    "-host" => options.host = value,
+                    "-web_launcher_root_file" => options.launcher_root = value,
                     _ => {}
                 }
                 i += 1;
             }
             "dump" | "validate" | "paint" | "print" | "widgets" | "convert" | "run" | "help"
-            | "config"
+            | "config" | "serve"
                 if options.command.is_empty() =>
             {
                 options.command = arg.to_string();
@@ -226,14 +368,175 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         }
         i += 1;
     }
+    if options.http_config && (options.command.is_empty() || options.command == "run") {
+        options.command = "config".into();
+    }
+    if options.allow_insecure_shell {
+        options.execute_shell = true;
+    }
     if options.command.is_empty() {
-        options.command = if options.file.is_some() {
+        options.command = if options.server && options.file.is_none() {
+            "serve".into()
+        } else if options.file.is_some() {
             "run".into()
         } else {
             "help".into()
         };
     }
+    let removed = clear_cache(options.empty_cache)?;
+    if options.empty_cache {
+        options
+            .options
+            .push(("emptycache".into(), removed.to_string()));
+    }
     Ok(options)
+}
+
+fn parse_geometry(text: &str) -> Result<(u32, u32), String> {
+    let size = text.split('+').next().unwrap_or(text);
+    let Some((w, h)) = size.split_once('x') else {
+        return Err(format!("bad geometry {text}"));
+    };
+    let width: u32 = w.parse().map_err(|_| format!("bad geometry {text}"))?;
+    let height: u32 = h.parse().map_err(|_| format!("bad geometry {text}"))?;
+    if width == 0 || height == 0 {
+        return Err(format!("bad geometry {text}"));
+    }
+    Ok((width, height))
+}
+
+fn parse_port(text: &str) -> Result<u16, String> {
+    text.parse().map_err(|_| format!("bad port {text}"))
+}
+
+fn parse_timeout(text: &str) -> Result<u64, String> {
+    let seconds: u64 = text
+        .parse()
+        .map_err(|_| format!("bad web timeout {text}"))?;
+    Ok(if seconds < 76 { 0 } else { seconds })
+}
+
+fn parse_limit(text: &str) -> Result<usize, String> {
+    let limit: usize = text
+        .parse()
+        .map_err(|_| format!("bad web instance limit {text}"))?;
+    if limit == 0 {
+        return Err("web instance limit must be at least 1".into());
+    }
+    Ok(limit.min(5000))
+}
+
+fn parse_option_list(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for part in text.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = part.split_once('=') else {
+            return Err(format!("bad option {part}"));
+        };
+        out.push((key.trim().to_string(), value.trim().to_string()));
+    }
+    Ok(out)
+}
+
+fn option_u64(options: &Options, key: &str) -> u64 {
+    options
+        .options
+        .iter()
+        .find(|(name, _)| name == key)
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join("caqtdm-display-cache")
+}
+
+fn clear_cache(enabled: bool) -> Result<usize, String> {
+    if !enabled {
+        return Ok(0);
+    }
+    let dir = cache_dir();
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    for entry in std::fs::read_dir(&dir).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        std::fs::remove_file(entry.path()).map_err(|err| err.to_string())?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn serve_flags(options: &Options) -> Result<String, String> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let host: std::net::IpAddr = options
+        .host
+        .parse()
+        .map_err(|_| format!("bad host {}", options.host))?;
+    let attach = serve_attach_at(
+        std::net::SocketAddr::new(host, options.server_port),
+        Arc::clone(&stop),
+    )
+    .map_err(|err| err.to_string())?;
+    let web_port = effective_web_port(options);
+    let status = server_status(options);
+    let http = serve_http_at(
+        std::net::SocketAddr::new(host, web_port),
+        stop,
+        status,
+        options.web_limit,
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(format!("http {http}\nattach {attach}"))
+}
+
+fn effective_web_port(options: &Options) -> u16 {
+    if options.web_port_set {
+        options.web_port
+    } else if options.server_port > 0 && options.server_port < u16::MAX {
+        options.server_port.saturating_add(1)
+    } else {
+        0
+    }
+}
+
+fn server_status(options: &Options) -> String {
+    format!(
+        "caQtDM\nstyle={}\nnoMsg={}\nnoResize={}\nexecute_only={}\nshell={}\nweb_timeout={}\nweb_limit={}\ninteraction={}\nfont={}\nroot={}\nurl={}\n",
+        options.style,
+        options.no_msg,
+        options.no_resize,
+        options.execute_only,
+        options.execute_shell,
+        options.web_timeout,
+        options.web_limit,
+        options.web_interaction,
+        options.display_font,
+        options.launcher_root,
+        options.url,
+    )
+}
+
+/// Pulse id the bsread plugin would publish for these arguments.
+pub fn sampled_pulse(args: &[String], now_ms: u64) -> Result<i64, String> {
+    let options = parse_args(args)?;
+    let modulo = option_u64(&options, "bsmodulo");
+    let offset = option_u64(&options, "bsoffset");
+    let mut source = BsreadSource::with_sampling(modulo, offset);
+    let spec = caqtdm_core::parse_channel("pulse_id", "bsread");
+    source.add_monitor(&spec).map_err(|err| err.to_string())?;
+    let updates = source.poll(now_ms);
+    Ok(updates
+        .first()
+        .and_then(|update| update.data.value.as_i64())
+        .unwrap_or(0))
 }
 
 fn merge_macros(options: &Options) -> Result<String, String> {
@@ -280,14 +583,56 @@ fn apply_config(options: &mut Options, path: &Path) -> Result<(), String> {
 }
 
 fn config_text(options: &Options) -> String {
-    ConfigFile {
+    let mut text = ConfigFile {
         control_system: options.control_system.clone(),
         ca: options.ca.map(|addr| addr.to_string()).unwrap_or_default(),
         pva: options.pva.map(|addr| addr.to_string()).unwrap_or_default(),
         macros: options.macros.clone(),
         execute_shell: options.execute_shell,
     }
-    .to_text()
+    .to_text();
+    let geometry = options
+        .geometry
+        .map(|(w, h)| format!("{w}x{h}"))
+        .unwrap_or_default();
+    let style_file = options
+        .style_file
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    text.push_str(&format!(
+        "style={}\nstylefile={}\nfont={}\ngeometry={}\nurl={}\nhost={}\nserver_port={}\nweb_port={}\nweb_timeout={}\nweb_limit={}\nnoMsg={}\nnoResize={}\nexecute_only={}\nhttpconfig={}\ninteraction={}\nroot={}\n",
+        options.style,
+        style_file,
+        options.display_font,
+        geometry,
+        options.url,
+        options.host,
+        options.server_port,
+        effective_web_port(options),
+        options.web_timeout,
+        options.web_limit,
+        options.no_msg,
+        options.no_resize,
+        options.execute_only,
+        options.http_config,
+        options.web_interaction,
+        options.launcher_root,
+    ));
+    if let Some((_, count)) = options
+        .options
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "emptycache")
+    {
+        text.push_str(&format!("emptycache={count}\n"));
+    }
+    for (key, value) in &options.options {
+        if key != "emptycache" {
+            text.push_str(&format!("option.{key}={value}\n"));
+        }
+    }
+    text
 }
 
 fn help_text() -> String {
@@ -303,6 +648,7 @@ Commands:
   print      same as paint
   widgets    list widget classes the runtime draws
   config     print the operator settings
+  serve      status page and the attach port
   help
 
 Options:
@@ -315,7 +661,29 @@ Options:
   --pva HOST:PORT     PV Access server (scalar subset)
   -attach HOST:PORT   send the display path to a running instance
   -o FILE             PPM output for paint and print
+  -savetoimage FILE   same as -o, and selects paint when no command is given
   --execute-shell     run caShellCommand instead of recording it
+  -x                  execute-only (accepted, there is no edit mode)
+  -noMsg              quiet the status page
+  -noResize           report that the window should not be resized
+  -style NAME         style name reported on the status page
+  -stylefile FILE     color, background-color, and font-size for widgets
+  -displayFont NAME   accepted and reported (the rasterizer keeps its own font)
+  -dg WxH             paint canvas size (also -displayGeometry, +X+Y ignored)
+  -url DIR            extra directory for included displays
+  -option k=v,k2=v2   plugin options (bsmodulo, bsoffset)
+  -httpconfig         print the operator settings
+  -emptycache         delete files in the display cache
+  -server             status page and attach port
+  -host ADDR          bind address (default 127.0.0.1)
+  -server_port N      attach port (0 picks a free port)
+  -web_server_port N  status-page port (default is the attach port plus one)
+  -web_timeout SECS   ignored when under 76
+  -web_instance_limit N   HTTP answers before 503 (1..=5000)
+  -web_interaction_timeout
+  -web_launcher_root_file FILE
+  -web_allow_insecure_cashell_commands
+  -print              same as the print command
 "
     .to_string()
 }

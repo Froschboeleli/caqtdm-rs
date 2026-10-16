@@ -9,7 +9,7 @@ use caqtdm_core::{parse_macro_list, MacroMap};
 use caqtdm_datasource::Hub;
 use caqtdm_ui::{expand_includes, load_path, SearchPath};
 use caqtdm_widgets::{
-    load_image_notes, toggled_bit_value, Action, Effect, Session, Visual, VisualKind,
+    cell_at, load_image_notes, toggled_bit_value, Action, Effect, Session, Visual, VisualKind,
 };
 use eframe::egui;
 
@@ -115,69 +115,7 @@ impl eframe::App for Viewer {
 
 impl Viewer {
     fn handle(&mut self, visual: Visual, pos: egui::Pos2, dragged: bool) {
-        let action = match &visual.kind {
-            VisualKind::Bits { value, count, .. } if visual.class_name == "caByteController" => {
-                Action::SetNumber {
-                    id: visual.id,
-                    value: toggled_bit_value(
-                        *value,
-                        *count,
-                        pos.x,
-                        visual.rect.x,
-                        visual.rect.width,
-                    ),
-                }
-            }
-            VisualKind::Plot { y_min, y_max, .. } => {
-                if dragged {
-                    let (lo, hi) = if y_max > y_min {
-                        (*y_min, *y_max)
-                    } else {
-                        (0.0, 100.0)
-                    };
-                    let y_span = visual.rect.height.max(1) as f32;
-                    let y_fraction =
-                        ((pos.y - visual.rect.y as f32) / y_span).clamp(0.0, 1.0) as f64;
-                    let mid = lo + (hi - lo) * (1.0 - y_fraction);
-                    let half = (hi - lo) / 4.0;
-                    let x_span = visual.rect.width.max(1) as f32;
-                    let x_fraction =
-                        ((pos.x - visual.rect.x as f32) / x_span).clamp(0.0, 1.0) as f64;
-                    Action::Zoom {
-                        id: visual.id,
-                        x_min: (x_fraction - 0.25).clamp(0.0, 1.0),
-                        x_max: (x_fraction + 0.25).clamp(0.0, 1.0),
-                        y_min: mid - half,
-                        y_max: mid + half,
-                    }
-                } else {
-                    let span = visual.rect.width.max(1) as f32;
-                    let at = ((pos.x - visual.rect.x as f32) / span).clamp(0.0, 1.0) as f64;
-                    Action::PlaceCursor { id: visual.id, at }
-                }
-            }
-            VisualKind::Slider { min, max, .. } => {
-                let span = visual.rect.width.max(1) as f32;
-                let fraction = ((pos.x - visual.rect.x as f32) / span).clamp(0.0, 1.0);
-                Action::SetNumber {
-                    id: visual.id,
-                    value: min + (max - min) * f64::from(fraction),
-                }
-            }
-            VisualKind::Tabs { labels, .. } if !labels.is_empty() => Action::Choose {
-                id: visual.id,
-                index: row_index(pos.x, visual.rect.x, 48.0, labels.len()),
-            },
-            VisualKind::Menu { items, .. } if !items.is_empty() => Action::Choose {
-                id: visual.id,
-                index: row_index(pos.y, visual.rect.y, 16.0, items.len()),
-            },
-            VisualKind::Related { entries } if entries.len() > 1 => Action::Choose {
-                id: visual.id,
-                index: row_index(pos.y, visual.rect.y, 18.0, entries.len()),
-            },
-            _ => Action::Press { id: visual.id },
-        };
+        let action = action_for(&visual, pos.x, pos.y, dragged);
         let effects = {
             let Some(page) = self.stack.last_mut() else {
                 return;
@@ -271,7 +209,8 @@ fn draw(
         egui::Stroke::new(1.0_f32, fg),
         egui::StrokeKind::Inside,
     );
-    if let VisualKind::Slider { fraction, .. } | VisualKind::Thermo { fraction } = &visual.kind {
+    if let VisualKind::Slider { fraction, .. } | VisualKind::Thermo { fraction, .. } = &visual.kind
+    {
         let mut bar = rect;
         bar.set_width(rect.width() * *fraction as f32);
         painter.rect_filled(bar, 0.0, fg);
@@ -320,10 +259,95 @@ fn color(c: caqtdm_core::Color) -> egui::Color32 {
 }
 
 fn hit_test(visuals: &[Visual], pos: egui::Pos2) -> Option<Visual> {
+    hit_visual(visuals, pos.x, pos.y)
+}
+
+/// The pointer handler the viewer runs after a click or a drag.
+///
+/// `x` and `y` are display pixels. `dragged` is true when the pointer was
+/// released at the end of a drag, which is how a plot zoom is distinguished
+/// from a cursor click.
+pub fn action_for(visual: &Visual, x: f32, y: f32, dragged: bool) -> Action {
+    match &visual.kind {
+        VisualKind::Bits { value, count, .. } if visual.class_name == "caByteController" => {
+            Action::SetNumber {
+                id: visual.id,
+                value: toggled_bit_value(*value, *count, x, visual.rect.x, visual.rect.width),
+            }
+        }
+        VisualKind::Plot { y_min, y_max, .. } => {
+            if dragged {
+                let (lo, hi) = if y_max > y_min {
+                    (*y_min, *y_max)
+                } else {
+                    (0.0, 100.0)
+                };
+                let y_span = visual.rect.height.max(1) as f32;
+                let y_fraction = ((y - visual.rect.y as f32) / y_span).clamp(0.0, 1.0) as f64;
+                let mid = lo + (hi - lo) * (1.0 - y_fraction);
+                let half = (hi - lo) / 4.0;
+                let x_span = visual.rect.width.max(1) as f32;
+                let x_fraction = ((x - visual.rect.x as f32) / x_span).clamp(0.0, 1.0) as f64;
+                Action::Zoom {
+                    id: visual.id,
+                    x_min: (x_fraction - 0.25).clamp(0.0, 1.0),
+                    x_max: (x_fraction + 0.25).clamp(0.0, 1.0),
+                    y_min: mid - half,
+                    y_max: mid + half,
+                }
+            } else {
+                let span = visual.rect.width.max(1) as f32;
+                let at = ((x - visual.rect.x as f32) / span).clamp(0.0, 1.0) as f64;
+                Action::PlaceCursor { id: visual.id, at }
+            }
+        }
+        VisualKind::Slider { min, max, .. } => {
+            let span = visual.rect.width.max(1) as f32;
+            let fraction = ((x - visual.rect.x as f32) / span).clamp(0.0, 1.0);
+            Action::SetNumber {
+                id: visual.id,
+                value: min + (max - min) * f64::from(fraction),
+            }
+        }
+        VisualKind::Tabs { labels, .. } if !labels.is_empty() => Action::Choose {
+            id: visual.id,
+            index: row_index(x, visual.rect.x, 48.0, labels.len()),
+        },
+        VisualKind::Menu { items, .. } if !items.is_empty() => Action::Choose {
+            id: visual.id,
+            index: row_index(y, visual.rect.y, 16.0, items.len()),
+        },
+        VisualKind::Choice {
+            items,
+            columns,
+            inverse,
+            ..
+        } if !items.is_empty() => Action::Choose {
+            id: visual.id,
+            index: cell_at(visual.rect, x, y, items.len(), *columns, *inverse),
+        },
+        VisualKind::Grid { columns, cells } if !cells.is_empty() => Action::Choose {
+            id: visual.id,
+            index: cell_at(visual.rect, x, y, cells.len(), *columns, false),
+        },
+        VisualKind::Related { entries } if entries.len() > 1 => Action::Choose {
+            id: visual.id,
+            index: row_index(y, visual.rect.y, 18.0, entries.len()),
+        },
+        VisualKind::Tree { rows } if rows.iter().any(|row| row.group) => Action::ToggleGroup {
+            id: visual.id,
+            index: row_index(y, visual.rect.y, 16.0, rows.len()),
+        },
+        _ => Action::Press { id: visual.id },
+    }
+}
+
+/// Topmost visible widget whose rectangle contains the point.
+pub fn hit_visual(visuals: &[Visual], x: f32, y: f32) -> Option<Visual> {
     visuals
         .iter()
         .rev()
-        .find(|v| v.visible && v.rect.contains(pos.x, pos.y))
+        .find(|v| v.visible && v.rect.contains(x, y))
         .cloned()
 }
 
@@ -333,5 +357,105 @@ fn row_index(y: f32, top: i32, row: f32, len: usize) -> usize {
         0
     } else {
         (index as usize).min(len - 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{action_for, hit_visual};
+    use caqtdm_core::{Color, Rect, Severity};
+    use caqtdm_widgets::{Action, Visual, VisualKind};
+
+    fn visual(kind: VisualKind) -> Visual {
+        Visual {
+            id: 7,
+            class_name: "widget".into(),
+            name: "w".into(),
+            rect: Rect::new(0, 0, 100, 40),
+            foreground: Color::rgb(0, 0, 0),
+            background: Color::rgb(255, 255, 255),
+            text: String::new(),
+            kind,
+            visible: true,
+            severity: Severity::NoAlarm,
+            font_px: 10,
+            rotation: 0,
+        }
+    }
+
+    #[test]
+    fn pointer_events_build_the_viewer_actions() {
+        let slider = visual(VisualKind::Slider {
+            fraction: 0.0,
+            min: 0.0,
+            max: 10.0,
+        });
+        assert_eq!(
+            action_for(&slider, 50.0, 10.0, true),
+            Action::SetNumber { id: 7, value: 5.0 }
+        );
+
+        let plot = visual(VisualKind::Plot {
+            series: vec![vec![0.0, 10.0]],
+            title: String::new(),
+            title_x: String::new(),
+            title_y: String::new(),
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 100.0,
+            y2_min: f64::NAN,
+            y2_max: f64::NAN,
+            log_y: false,
+            x_ticks: 2,
+            cursors: Vec::new(),
+        });
+        assert_eq!(
+            action_for(&plot, 50.0, 20.0, false),
+            Action::PlaceCursor { id: 7, at: 0.5 }
+        );
+        match action_for(&plot, 50.0, 20.0, true) {
+            Action::Zoom {
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                ..
+            } => {
+                assert!((x_min - 0.25).abs() < 1e-9);
+                assert!((x_max - 0.75).abs() < 1e-9);
+                assert!(y_max > y_min);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let mut tabs = visual(VisualKind::Tabs {
+            labels: vec!["One".into(), "Two".into()],
+            current: 0,
+        });
+        tabs.rect = Rect::new(0, 0, 200, 30);
+        assert_eq!(
+            action_for(&tabs, 60.0, 4.0, false),
+            Action::Choose { id: 7, index: 1 }
+        );
+
+        let menu = visual(VisualKind::Menu {
+            items: vec!["off".into(), "on".into()],
+            selected: 0,
+        });
+        assert_eq!(
+            action_for(&menu, 4.0, 20.0, false),
+            Action::Choose { id: 7, index: 1 }
+        );
+
+        let mut back = visual(VisualKind::Label);
+        back.rect = Rect::new(0, 0, 80, 40);
+        back.id = 1;
+        let mut front = visual(VisualKind::Button);
+        front.rect = Rect::new(10, 10, 20, 20);
+        front.id = 2;
+        let hit = hit_visual(&[back, front], 15.0, 15.0).unwrap();
+        assert_eq!(hit.id, 2);
+        assert!(hit_visual(&[hit], 0.0, 0.0).is_none());
     }
 }

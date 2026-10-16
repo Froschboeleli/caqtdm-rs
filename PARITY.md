@@ -8,13 +8,13 @@ Score: done counts 1, partial counts 0.5, not started counts 0. **excluded** row
 
 | | rows | weight |
 | --- | ---: | ---: |
-| done | 64 | 64 |
-| partial | 20 | 10 |
+| done | 84 | 84 |
+| partial | 0 | 0 |
 | not started | 0 | 0 |
 | excluded | 2 | not scored |
-| total | 84 scored | 74 / 84 = **88.1%** |
+| total | 84 scored | 84 / 84 = **100%** |
 
-Fully finished rows are 64 / 84 (76.2%). Two rows are excluded and are not in that total. A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees.
+Fully finished rows are 84 / 84 (100%). Two rows are excluded and are not in that total. A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees.
 
 ## Widgets
 
@@ -22,11 +22,11 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 
 | Widget | Rust | Status |
 | --- | --- | --- |
-| caNumeric | Exponential format and user precision. The entry is marked writable, and that write is not asserted | partial |
+| caNumeric | Exponential format and user precision (`1.20e+03` at precision 2). A write is clamped to user limits and the put is asserted | done |
 | caApplyNumeric | A number is held until the widget is pressed, then written | done |
 | caSlider | Fraction from user or channel limits. `orientation` Down or Left inverts it. A drag writes `min + fraction * (max-min)` | done |
 | caMenu | Enum strings or `items`. A choice writes the index | done |
-| caChoice | Items are painted as text rows and a choice uses the menu write path. Not a column of buttons, and stacking is not asserted | partial |
+| caChoice | Column of buttons. `startBit`/`endBit` slice the items and the click writes that index. RowInverse stacks item 0 at the bottom. Button pixels are filled or outline | done |
 | caRelatedDisplay | Opens `files` / `labels`, including ADL `label0`/`name0` and EDM `displayFileName` | done |
 | caTextEntry | Writable text. Numeric text is written as a double | done |
 | caMessageButton | Writes `pressMessage` or `pressValue` | done |
@@ -36,38 +36,38 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caLabel | Text, colors, macro substitution. Upstream `test.ui` and `graphics.edl` are painted | done |
 | caLabelVertical | Text is drawn downward. `direction` Up/Down and `tiltAngle` set the rotation | done |
 | caFrame | Frame visual. Children keep their geometry | done |
-| caGraphics | Rectangle outline and circle form are tested. Arc, triangle, and arrow paint as a rectangle | partial |
+| caGraphics | Rectangle, circle, arc (0 degrees at 3 o'clock), triangle, and arrow. A paint test checks a pixel on each form and a pixel that stays empty | done |
 | caPolyLine | `xyPairs`, open or closed. The `graphics.edl` polyline vertex is painted | done |
 | caImage | PPM, PNG, GIF, and a small SVG (`rect`, `circle`, `line`) via `filename` | done |
 | caInclude | `filename`, `numberOfItems`, stacking, per-item macros, depth limit 16 | done |
 | caDoubleTabWidget | Tab labels from `items` / `itemsHorizontal` / `itemsVertical`. A choice selects the page | done |
-| caClock | Digital `HH:MM:SS` from the tick time. Analog is a circle, not clock hands | partial |
+| caClock | Digital `HH:MM:SS` from the tick. Analog draws hour and minute hands (12 is up). A paint test checks 03:00:00 | done |
 | caBitnames | Bit cells. `trueStrings` or `names` are drawn in the cells | done |
 | caLed | On when the value is non-zero, or when `bitNr` is set | done |
-| caLinearGauge | Horizontal fraction from user or channel limits. The bar fill is not checked in a raster test | partial |
-| caCircularGauge | Same fraction, and the rasterizer draws a needle. The needle pixel is not checked | partial |
+| caLinearGauge | Horizontal bar from user or channel limits. The fill pixel and the empty pixel past the fraction are checked | done |
+| caCircularGauge | Fraction drives a needle. A zero fraction points left, and that pixel is checked | done |
 | caLineEdit | Monitor text, alarm color, and the `formattype.h` formats | done |
 | caMultiLineString | Label text, including line breaks | done |
-| caThermo | Fraction bar from user or channel limits. No alarm bands, and the bar pixel is not checked | partial |
-| caMeter | Fraction drives a needle. The needle pixel is not checked | partial |
-| caCartesianPlot | Traces from `channel` and `channels`, titles, Y limits, X ticks. Zoom windows both axes, and a paint test checks both. A cursor is a vertical line. No log scale and no second Y axis | partial |
-| caStripPlot | Same trace list. `timeSpan` keeps the last N samples. Zoom and cursor are the cartesian actions. The strip window is not painted in a test | partial |
+| caThermo | Vertical fraction bar. Channel warning and alarm limits paint yellow and red bands. The bar pixel and a red band pixel are checked | done |
+| caMeter | Fraction drives a needle. A zero fraction points left, and that pixel is checked | done |
+| caCartesianPlot | Traces from `channel`, `channels`, and `channels_1`..`channels_6`. Zoom windows both axes. `YAxisType` log10 places the sample with log10. The second curve uses `YaxisLimits` pair 2. Paint tests check the log pixel and the second-curve pixel | done |
+| caStripPlot | Same traces, log scale, and second Y window. `timeSpan` keeps the last N samples, and a paint test shows only that window | done |
 | caByte | Read-only bit cells | done |
-| caTable | Waveform values as a single column | partial |
-| caWaveTable | Same single-column path as caTable | partial |
+| caTable | One column per channel (`channel`, `channels`, `channels_1`..`channels_6`). A two-channel scalar row is asserted | done |
+| caWaveTable | `numberOfRows` by `numberOfColumns`, row-major. A 2x2 grid with user precision 0 is asserted | done |
 | caCamera | `channelData` bytes as mono8, rgb888, mono16, or rgba, sized by width and height. rgb888 and mono16 are tested | done |
 | caCalc | EPICS-style calc on channels A-L. `%P/` Python is refused | done |
-| caWaterfallPlot | Last 64 waveforms for the first channel. The test only checks that a row exists | partial |
+| caWaterfallPlot | Last N waveforms (`NumberOfTraces`, capped at 64). Intensity min/max color the row from blue to red, and those pixels are checked | done |
 | caScan2D | A waveform that matches `channelWidth` by `channelHeight` is a grayscale image. Otherwise a plot | done |
-| caLineDraw | History samples as a polyline. Pen width and color mode are ignored | partial |
-| caAlarmTree | `.alh` groups become frames. Channel rows show the live severity. Not an expandable tree | partial |
+| caLineDraw | History samples as a polyline scaled into the widget. `frameLineWidth` sets the pen, and alarm color mode uses the severity color. A width-3 red pixel is checked | done |
+| caAlarmTree | Groups are tree nodes. Channel rows show the live severity. `ToggleGroup` folds a group and hides its descendants | done |
 | caAlarmLog | A row is appended when a monitored severity changes | done |
 | caShellCommand | Recorded. With `--execute-shell` it runs `sh -c` | done |
 | caScriptButton | Command is recorded and never executed | done |
 | caMimeDisplay | Opens `files` / `labels` the same way as a related display | done |
 | caHMIConfig | Press writes `valueOrCalc` to `outputA`. `calculationType` Calc evaluates the expression | done |
 | caReplaceMacro | Menu of `macroValues`. Choosing one sets `macroKey` and reloads the file | done |
-| caRowColMenu | `labels` are a menu. Choosing one writes the index. Not a row and column of child widgets | partial |
+| caRowColMenu | A row or column of buttons from `labels`, `files`, and `args`. Choosing one opens that file with the cell macros. Column stacking is a horizontal row, and the button pixels are checked | done |
 | wmSignalRescale | Each tick writes the widget width to `softChannelA` and the height to `softChannelB` | done |
 
 ## Display files
@@ -100,7 +100,7 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | internal | soft PVs | `InternSource` shared map, read and write | done |
 | demo | pattern generators | `sim://` and `demo://` const, sine, ramp, square, enum, wave, string, and `?alarm=1` | done |
 | environment | process environment | read-only overlay plus `std::env` | done |
-| gps | receiver plugin | UTC from the tick is tested. Coordinates and satellite count are computed and not asserted. No receiver hardware | partial |
+| gps | receiver plugin | Simulated `utc`, `lat` 47.3769, `lon` 8.5417, `alt` 408, `sats` 8. A write to `lat` is polled back. No receiver hardware | done |
 | archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json`. HIPA and PRO send the `gmv()` argument block (`hipa-lgexp.psi.ch`, `proscan-lgexp.psi.ch`) and apply the `Valerr` hold-last rule. SF posts the plugin JSON and reads `globalSeconds` / `value.mean`. The unpublished `libgmv` codec is not in the upstream tree | done |
 | modbus | Modbus TCP | MBAP and function codes 1, 2, 3, 4, 5, 6, 15, and 16. Address 40001 is register 0 | done |
 | opcua | OPC UA binary | Hello/Acknowledge, a Read of a numeric NodeId, and Basic256Sha256 OpenSecureChannel: X.509, RSA-OAEP-SHA1, RSA-SHA256, then P_SHA256 into the AES-256-CBC and HMAC-SHA256 chunk. Other policies are not implemented | done |
@@ -114,9 +114,9 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 
 | Feature | Upstream | Rust | Status |
 | --- | --- | --- | --- |
-| Desktop viewer | Qt `caQtDM_Viewer` | egui/eframe: paint, click, drag slider, tabs, menus, related files, macro reload. A plot drag sets both zoom axes and a click places a cursor. No test drives the egui event | partial |
-| Headless render | Qt grab / print | PPM rasterizer and a 5x7 font. Plot zoom on both axes and the upstream `graphics.edl` pixels are tested. Widget text is not Qt metrics | partial |
-| CLI | `-display`, `-macro`, and many server flags | `dump`, `validate`, `convert`, `paint`, `print`, `widgets`, `config`, `run`, `-macro`, `-cs`, `--ca`, `--pva`, `-config`, `-attach`. The rest of the server flags are absent | partial |
+| Desktop viewer | Qt `caQtDM_Viewer` | egui/eframe: paint, click, drag slider, tabs, menus, related files, macro reload. `action_for` is what the pointer handler calls. A test drives a slider drag, a plot click, a plot drag (both zoom axes), a tab, a menu row, and hit-testing | done |
+| Headless render | Qt grab / print | PPM rasterizer and an 8x12 bitmap (lowercase and descenders). Plot zoom, log scale, and the upstream `graphics.edl` pixels are tested. Widget text is not Qt metrics | done |
+| CLI | `-display`, `-macro`, and many server flags | `dump`, `validate`, `convert`, `paint`, `print`, `widgets`, `config`, `run`, `serve`, `-macro`, `-cs`, `--ca`, `--pva`, `-config`, `-attach`. Also `-noMsg`, `-noResize`, `-x`, `-style`, `-stylefile`, `-displayFont`, `-dg`, `-url`, `-option`, `-httpconfig`, `-emptycache`, `-server`, `-host`, `-server_port`, `-web_server_port`, `-web_timeout`, `-web_instance_limit`, `-web_interaction_timeout`, `-web_launcher_root_file`, `-web_allow_insecure_cashell_commands`, `-savetoimage`, `-print`. `-novnc` stays with the VNC exclusion | done |
 | Macro file | `-macrodefs` | one `KEY=VALUE` per line, then `-macro` overrides | done |
 | Shell policy | runs commands, web flag can allow them | dry-run unless `--execute-shell`. `caScriptButton` never runs | done |
 | HTTP / WebSocket | `-server`, web launcher | `GET /` and one RFC 6455 text frame on a local port. VNC/RFB is excluded: the remote surface is HTTP and WebSocket | done |
@@ -147,12 +147,14 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 
 ## What is still narrower than upstream
 
-Twenty scored rows are partial. The gaps are in those rows. These limits also apply to rows marked done:
+These limits apply to rows marked done:
 
-- Qt Designer plugin binaries, Python `%P/` execution, and VNC/RFB are excluded.
+- Qt Designer plugin binaries, Python `%P/` execution, and VNC/RFB are excluded. `-novnc` is part of that exclusion.
 - HIPA and PRO speak the `gmv()` argument block. The site `libgmv` library is not in the upstream tree, so that codec is not reproduced.
 - OPC UA security here is Basic256Sha256 OpenSecureChannel plus the symmetric chunk. The other policies in `opcua_core.cpp` are not implemented.
 - bsread ZeroMQ is a ZMTP 3.0 peer (NULL, PLAIN, CURVE), not a link to libzmq.
-- GPS is a simulated clock, not a receiver.
-- Plot zoom windows both axes for one Y scale. There is no log axis.
+- GPS publishes a fixed site (latitude, longitude, altitude, satellite count) and accepts a write. It is not a receiver.
+- The second Y axis is the per-curve window (`YaxisLimits` pair 2, or `YaxisLimitsMin_2` / `Max_2`). A right-hand tick ruler is not drawn.
+- Headless text is an 8x12 bitmap. It is not Qt's font metrics.
+- `-x` and `-displayFont` are accepted and reported. Upstream ignores the font flag, and this runtime has no edit mode.
 - MEDM and EDM objects that upstream does not emit are skipped. They are not turned into a stand-in widget.

@@ -40,6 +40,8 @@ pub enum VisualKind {
     },
     Thermo {
         fraction: f64,
+        /// Alarm and warning marks as fractions of the scale, bottom to top.
+        bands: Vec<ThermoBand>,
     },
     Meter {
         fraction: f64,
@@ -50,10 +52,14 @@ pub enum VisualKind {
     Shape {
         form: ShapeForm,
         filled: bool,
+        /// Degrees. 0 is 3 o'clock and positive span runs counter-clockwise.
+        start_angle: i32,
+        span_angle: i32,
     },
     Polyline {
         points: Vec<Point>,
         closed: bool,
+        width: i32,
     },
     Plot {
         series: Vec<Vec<f64>>,
@@ -65,12 +71,19 @@ pub enum VisualKind {
         x_max: f64,
         y_min: f64,
         y_max: f64,
+        /// Second curve scale. NaN means that curve shares `y_min`/`y_max`.
+        y2_min: f64,
+        y2_max: f64,
+        /// `YAxisType::log10`. Placement is log10 of the value over the axis span.
+        log_y: bool,
         x_ticks: u32,
         /// Horizontal cursor positions as fractions of the plot width, 0 to 1.
         cursors: Vec<f64>,
     },
     Waterfall {
         rows: Vec<Vec<f64>>,
+        min: f64,
+        max: f64,
     },
     Bits {
         value: u32,
@@ -84,6 +97,20 @@ pub enum VisualKind {
         items: Vec<String>,
         selected: usize,
     },
+    /// `caChoice`: one push button per item.
+    Choice {
+        items: Vec<String>,
+        selected: usize,
+        /// How many buttons sit on one row. 1 is a vertical stack.
+        columns: u32,
+        /// `RowInverse` draws item 0 at the bottom.
+        inverse: bool,
+    },
+    /// `caRowColMenu`: a grid of buttons. Each cell opens a display.
+    Grid {
+        columns: u32,
+        cells: Vec<GridCell>,
+    },
     Related {
         entries: Vec<(String, String)>,
     },
@@ -92,6 +119,9 @@ pub enum VisualKind {
     },
     Clock {
         analog: bool,
+        hour: u32,
+        minute: u32,
+        second: u32,
     },
     /// `caDoubleTabWidget` / `QTabWidget`. `current` selects the visible page.
     Tabs {
@@ -99,6 +129,10 @@ pub enum VisualKind {
         current: usize,
     },
     Frame,
+    /// `caAlarmTree`. A collapsed group omits its children.
+    Tree {
+        rows: Vec<TreeRow>,
+    },
     Image {
         note: String,
         width: u32,
@@ -106,6 +140,32 @@ pub enum VisualKind {
         rgba: Vec<u8>,
     },
     Unknown,
+}
+
+/// One mark on a thermometer scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermoBand {
+    pub at: f64,
+    /// Major alarm marks are red. Warning marks are yellow.
+    pub major: bool,
+}
+
+/// One button in a row/column menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GridCell {
+    pub label: String,
+    pub file: String,
+    pub args: String,
+}
+
+/// One row of an alarm tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub name: String,
+    pub depth: u32,
+    pub group: bool,
+    pub open: bool,
+    pub cells: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,4 +228,44 @@ pub enum Action {
         id: u32,
         at: f64,
     },
+    /// Expand or collapse one alarm-tree group.
+    ToggleGroup {
+        id: u32,
+        index: usize,
+    },
+}
+
+/// Button rectangle for choice buttons and row/column menus.
+///
+/// `columns` is how many buttons share a row. A single column fills downward.
+/// `RowColumn` stacking fills downward and then across. `inverse` puts index 0
+/// on the last row of a one-column stack.
+pub fn cell_rect(outer: Rect, index: usize, count: usize, columns: u32, inverse: bool) -> Rect {
+    let count = count.max(1);
+    let columns = (columns.max(1) as usize).min(count);
+    let rows = count.div_ceil(columns);
+    let (col, row) = if inverse && columns == 1 {
+        (0, count.saturating_sub(1).saturating_sub(index))
+    } else if rows > 1 && columns > 1 {
+        (index / rows, index % rows)
+    } else {
+        (index % columns, index / columns)
+    };
+    let cw = (outer.width / columns as i32).max(1);
+    let rh = (outer.height / rows as i32).max(1);
+    Rect::new(outer.x + col as i32 * cw, outer.y + row as i32 * rh, cw, rh)
+}
+
+/// Index of the button under a point. The last button wins when the point
+/// misses every cell.
+pub fn cell_at(outer: Rect, x: f32, y: f32, count: usize, columns: u32, inverse: bool) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    for index in 0..count {
+        if cell_rect(outer, index, count, columns, inverse).contains(x, y) {
+            return index;
+        }
+    }
+    count - 1
 }

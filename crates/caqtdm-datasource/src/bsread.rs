@@ -16,6 +16,9 @@ pub struct BsreadSource {
     next: u64,
     /// Pulse spacing in milliseconds. 10 ms is a 100 Hz machine.
     period_ms: u64,
+    /// Keep one pulse out of `modulo`, starting at `offset`. 0 or 1 keeps every pulse.
+    modulo: u64,
+    offset: u64,
 }
 
 impl BsreadSource {
@@ -24,6 +27,17 @@ impl BsreadSource {
             monitors: BTreeMap::new(),
             next: 1,
             period_ms: 10,
+            modulo: 0,
+            offset: 0,
+        }
+    }
+
+    /// `-option bsmodulo=N,bsoffset=M`. The pulse id snaps to that residue.
+    pub fn with_sampling(modulo: u64, offset: u64) -> Self {
+        Self {
+            modulo,
+            offset,
+            ..Self::new()
         }
     }
 }
@@ -61,7 +75,12 @@ impl DataSource for BsreadSource {
     }
 
     fn poll(&mut self, now_ms: u64) -> Vec<Update> {
-        let pulse = now_ms / self.period_ms;
+        let raw = now_ms / self.period_ms;
+        let pulse = if self.modulo > 1 {
+            (raw / self.modulo) * self.modulo + (self.offset % self.modulo)
+        } else {
+            raw
+        };
         self.monitors
             .iter()
             .map(|(id, name)| {

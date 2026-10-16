@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Form</class>
+ <widget class="QWidget" name="Form">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>360</width><height>180</height></rect></property>
+  <widget class="caLabel" name="title">
+   <property name="geometry"><rect><x>12</x><y>8</y><width>200</width><height>24</height></rect></property>
+   <property name="text"><string>Gauges</string></property>
+  </widget>
+  <widget class="caMeter" name="meter">
+   <property name="geometry"><rect><x>12</x><y>40</y><width>100</width><height>100</height></rect></property>
+   <property name="channel"><string>sim://ramp:0:100:5000</string></property>
+  </widget>
+  <widget class="caCircularGauge" name="dial">
+   <property name="geometry"><rect><x>130</x><y>40</y><width>100</width><height>100</height></rect></property>
+   <property name="channel"><string>sim://sine:50:3000:50</string></property>
+  </widget>
+  <widget class="caByte" name="bits">
+   <property name="geometry"><rect><x>12</x><y>148</y><width>220</width><height>22</height></rect></property>
+   <property name="channel"><string>sim://const:170</string></property>
+   <property name="endBit"><number>7</number></property>
+  </widget>
+ </widget>
+</ui>

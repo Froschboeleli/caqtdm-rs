@@ -89,7 +89,13 @@ fn alarm_calc_visibility_and_writes() {
     assert!(matches!(led.kind, VisualKind::Led { on: true }));
     let shape = visuals.iter().find(|v| v.name == "box").unwrap();
     assert!(shape.visible);
-    assert!(matches!(shape.kind, VisualKind::Shape { form: ShapeForm::Rectangle, .. }));
+    assert!(matches!(
+        shape.kind,
+        VisualKind::Shape {
+            form: ShapeForm::Rectangle,
+            ..
+        }
+    ));
     let calc = visuals.iter().find(|v| v.name == "calc").unwrap();
     assert_eq!(calc.text, "5.000");
     let clock = visuals.iter().find(|v| v.name == "clk").unwrap();
@@ -101,10 +107,20 @@ fn alarm_calc_visibility_and_writes() {
         value: 4.0,
     });
     session.tick(2_000);
-    let slider = session.visuals().into_iter().find(|v| v.name == "set").unwrap();
-    assert!(matches!(slider.kind, VisualKind::Slider { fraction } if (fraction - 0.4).abs() < 1e-6));
+    let slider = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "set")
+        .unwrap();
+    assert!(
+        matches!(slider.kind, VisualKind::Slider { fraction, .. } if (fraction - 0.4).abs() < 1e-6)
+    );
 
-    let rel = session.visuals().into_iter().find(|v| v.name == "rel").unwrap();
+    let rel = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "rel")
+        .unwrap();
     let effects = session.act(Action::Press { id: rel.id });
     assert_eq!(
         effects,
@@ -113,7 +129,11 @@ fn alarm_calc_visibility_and_writes() {
             macros: String::new(),
         }]
     );
-    let shell = session.visuals().into_iter().find(|v| v.name == "sh").unwrap();
+    let shell = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "sh")
+        .unwrap();
     let effects = session.act(Action::Press { id: shell.id });
     assert_eq!(
         effects,
@@ -123,13 +143,21 @@ fn alarm_calc_visibility_and_writes() {
         }]
     );
 
-    let writer = session.visuals().into_iter().find(|v| v.name == "writer").unwrap();
+    let writer = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "writer")
+        .unwrap();
     session.act(Action::SetText {
         id: writer.id,
         text: "0".into(),
     });
     session.tick(3_000);
-    let shape = session.visuals().into_iter().find(|v| v.name == "box").unwrap();
+    let shape = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "box")
+        .unwrap();
     assert!(!shape.visible);
     assert!(supported_classes().contains(&"caCartesianPlot"));
 }

@@ -10,6 +10,8 @@ members = [
     "crates/caqtdm-paint",
     "crates/caqtdm-plugin",
     "crates/caqtdm-plugin-example",
+    "crates/caqtdm-egui",
+    "crates/caqtdm-app",
 ]
 
 [workspace.package]
@@ -30,3 +32,4 @@ caqtdm-epics-pva = { path = "crates/caqtdm-epics-pva" }
 caqtdm-widgets = { path = "crates/caqtdm-widgets" }
 caqtdm-paint = { path = "crates/caqtdm-paint" }
 caqtdm-plugin = { path = "crates/caqtdm-plugin" }
+caqtdm-egui = { path = "crates/caqtdm-egui" }

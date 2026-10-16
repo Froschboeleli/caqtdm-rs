@@ -1,0 +1,22 @@
+[package]
+name = "caqtdm-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "caQtDM command line and desktop viewer"
+
+[[bin]]
+name = "caqtdm"
+path = "src/main.rs"
+
+[dependencies]
+caqtdm-core.workspace = true
+caqtdm-ui.workspace = true
+caqtdm-datasource.workspace = true
+caqtdm-epics-ca.workspace = true
+caqtdm-epics-pva.workspace = true
+caqtdm-widgets.workspace = true
+caqtdm-paint.workspace = true
+caqtdm-egui.workspace = true

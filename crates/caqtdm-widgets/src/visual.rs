@@ -21,7 +21,7 @@ pub enum VisualKind {
     Entry { writable: bool },
     Button,
     Toggle { on: bool },
-    Slider { fraction: f64 },
+    Slider { fraction: f64, min: f64, max: f64 },
     Gauge { fraction: f64, circular: bool },
     Thermo { fraction: f64 },
     Meter { fraction: f64 },

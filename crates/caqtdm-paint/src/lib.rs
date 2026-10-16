@@ -18,7 +18,11 @@ impl Image {
         for _ in 0..width * height {
             rgba.extend_from_slice(&[background.r, background.g, background.b, background.a]);
         }
-        Self { width, height, rgba }
+        Self {
+            width,
+            height,
+            rgba,
+        }
     }
 
     pub fn pixel(&self, x: i32, y: i32) -> Option<Color> {
@@ -26,7 +30,12 @@ impl Image {
             return None;
         }
         let i = ((y as u32 * self.width + x as u32) * 4) as usize;
-        Some(Color::rgba(self.rgba[i], self.rgba[i + 1], self.rgba[i + 2], self.rgba[i + 3]))
+        Some(Color::rgba(
+            self.rgba[i],
+            self.rgba[i + 1],
+            self.rgba[i + 2],
+            self.rgba[i + 3],
+        ))
     }
 
     pub fn put(&mut self, x: i32, y: i32, color: Color) {
@@ -143,16 +152,29 @@ fn paint_one(image: &mut Image, visual: &Visual) {
     image.fill_rect(rect, visual.background);
     image.stroke_rect(rect, visual.foreground);
     match &visual.kind {
-        VisualKind::Slider { fraction } => {
-            let filled = Rect::new(rect.x, rect.y, ((rect.width as f64) * fraction) as i32, rect.height);
+        VisualKind::Slider { fraction, .. } => {
+            let filled = Rect::new(
+                rect.x,
+                rect.y,
+                ((rect.width as f64) * fraction) as i32,
+                rect.height,
+            );
             image.fill_rect(filled, visual.foreground);
         }
-        VisualKind::Thermo { fraction } | VisualKind::Gauge { fraction, circular: false } => {
+        VisualKind::Thermo { fraction }
+        | VisualKind::Gauge {
+            fraction,
+            circular: false,
+        } => {
             let h = ((rect.height as f64) * fraction) as i32;
             let filled = Rect::new(rect.x, rect.y + rect.height - h, rect.width, h);
             image.fill_rect(filled, visual.foreground);
         }
-        VisualKind::Gauge { fraction, circular: true } | VisualKind::Meter { fraction } => {
+        VisualKind::Gauge {
+            fraction,
+            circular: true,
+        }
+        | VisualKind::Meter { fraction } => {
             let cx = rect.x + rect.width / 2;
             let cy = rect.y + rect.height / 2;
             let radius = rect.width.min(rect.height) / 2 - 2;
@@ -163,15 +185,30 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             image.line(cx, cy, x1, y1, visual.foreground);
         }
         VisualKind::Led { on } => {
-            let color = if *on { visual.foreground } else { Color::rgb(70, 70, 70) };
+            let color = if *on {
+                visual.foreground
+            } else {
+                Color::rgb(70, 70, 70)
+            };
             let r = rect.width.min(rect.height) / 2;
-            image.fill_circle(rect.x + rect.width / 2, rect.y + rect.height / 2, r.max(1), color);
+            image.fill_circle(
+                rect.x + rect.width / 2,
+                rect.y + rect.height / 2,
+                r.max(1),
+                color,
+            );
         }
         VisualKind::Shape { form, filled } => paint_shape(image, rect, *form, *filled, visual),
         VisualKind::Polyline { points, closed } => {
             if points.len() >= 2 {
                 for pair in points.windows(2) {
-                    image.line(rect.x + pair[0].x, rect.y + pair[0].y, rect.x + pair[1].x, rect.y + pair[1].y, visual.foreground);
+                    image.line(
+                        rect.x + pair[0].x,
+                        rect.y + pair[0].y,
+                        rect.x + pair[1].x,
+                        rect.y + pair[1].y,
+                        visual.foreground,
+                    );
                 }
                 if *closed {
                     let last = points.len() - 1;
@@ -196,7 +233,14 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             for bit in 0..n {
                 let on = value & (1 << bit) != 0;
                 let cell = Rect::new(rect.x + bit * w, rect.y + 2, w - 1, rect.height - 4);
-                image.fill_rect(cell, if on { visual.foreground } else { Color::rgb(60, 60, 60) });
+                image.fill_rect(
+                    cell,
+                    if on {
+                        visual.foreground
+                    } else {
+                        Color::rgb(60, 60, 60)
+                    },
+                );
             }
         }
         VisualKind::Frame => {}
@@ -212,12 +256,23 @@ fn paint_shape(image: &mut Image, rect: Rect, form: ShapeForm, filled: bool, vis
         ShapeForm::Circle => {
             let r = rect.width.min(rect.height) / 2;
             if filled {
-                image.fill_circle(rect.x + rect.width / 2, rect.y + rect.height / 2, r, visual.foreground);
+                image.fill_circle(
+                    rect.x + rect.width / 2,
+                    rect.y + rect.height / 2,
+                    r,
+                    visual.foreground,
+                );
             } else {
                 image.stroke_rect(rect, visual.foreground);
             }
         }
-        ShapeForm::Line => image.line(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height, visual.foreground),
+        ShapeForm::Line => image.line(
+            rect.x,
+            rect.y,
+            rect.x + rect.width,
+            rect.y + rect.height,
+            visual.foreground,
+        ),
         _ => {
             if filled {
                 image.fill_rect(rect, visual.foreground);
@@ -236,7 +291,9 @@ fn paint_series(image: &mut Image, rect: Rect, samples: &[f64], color: Color) {
     let mut prev = None;
     for (i, sample) in samples.iter().enumerate() {
         let x = rect.x + ((i as f64) / (samples.len() as f64) * f64::from(rect.width - 1)) as i32;
-        let y = rect.y + rect.height - 1 - (((sample - min) / span) * f64::from(rect.height - 1)) as i32;
+        let y = rect.y + rect.height
+            - 1
+            - (((sample - min) / span) * f64::from(rect.height - 1)) as i32;
         if let Some((px, py)) = prev {
             image.line(px, py, x, y, color);
         }

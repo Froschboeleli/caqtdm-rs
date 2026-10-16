@@ -1,0 +1,48 @@
+file {
+  name="vacuum.adl"
+  version=030109
+}
+display {
+  object {
+    x=0
+    y=0
+    width=400
+    height=160
+  }
+  clr=14
+  bclr=4
+}
+"text" {
+  object {
+    x=8
+    y=8
+    width=120
+    height=20
+  }
+  "basic attribute" {
+    clr=14
+  }
+  textix="Ion pump"
+}
+"text update" {
+  object {
+    x=140
+    y=8
+    width=100
+    height=20
+  }
+  "dynamic attribute" {
+    chan="sim://sine:5:2000:20"
+    clr="alarm"
+  }
+}
+"related display" {
+  object {
+    x=8
+    y=48
+    width=140
+    height=30
+  }
+  label0="Gauges"
+  name0="gauges.ui"
+}

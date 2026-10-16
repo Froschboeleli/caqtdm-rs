@@ -12,6 +12,10 @@ impl SearchPath {
         Self::default()
     }
 
+    pub fn from_file(file: &Path) -> Self {
+        Self::from_env_and_file(Some(file))
+    }
+
     pub fn from_env_and_file(file: Option<&Path>) -> Self {
         let mut dirs = Vec::new();
         if let Some(file) = file {

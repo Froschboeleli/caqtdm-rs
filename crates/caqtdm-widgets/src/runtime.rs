@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use caqtdm_core::{
-    alarm_color, apply_macros, eval_calc, eval_visibility, format_number, CalcInputs, ChannelData, Color,
-    FormatType, MacroMap, PropValue, PutValue, PvValue, Severity,
+    alarm_color, apply_macros, eval_calc, eval_visibility, format_number, CalcInputs, ChannelData,
+    Color, FormatType, MacroMap, PropValue, PutValue, PvValue, Severity,
 };
 use caqtdm_datasource::Hub;
 use caqtdm_ui::WidgetNode;
@@ -92,9 +92,10 @@ impl Session {
 
     pub fn act(&mut self, action: Action) -> Vec<Effect> {
         let id = match &action {
-            Action::Press { id } | Action::SetNumber { id, .. } | Action::SetText { id, .. } | Action::Choose { id, .. } => {
-                *id
-            }
+            Action::Press { id }
+            | Action::SetNumber { id, .. }
+            | Action::SetText { id, .. }
+            | Action::Choose { id, .. } => *id,
         };
         let Some(node) = self.nodes.get(id as usize).cloned() else {
             return Vec::new();
@@ -116,7 +117,10 @@ impl Session {
     fn press(&mut self, node: &WidgetNode) -> Vec<Effect> {
         match node.class_name.as_str() {
             "caMessageButton" | "QPushButton" | "QToolButton" => {
-                if let Some(text) = node.prop_str("pressMessage").or_else(|| node.prop_str("label")) {
+                if let Some(text) = node
+                    .prop_str("pressMessage")
+                    .or_else(|| node.prop_str("label"))
+                {
                     if node.prop_str("channel").is_some() {
                         self.write_text(node, text);
                     }
@@ -124,7 +128,10 @@ impl Session {
                     let value = node.prop_f64("pressValue").unwrap_or(1.0);
                     self.write_number(node, value);
                 }
-                let label = node.prop_str("label").or_else(|| node.prop_str("text")).unwrap_or(&node.name);
+                let label = node
+                    .prop_str("label")
+                    .or_else(|| node.prop_str("text"))
+                    .unwrap_or(&node.name);
                 vec![Effect::Message(format!("pressed {label}"))]
             }
             "caToggleButton" | "QCheckBox" | "QRadioButton" => {
@@ -136,9 +143,13 @@ impl Session {
             "caRelatedDisplay" | "caMimeDisplay" => self.choose(node, 0),
             "caShellCommand" | "caScriptButton" => {
                 let command = shell_line(node);
-                let ran = self.allow_shell && node.class_name == "caShellCommand" && !command.is_empty();
+                let ran =
+                    self.allow_shell && node.class_name == "caShellCommand" && !command.is_empty();
                 if ran {
-                    let _ = std::process::Command::new("sh").arg("-c").arg(&command).spawn();
+                    let _ = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&command)
+                        .spawn();
                 }
                 self.log.push(format!("shell {command}"));
                 vec![Effect::Shell { command, ran }]
@@ -155,13 +166,20 @@ impl Session {
     }
 
     fn choose(&mut self, node: &WidgetNode, index: usize) -> Vec<Effect> {
-        if node.class_name == "caMenu" || node.class_name == "caChoice" || node.class_name == "QComboBox" {
+        if node.class_name == "caMenu"
+            || node.class_name == "caChoice"
+            || node.class_name == "QComboBox"
+        {
             self.write_number(node, index as f64);
             return Vec::new();
         }
         let entries = related_entries(node);
         if let Some((_, file)) = entries.get(index) {
-            let macros = node.prop_str("args").or_else(|| node.prop_str("macros")).unwrap_or("").to_string();
+            let macros = node
+                .prop_str("args")
+                .or_else(|| node.prop_str("macros"))
+                .unwrap_or("")
+                .to_string();
             self.log.push(format!("open {file}"));
             return vec![Effect::Open {
                 file: file.clone(),
@@ -220,19 +238,26 @@ impl Session {
         let (min, max) = limits_of(node, data);
         let fraction = fraction(value, min, max);
         match node.class_name.as_str() {
-            "caLabel" | "caLabelVertical" | "QLabel" | "caMultiLineString" | "QTextEdit" | "QPlainTextEdit" => {
-                VisualKind::Label
-            }
+            "caLabel" | "caLabelVertical" | "QLabel" | "caMultiLineString" | "QTextEdit"
+            | "QPlainTextEdit" => VisualKind::Label,
             "caLineEdit" | "caTextEntry" | "QLineEdit" | "QLCDNumber" => VisualKind::Entry {
                 writable: node.class_name != "caLineEdit" && node.class_name != "QLCDNumber",
             },
-            "caNumeric" | "caSpinbox" | "QSpinBox" | "QDoubleSpinBox" => VisualKind::Entry { writable: true },
+            "caNumeric" | "caSpinbox" | "QSpinBox" | "QDoubleSpinBox" => {
+                VisualKind::Entry { writable: true }
+            }
             "caApplyNumeric" => VisualKind::Entry { writable: true },
-            "caMessageButton" | "QPushButton" | "QToolButton" | "caRowColMenu" => VisualKind::Button,
+            "caMessageButton" | "QPushButton" | "QToolButton" | "caRowColMenu" => {
+                VisualKind::Button
+            }
             "caToggleButton" | "QCheckBox" | "QRadioButton" => VisualKind::Toggle {
-                on: self.toggles.get(&node.name).copied().unwrap_or(value != 0.0),
+                on: self
+                    .toggles
+                    .get(&node.name)
+                    .copied()
+                    .unwrap_or(value != 0.0),
             },
-            "caSlider" | "QSlider" | "QScrollBar" => VisualKind::Slider { fraction },
+            "caSlider" | "QSlider" | "QScrollBar" => VisualKind::Slider { fraction, min, max },
             "caLinearGauge" => VisualKind::Gauge {
                 fraction,
                 circular: false,
@@ -243,14 +268,20 @@ impl Session {
             },
             "caThermo" | "QProgressBar" => VisualKind::Thermo { fraction },
             "caMeter" => VisualKind::Meter { fraction },
-            "caLed" => VisualKind::Led { on: led_on(node, value) },
+            "caLed" => VisualKind::Led {
+                on: led_on(node, value),
+            },
             "caGraphics" => VisualKind::Shape {
                 form: shape_form(node),
-                filled: node.enum_tail("fillstyle").is_none_or(|s| !s.eq_ignore_ascii_case("Outline")),
+                filled: node
+                    .enum_tail("fillstyle")
+                    .is_none_or(|s| !s.eq_ignore_ascii_case("Outline")),
             },
             "caPolyLine" => VisualKind::Polyline {
                 points: polyline_points(node),
-                closed: node.enum_tail("polystyle").is_some_and(|s| s.eq_ignore_ascii_case("Polygon")),
+                closed: node
+                    .enum_tail("polystyle")
+                    .is_some_and(|s| s.eq_ignore_ascii_case("Polygon")),
             },
             "caCartesianPlot" | "caStripPlot" | "caScan2D" => VisualKind::Plot {
                 series: self.plot_series(node),
@@ -276,9 +307,8 @@ impl Session {
                 line: shell_line(node),
             },
             "caClock" => VisualKind::Clock,
-            "caFrame" | "QFrame" | "QGroupBox" | "QWidget" | "QMainWindow" | "QDialog" | "QTabWidget" | "caDoubleTabWidget" => {
-                VisualKind::Frame
-            }
+            "caFrame" | "QFrame" | "QGroupBox" | "QWidget" | "QMainWindow" | "QDialog"
+            | "QTabWidget" | "caDoubleTabWidget" => VisualKind::Frame,
             "caImage" | "caCamera" => VisualKind::Image {
                 note: node
                     .prop_str("filename")
@@ -313,7 +343,10 @@ impl Session {
 
     fn caption(&self, node: &WidgetNode, data: Option<&ChannelData>) -> String {
         if node.class_name == "caCalc" {
-            let expr = node.prop_str("calc").or_else(|| node.prop_str("visibilityCalc")).unwrap_or("0");
+            let expr = node
+                .prop_str("calc")
+                .or_else(|| node.prop_str("visibilityCalc"))
+                .unwrap_or("0");
             return match eval_calc(expr, &self.calc_inputs(node)) {
                 Ok(v) => format_number(v, FormatType::Decimal, precision_of(node, data)),
                 Err(err) => err.to_string(),
@@ -347,7 +380,10 @@ impl Session {
 
     fn is_visible(&self, node: &WidgetNode) -> bool {
         let mode = node.enum_tail("visibility").unwrap_or("StaticV");
-        let value = self.primary(node).and_then(|d| d.value.as_f64()).unwrap_or(0.0);
+        let value = self
+            .primary(node)
+            .and_then(|d| d.value.as_f64())
+            .unwrap_or(0.0);
         match mode.to_ascii_lowercase().as_str() {
             "ifnotzero" => value != 0.0,
             "ifzero" => value == 0.0,
@@ -372,7 +408,9 @@ impl Session {
     }
 
     fn primary<'a>(&'a self, node: &WidgetNode) -> Option<&'a ChannelData> {
-        node_channels(node).first().and_then(|raw| self.cache.get(raw))
+        node_channels(node)
+            .first()
+            .and_then(|raw| self.cache.get(raw))
     }
 
     fn plot_series(&self, node: &WidgetNode) -> Vec<Vec<f64>> {
@@ -411,7 +449,8 @@ impl Session {
         match self.hub.monitor(raw) {
             Ok(id) => {
                 self.subs.insert(id, raw.to_string());
-                self.cache.insert(raw.to_string(), ChannelData::disconnected(raw));
+                self.cache
+                    .insert(raw.to_string(), ChannelData::disconnected(raw));
             }
             Err(err) => self.log.push(err.to_string()),
         }
@@ -480,13 +519,18 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
 }
 
 fn colors(node: &WidgetNode, data: Option<&ChannelData>) -> (Color, Color) {
-    let fg = node.prop("foreground").and_then(PropValue::as_color).unwrap_or_else(|| Color::rgb(20, 20, 20));
+    let fg = node
+        .prop("foreground")
+        .and_then(PropValue::as_color)
+        .unwrap_or_else(|| Color::rgb(20, 20, 20));
     let bg = node
         .prop("background")
         .and_then(PropValue::as_color)
         .unwrap_or_else(|| Color::rgb(236, 236, 236));
     let mode = node.enum_tail("colorMode").unwrap_or("Static");
-    if mode.eq_ignore_ascii_case("Alarm") || mode.eq_ignore_ascii_case("Alarm_Default") || mode.eq_ignore_ascii_case("Alarm_Static")
+    if mode.eq_ignore_ascii_case("Alarm")
+        || mode.eq_ignore_ascii_case("Alarm_Default")
+        || mode.eq_ignore_ascii_case("Alarm_Static")
     {
         let Some(data) = data else {
             return (fg, bg);
@@ -524,7 +568,8 @@ fn precision_of(node: &WidgetNode, data: Option<&ChannelData>) -> i32 {
     if mode.eq_ignore_ascii_case("User") {
         node.prop_f64("precision").unwrap_or(3.0) as i32
     } else {
-        data.map(|d| d.precision).unwrap_or_else(|| node.prop_f64("precision").unwrap_or(3.0) as i32)
+        data.map(|d| d.precision)
+            .unwrap_or_else(|| node.prop_f64("precision").unwrap_or(3.0) as i32)
     }
 }
 
@@ -572,7 +617,10 @@ fn menu_items(node: &WidgetNode, data: Option<&ChannelData>) -> Vec<String> {
             return data.enum_strings.clone();
         }
     }
-    let from_prop = node.prop("items").map(PropValue::as_string_list).unwrap_or_default();
+    let from_prop = node
+        .prop("items")
+        .map(PropValue::as_string_list)
+        .unwrap_or_default();
     if from_prop.is_empty() {
         vec!["0".into(), "1".into()]
     } else {
@@ -581,8 +629,14 @@ fn menu_items(node: &WidgetNode, data: Option<&ChannelData>) -> Vec<String> {
 }
 
 fn related_entries(node: &WidgetNode) -> Vec<(String, String)> {
-    let labels = node.prop("labels").map(PropValue::as_string_list).unwrap_or_default();
-    let files = node.prop("files").map(PropValue::as_string_list).unwrap_or_default();
+    let labels = node
+        .prop("labels")
+        .map(PropValue::as_string_list)
+        .unwrap_or_default();
+    let files = node
+        .prop("files")
+        .map(PropValue::as_string_list)
+        .unwrap_or_default();
     let n = labels.len().max(files.len());
     (0..n)
         .map(|i| {
@@ -595,7 +649,10 @@ fn related_entries(node: &WidgetNode) -> Vec<(String, String)> {
 }
 
 fn shell_line(node: &WidgetNode) -> String {
-    let command = node.prop_str("command").or_else(|| node.prop_str("scriptCommand")).unwrap_or("");
+    let command = node
+        .prop_str("command")
+        .or_else(|| node.prop_str("scriptCommand"))
+        .unwrap_or("");
     let args = node.prop_str("scriptParameter").unwrap_or("");
     if args.is_empty() {
         command.to_string()
@@ -620,7 +677,11 @@ fn alarm_rows(data: Option<&ChannelData>) -> Vec<Vec<String>> {
     let Some(data) = data else {
         return vec![vec!["disconnected".into()]];
     };
-    vec![vec![data.description.clone(), data.severity.name().to_string(), data.value.as_text()]]
+    vec![vec![
+        data.description.clone(),
+        data.severity.name().to_string(),
+        data.value.as_text(),
+    ]]
 }
 
 fn is_numeric_text(class_name: &str) -> bool {

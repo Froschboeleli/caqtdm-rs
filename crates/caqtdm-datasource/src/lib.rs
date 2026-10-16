@@ -62,7 +62,9 @@ pub use opcua_handshake::{
     thumbprint, ChannelKeys, Identity,
 };
 pub use opcua_sec::{
-    open as open_secure_chunk, seal as seal_secure_chunk, POLICY_BASIC256SHA256, POLICY_NONE,
+    open as open_secure_chunk, seal as seal_secure_chunk, SecurityPolicy, SymKeys,
+    POLICY_AES128_SHA256_RSAOAEP, POLICY_BASIC128RSA15, POLICY_BASIC256, POLICY_BASIC256SHA256,
+    POLICY_NONE,
 };
 pub use sim::SimSource;
 pub use source::{DataSource, Update};

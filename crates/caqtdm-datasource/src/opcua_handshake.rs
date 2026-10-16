@@ -1,29 +1,27 @@
-//! OPC UA OpenSecureChannel for SecurityPolicy#Basic256Sha256.
+//! OPC UA OpenSecureChannel for the certificate policies.
 //!
 //! The OPN chunk carries the sender certificate and the receiver certificate
-//! thumbprint (SHA-1). The sequence header and the OpenSecureChannel body are
-//! signed with RSA PKCS#1 v1.5 SHA-256 and encrypted with RSA-OAEP SHA-1, which
-//! is the asymmetric pair Basic256Sha256 specifies. Both sides then run
-//! P_SHA256 over the nonces to derive the AES-256 and HMAC-SHA256 keys.
+//! thumbprint (SHA-1). Basic128Rsa15 signs with RSA-SHA1 and encrypts with
+//! RSA PKCS#1 v1.5. Basic256 signs with RSA-SHA1 and encrypts with RSA-OAEP.
+//! Basic256Sha256 and Aes128_Sha256_RsaOaep sign with RSA-SHA256 and encrypt
+//! with RSA-OAEP. Both sides then run P_SHA1 or P_SHA256 over the nonces.
 
 use rand::rngs::OsRng;
 use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
 use rsa::pkcs8::EncodePrivateKey;
 use rsa::signature::{SignatureEncoding, Signer, Verifier};
-use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
+use rsa::traits::PublicKeyParts;
+use rsa::{Oaep, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use x509_parser::prelude::*;
 use x509_parser::public_key::PublicKey;
 
 use crate::error::DsError;
+use crate::opcua_sec::SecurityPolicy;
 
-const POLICY: &str = crate::opcua_sec::POLICY_BASIC256SHA256;
 const OPEN_REQUEST: u32 = 446;
 const OPEN_RESPONSE: u32 = 449;
-const RSA_MODULUS: usize = 256;
-const OAEP_OVERHEAD: usize = 42;
-const PLAIN_BLOCK: usize = RSA_MODULUS - OAEP_OVERHEAD;
 
 #[derive(Clone)]
 pub struct Identity {
@@ -35,12 +33,13 @@ pub struct Identity {
 pub struct ChannelKeys {
     pub channel_id: u32,
     pub token_id: u32,
-    pub client_sign: [u8; 32],
-    pub client_enc: [u8; 32],
-    pub client_iv: [u8; 16],
-    pub server_sign: [u8; 32],
-    pub server_enc: [u8; 32],
-    pub server_iv: [u8; 16],
+    pub policy: SecurityPolicy,
+    pub client_sign: Vec<u8>,
+    pub client_enc: Vec<u8>,
+    pub client_iv: Vec<u8>,
+    pub server_sign: Vec<u8>,
+    pub server_enc: Vec<u8>,
+    pub server_iv: Vec<u8>,
 }
 
 pub fn identity_named(name: &str) -> Result<Identity, DsError> {
@@ -92,6 +91,7 @@ pub fn public_from_cert(der: &[u8]) -> Result<RsaPublicKey, DsError> {
 }
 
 pub fn client_open(
+    policy: SecurityPolicy,
     client: &Identity,
     server_cert: &[u8],
     nonce: &[u8],
@@ -99,6 +99,7 @@ pub fn client_open(
     let body = open_request_body(nonce);
     let server_public = public_from_cert(server_cert)?;
     seal_opn(
+        policy,
         &client.key,
         &client.cert_der,
         &thumbprint(server_cert),
@@ -109,11 +110,12 @@ pub fn client_open(
 }
 
 pub fn server_accept(
+    policy: SecurityPolicy,
     server: &Identity,
     message: &[u8],
     server_nonce: &[u8],
 ) -> Result<(Vec<u8>, ChannelKeys), DsError> {
-    let (channel, client_cert, plain) = open_opn(&server.key, message)?;
+    let (channel, client_cert, plain) = open_opn(policy, &server.key, message)?;
     if channel != 0 {
         return Err(DsError::new("open channel id is not zero"));
     }
@@ -123,6 +125,7 @@ pub fn server_accept(
     let token_id = 3u32;
     let body = open_response_body(channel_id, token_id, server_nonce);
     let reply = seal_opn(
+        policy,
         &server.key,
         &server.cert_der,
         &thumbprint(&client_cert),
@@ -130,18 +133,20 @@ pub fn server_accept(
         &body,
         &client_public,
     )?;
-    let keys = derive_keys(&client_nonce, server_nonce, channel_id, token_id);
+    let keys = derive_keys(policy, &client_nonce, server_nonce, channel_id, token_id);
     Ok((reply, keys))
 }
 
 pub fn client_finish(
+    policy: SecurityPolicy,
     client: &Identity,
     response: &[u8],
     client_nonce: &[u8],
 ) -> Result<ChannelKeys, DsError> {
-    let (_channel, _cert, plain) = open_opn(&client.key, response)?;
+    let (_channel, _cert, plain) = open_opn(policy, &client.key, response)?;
     let (channel_id, token_id, server_nonce) = parse_open_response(&plain)?;
     Ok(derive_keys(
+        policy,
         client_nonce,
         &server_nonce,
         channel_id,
@@ -150,35 +155,65 @@ pub fn client_finish(
 }
 
 fn derive_keys(
+    policy: SecurityPolicy,
     client_nonce: &[u8],
     server_nonce: &[u8],
     channel_id: u32,
     token_id: u32,
 ) -> ChannelKeys {
-    let client = p_sha256(server_nonce, client_nonce, 80);
-    let server = p_sha256(client_nonce, server_nonce, 80);
+    let len = policy.derived_len();
+    let client = p_hash(policy, server_nonce, client_nonce, len);
+    let server = p_hash(policy, client_nonce, server_nonce, len);
+    let split = |bytes: &[u8]| {
+        let sign = policy.sign_key_len();
+        let enc = policy.enc_key_len();
+        (
+            bytes[..sign].to_vec(),
+            bytes[sign..sign + enc].to_vec(),
+            bytes[sign + enc..sign + enc + policy.iv_len()].to_vec(),
+        )
+    };
+    let (client_sign, client_enc, client_iv) = split(&client);
+    let (server_sign, server_enc, server_iv) = split(&server);
     ChannelKeys {
         channel_id,
         token_id,
-        client_sign: slice32(&client, 0),
-        client_enc: slice32(&client, 32),
-        client_iv: slice16(&client, 64),
-        server_sign: slice32(&server, 0),
-        server_enc: slice32(&server, 32),
-        server_iv: slice16(&server, 64),
+        policy,
+        client_sign,
+        client_enc,
+        client_iv,
+        server_sign,
+        server_enc,
+        server_iv,
     }
 }
 
-fn slice32(bytes: &[u8], at: usize) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes[at..at + 32]);
+fn p_hash(policy: SecurityPolicy, secret: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
+    if policy.sym_sha256() {
+        p_sha256(secret, seed, len)
+    } else {
+        p_sha1(secret, seed, len)
+    }
+}
+
+fn p_sha1(secret: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut a = hmac_sha1(secret, seed);
+    while out.len() < len {
+        let mut data = a.clone();
+        data.extend_from_slice(seed);
+        out.extend_from_slice(&hmac_sha1(secret, &data));
+        a = hmac_sha1(secret, &a);
+    }
+    out.truncate(len);
     out
 }
 
-fn slice16(bytes: &[u8], at: usize) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&bytes[at..at + 16]);
-    out
+fn hmac_sha1(key: &[u8], data: &[u8]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha1>>::new_from_slice(key).expect("hmac key");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
 }
 
 /// TLS 1.2 P_SHA256, the construction OPC UA Part 6 uses for key derivation.
@@ -278,6 +313,7 @@ fn nonce_after_security_mode(bytes: &[u8]) -> Result<Vec<u8>, DsError> {
 }
 
 fn seal_opn(
+    policy: SecurityPolicy,
     key: &RsaPrivateKey,
     cert: &[u8],
     receiver_thumb: &[u8; 20],
@@ -289,12 +325,12 @@ fn seal_opn(
     secret.extend_from_slice(&1u32.to_le_bytes());
     secret.extend_from_slice(&1u32.to_le_bytes());
     secret.extend_from_slice(body);
-    let padded = sign_and_pad(key, &secret)?;
-    let cipher = rsa_oaep_encrypt(peer, &padded)?;
+    let padded = sign_and_pad(policy, key, peer, &secret)?;
+    let cipher = rsa_encrypt(policy, peer, &padded)?;
     let mut header = b"OPNF".to_vec();
     header.extend_from_slice(&0u32.to_le_bytes());
     header.extend_from_slice(&channel_id.to_le_bytes());
-    write_string(&mut header, POLICY);
+    write_string(&mut header, policy.uri());
     write_bytes(&mut header, cert);
     write_bytes(&mut header, receiver_thumb);
     header.extend_from_slice(&cipher);
@@ -303,7 +339,11 @@ fn seal_opn(
     Ok(header)
 }
 
-fn open_opn(key: &RsaPrivateKey, message: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>), DsError> {
+fn open_opn(
+    policy: SecurityPolicy,
+    key: &RsaPrivateKey,
+    message: &[u8],
+) -> Result<(u32, Vec<u8>, Vec<u8>), DsError> {
     if message.len() < 12 || &message[..4] != b"OPNF" {
         return Err(DsError::new("not an OPN chunk"));
     }
@@ -312,9 +352,9 @@ fn open_opn(key: &RsaPrivateKey, message: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8
         return Err(DsError::new("OPN size mismatch"));
     }
     let channel = u32::from_le_bytes(message[8..12].try_into().unwrap_or([0; 4]));
-    let (policy, rest) = take_opc_string(&message[12..])?;
-    if policy != POLICY {
-        return Err(DsError::new("OPN policy is not Basic256Sha256"));
+    let (uri, rest) = take_opc_string(&message[12..])?;
+    if uri != policy.uri() {
+        return Err(DsError::new(format!("OPN policy is not {}", policy.uri())));
     }
     let (cert_len, rest) = take_i32(rest)?;
     if cert_len < 0 || rest.len() < cert_len as usize {
@@ -328,33 +368,49 @@ fn open_opn(key: &RsaPrivateKey, message: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8
         return Err(DsError::new("OPN receiver thumbprint"));
     }
     let cipher = &rest[20..];
-    let plain = rsa_oaep_decrypt(key, cipher)?;
-    let content = verify_and_unpad(&sender, &plain)?;
+    let plain = rsa_decrypt(policy, key, cipher)?;
+    let content = verify_and_unpad(policy, &sender, &plain)?;
     if content.len() < 8 {
         return Err(DsError::new("OPN sequence header"));
     }
     Ok((channel, cert.to_vec(), content[8..].to_vec()))
 }
 
-fn sign_and_pad(key: &RsaPrivateKey, data: &[u8]) -> Result<Vec<u8>, DsError> {
-    let raw = data.len() + RSA_MODULUS;
-    let pad = PLAIN_BLOCK - (raw % PLAIN_BLOCK);
+fn modulus_len(public: &RsaPublicKey) -> usize {
+    public.size()
+}
+
+fn sign_and_pad(
+    policy: SecurityPolicy,
+    key: &RsaPrivateKey,
+    peer: &RsaPublicKey,
+    data: &[u8],
+) -> Result<Vec<u8>, DsError> {
+    let modulus = modulus_len(peer);
+    let plain_block = modulus - policy.rsa_overhead();
+    let raw = data.len() + modulus;
+    let pad = plain_block - (raw % plain_block);
     let mut signed = data.to_vec();
     signed.extend(std::iter::repeat_n((pad - 1) as u8, pad));
-    let signature = sign_sha256(key, &signed)?;
+    let signature = sign_rsa(policy, key, &signed)?;
     signed.extend_from_slice(&signature);
-    if signed.len() % PLAIN_BLOCK != 0 {
+    if signed.len() % plain_block != 0 {
         return Err(DsError::new("OPN padding is not a whole RSA block"));
     }
     Ok(signed)
 }
 
-fn verify_and_unpad(public: &RsaPublicKey, plain: &[u8]) -> Result<Vec<u8>, DsError> {
-    if plain.len() < RSA_MODULUS + 1 {
+fn verify_and_unpad(
+    policy: SecurityPolicy,
+    public: &RsaPublicKey,
+    plain: &[u8],
+) -> Result<Vec<u8>, DsError> {
+    let modulus = modulus_len(public);
+    if plain.len() < modulus + 1 {
         return Err(DsError::new("OPN plaintext is short"));
     }
-    let (content, sig) = plain.split_at(plain.len() - RSA_MODULUS);
-    verify_sha256(public, content, sig)?;
+    let (content, sig) = plain.split_at(plain.len() - modulus);
+    verify_rsa(policy, public, content, sig)?;
     let mark = *content.last().unwrap_or(&0);
     let pad = mark as usize + 1;
     if pad > content.len() || content[content.len() - pad..].iter().any(|b| *b != mark) {
@@ -363,40 +419,74 @@ fn verify_and_unpad(public: &RsaPublicKey, plain: &[u8]) -> Result<Vec<u8>, DsEr
     Ok(content[..content.len() - pad].to_vec())
 }
 
-fn sign_sha256(key: &RsaPrivateKey, data: &[u8]) -> Result<Vec<u8>, DsError> {
-    let signing = SigningKey::<Sha256>::new(key.clone());
-    let signature = signing.sign(data);
-    Ok(signature.to_bytes().to_vec())
+fn sign_rsa(policy: SecurityPolicy, key: &RsaPrivateKey, data: &[u8]) -> Result<Vec<u8>, DsError> {
+    if policy.asym_sha256() {
+        let signing = SigningKey::<Sha256>::new(key.clone());
+        Ok(signing.sign(data).to_bytes().to_vec())
+    } else {
+        let signing = SigningKey::<Sha1>::new(key.clone());
+        Ok(signing.sign(data).to_bytes().to_vec())
+    }
 }
 
-fn verify_sha256(public: &RsaPublicKey, data: &[u8], sig: &[u8]) -> Result<(), DsError> {
-    let verifying = VerifyingKey::<Sha256>::new(public.clone());
+fn verify_rsa(
+    policy: SecurityPolicy,
+    public: &RsaPublicKey,
+    data: &[u8],
+    sig: &[u8],
+) -> Result<(), DsError> {
     let signature = Signature::try_from(sig).map_err(|_| DsError::new("OPN signature length"))?;
-    verifying
-        .verify(data, &signature)
-        .map_err(|_| DsError::new("OPN signature mismatch"))
+    if policy.asym_sha256() {
+        VerifyingKey::<Sha256>::new(public.clone())
+            .verify(data, &signature)
+            .map_err(|_| DsError::new("OPN signature mismatch"))
+    } else {
+        VerifyingKey::<Sha1>::new(public.clone())
+            .verify(data, &signature)
+            .map_err(|_| DsError::new("OPN signature mismatch"))
+    }
 }
 
-fn rsa_oaep_encrypt(public: &RsaPublicKey, data: &[u8]) -> Result<Vec<u8>, DsError> {
+fn rsa_encrypt(
+    policy: SecurityPolicy,
+    public: &RsaPublicKey,
+    data: &[u8],
+) -> Result<Vec<u8>, DsError> {
+    let plain_block = modulus_len(public) - policy.rsa_overhead();
     let mut out = Vec::new();
-    for chunk in data.chunks(PLAIN_BLOCK) {
-        let block = public
-            .encrypt(&mut OsRng, Oaep::new::<Sha1>(), chunk)
-            .map_err(|_| DsError::new("OPN RSA-OAEP encrypt"))?;
+    for chunk in data.chunks(plain_block) {
+        let block = if policy.oaep() {
+            public
+                .encrypt(&mut OsRng, Oaep::new::<Sha1>(), chunk)
+                .map_err(|_| DsError::new("OPN RSA-OAEP encrypt"))?
+        } else {
+            public
+                .encrypt(&mut OsRng, Pkcs1v15Encrypt, chunk)
+                .map_err(|_| DsError::new("OPN RSA-15 encrypt"))?
+        };
         out.extend_from_slice(&block);
     }
     Ok(out)
 }
 
-fn rsa_oaep_decrypt(key: &RsaPrivateKey, data: &[u8]) -> Result<Vec<u8>, DsError> {
-    if data.len() % RSA_MODULUS != 0 {
+fn rsa_decrypt(
+    policy: SecurityPolicy,
+    key: &RsaPrivateKey,
+    data: &[u8],
+) -> Result<Vec<u8>, DsError> {
+    let modulus = key.size();
+    if modulus == 0 || data.len() % modulus != 0 {
         return Err(DsError::new("OPN ciphertext is not a whole RSA block"));
     }
     let mut out = Vec::new();
-    for chunk in data.chunks(RSA_MODULUS) {
-        let block = key
-            .decrypt(Oaep::new::<Sha1>(), chunk)
-            .map_err(|_| DsError::new("OPN RSA-OAEP decrypt"))?;
+    for chunk in data.chunks(modulus) {
+        let block = if policy.oaep() {
+            key.decrypt(Oaep::new::<Sha1>(), chunk)
+                .map_err(|_| DsError::new("OPN RSA-OAEP decrypt"))?
+        } else {
+            key.decrypt(Pkcs1v15Encrypt, chunk)
+                .map_err(|_| DsError::new("OPN RSA-15 decrypt"))?
+        };
         out.extend_from_slice(&block);
     }
     Ok(out)

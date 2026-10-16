@@ -119,6 +119,7 @@ fn help_and_bad_file() {
     assert!(help.contains("-web_instance_limit"));
     assert!(help.contains("-stylefile"));
     assert!(help.contains("-emptycache"));
+    assert!(help.contains("-novnc"));
     let err = execute(&args(&["validate", "missing-display.ui"])).unwrap_err();
     assert!(!err.is_empty());
     let unknown = execute(&args(&["-notAFlag"])).unwrap_err();
@@ -214,9 +215,11 @@ fn stylefile_geometry_and_url_change_the_result() {
     .unwrap();
     let bytes = std::fs::read(&ppm).unwrap();
     assert!(bytes.starts_with(b"P6\n40 20\n"));
-    let (r, g, b) = ppm_rgb(&bytes, 3, 2);
-    assert_eq!((r, g, b), (255, 0, 0));
-    let (r, g, b) = ppm_rgb(&bytes, 10, 10);
+    assert!(
+        ppm_has(&bytes, |r, g, b| r == 255 && g == 0 && b == 0),
+        "stylesheet color was not painted"
+    );
+    let (r, g, b) = ppm_rgb(&bytes, 38, 18);
     assert_eq!((r, g, b), (236, 236, 236));
 
     let small = dir.join("small.ppm");
@@ -351,6 +354,126 @@ fn empty_cache_deletes_the_cached_file() {
     assert!(count >= 1);
 }
 
+#[test]
+fn novnc_serves_the_framebuffer_and_readonly_drops_input() {
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let err = execute(&args(&["-novnc_readonly"])).unwrap_err();
+    assert!(err.contains("novnc"));
+
+    let dir = std::env::temp_dir().join(format!("caqtdm-vnc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ui = dir.join("label.ui");
+    std::fs::write(
+        &ui,
+        r#"<?xml version="1.0"?>
+<ui version="4.0"><class>Form</class>
+<widget class="QWidget" name="Form">
+ <property name="geometry"><rect><x>0</x><y>0</y><width>40</width><height>20</height></rect></property>
+ <widget class="caLabel" name="letter">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>40</width><height>20</height></rect></property>
+  <property name="text"><string>A</string></property>
+ </widget>
+</widget></ui>"#,
+    )
+    .unwrap();
+    let css = dir.join("red.qss");
+    std::fs::write(&css, "color: #ff0000;\n").unwrap();
+    let missing = execute(&args(&[
+        "paint",
+        ui.to_str().unwrap(),
+        "-displayFont",
+        "no-such-face",
+        "-o",
+        dir.join("bad.ppm").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(missing.contains("display font"));
+
+    let text = execute(&args(&[
+        "-server",
+        "-novnc",
+        "-novnc_readonly",
+        "-server_port",
+        "0",
+        "-web_server_port",
+        "0",
+        "-displayFont",
+        "Cousine",
+        "-stylefile",
+        css.to_str().unwrap(),
+        ui.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(text.contains("readonly true"));
+    let vnc: SocketAddr = line_addr(&text, "vnc ");
+    let novnc: SocketAddr = line_addr(&text, "novnc ");
+    let (_w, _h, rgba) = caqtdm_app::rfb_framebuffer(vnc).unwrap();
+    assert!(
+        rgba.chunks(4)
+            .any(|px| px[0] == 255 && px[1] == 0 && px[2] == 0),
+        "rfb framebuffer missed the red glyph"
+    );
+    assert_eq!(caqtdm_app::novnc_version(novnc).unwrap(), "RFB 003.008\n");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let frame = caqtdm_app::RfbFrame {
+        width: 2,
+        height: 2,
+        rgba: vec![255, 0, 0, 255, 0, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255],
+        readonly: false,
+    };
+    let (addr, events) = caqtdm_app::serve_rfb(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::clone(&stop),
+        frame.clone(),
+    )
+    .unwrap();
+    let (w, h, pixels) = caqtdm_app::rfb_framebuffer(addr).unwrap();
+    assert_eq!((w, h), (2, 2));
+    assert_eq!(&pixels[0..4], &[255, 0, 0, 255]);
+    caqtdm_app::rfb_pointer(addr, 1, 1).unwrap();
+    let seen = wait_events(&events);
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].pointer);
+    assert_eq!((seen[0].x, seen[0].y, seen[0].buttons), (1, 1, 1));
+    stop.store(true, Ordering::Relaxed);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut quiet = frame;
+    quiet.readonly = true;
+    let (addr, events) =
+        caqtdm_app::serve_rfb("127.0.0.1:0".parse().unwrap(), stop, quiet).unwrap();
+    caqtdm_app::rfb_pointer(addr, 1, 1).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(events.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn line_addr(text: &str, prefix: &str) -> std::net::SocketAddr {
+    text.lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap()
+        .trim_start_matches(prefix)
+        .parse()
+        .unwrap()
+}
+
+fn wait_events(events: &std::sync::Mutex<Vec<caqtdm_app::RfbEvent>>) -> Vec<caqtdm_app::RfbEvent> {
+    for _ in 0..40 {
+        let guard = events.lock().unwrap();
+        if !guard.is_empty() {
+            return guard.clone();
+        }
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Vec::new()
+}
+
 fn http_retry(addr: std::net::SocketAddr) -> String {
     let mut last = String::new();
     for _ in 0..40 {
@@ -363,6 +486,17 @@ fn http_retry(addr: std::net::SocketAddr) -> String {
         }
     }
     panic!("http {addr}: {last}");
+}
+
+fn ppm_has(bytes: &[u8], pred: impl Fn(u8, u8, u8) -> bool) -> bool {
+    let data_at = bytes
+        .windows(5)
+        .position(|window| window == b"\n255\n")
+        .unwrap()
+        + 5;
+    bytes[data_at..]
+        .chunks(3)
+        .any(|px| px.len() == 3 && pred(px[0], px[1], px[2]))
 }
 
 fn ppm_rgb(bytes: &[u8], x: u32, y: u32) -> (u8, u8, u8) {

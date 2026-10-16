@@ -10,3 +10,4 @@ description = "Software rasterizer for caQtDM visuals"
 [dependencies]
 caqtdm-core.workspace = true
 caqtdm-widgets.workspace = true
+fontdue = "0.9"

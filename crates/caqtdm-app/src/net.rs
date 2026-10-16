@@ -163,6 +163,70 @@ fn header_value(text: &str, name: &str) -> Option<String> {
     None
 }
 
+pub(crate) fn encode_ws_binary(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 10);
+    out.push(0x82);
+    push_ws_len(&mut out, payload.len(), false);
+    out.extend_from_slice(payload);
+    out
+}
+
+pub(crate) fn encode_ws_binary_masked(payload: &[u8]) -> Vec<u8> {
+    let mask = [1u8, 2, 3, 4];
+    let mut out = Vec::with_capacity(payload.len() + 14);
+    out.push(0x82);
+    push_ws_len(&mut out, payload.len(), true);
+    out.extend_from_slice(&mask);
+    for (index, byte) in payload.iter().enumerate() {
+        out.push(byte ^ mask[index % 4]);
+    }
+    out
+}
+
+fn push_ws_len(out: &mut Vec<u8>, len: usize, masked: bool) {
+    let mask_bit = if masked { 0x80 } else { 0 };
+    if len < 126 {
+        out.push(mask_bit | len as u8);
+    } else if len <= u16::MAX as usize {
+        out.push(mask_bit | 126);
+        out.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        out.push(mask_bit | 127);
+        out.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+}
+
+pub(crate) fn read_ws_payload(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut header = [0u8; 2];
+    stream.read_exact(&mut header)?;
+    let masked = header[1] & 0x80 != 0;
+    let mut len = (header[1] & 0x7f) as usize;
+    if len == 126 {
+        let mut ext = [0u8; 2];
+        stream.read_exact(&mut ext)?;
+        len = u16::from_be_bytes(ext) as usize;
+    } else if len == 127 {
+        let mut ext = [0u8; 8];
+        stream.read_exact(&mut ext)?;
+        len = u64::from_be_bytes(ext) as usize;
+    }
+    let mask = if masked {
+        let mut mask = [0u8; 4];
+        stream.read_exact(&mut mask)?;
+        Some(mask)
+    } else {
+        None
+    };
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload)?;
+    if let Some(mask) = mask {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % 4];
+        }
+    }
+    Ok(payload)
+}
+
 fn encode_ws_frame(text: &str) -> Vec<u8> {
     let mut out = vec![0x81, text.len() as u8];
     out.extend_from_slice(text.as_bytes());

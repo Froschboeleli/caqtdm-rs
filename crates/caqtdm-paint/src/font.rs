@@ -1,111 +1,131 @@
-//! 8x12 bitmap for the headless rasterizer.
+//! TrueType text for the headless rasterizer.
 //!
-//! Uppercase and digits keep the original 5-column shapes on the cap height.
-//! Lowercase sits on the x-height, and g, j, p, q, and y descend. This is not
-//! a Qt font and it does not use Qt's metrics.
+//! Arimo and Cousine are the Chrome metric-compatible faces (SIL Open Font
+//! License, see `fonts/OFL.txt`). Glyph advances, bearings, and the bitmap
+//! come from fontdue. Coverage above one half is painted in the widget color,
+//! so a label stays the color the display file asked for.
+//!
+//! `-displayFont` selects one of those faces, or a `.ttf` path.
 
-pub const WIDTH: i32 = 8;
-pub const HEIGHT: i32 = 12;
-pub const ADVANCE: i32 = 9;
+use std::cell::RefCell;
 
-pub fn glyph(ch: char) -> [u8; 12] {
-    if ch.is_ascii_lowercase() {
-        return lowercase(ch);
-    }
-    let mut rows = [0u8; HEIGHT as usize];
-    for (index, bits) in glyph5(ch).iter().enumerate() {
-        rows[index] = bits << 3;
-    }
-    rows
+use fontdue::{Font, FontSettings, Metrics};
+
+use crate::Image;
+use caqtdm_core::Color;
+
+const ARIMO: &[u8] = include_bytes!("../fonts/Arimo-Regular.ttf");
+const COUSINE: &[u8] = include_bytes!("../fonts/Cousine-Regular.ttf");
+
+thread_local! {
+    static FACE: RefCell<Font> = RefCell::new(load_bytes(ARIMO).expect("Arimo"));
 }
 
-fn lowercase(ch: char) -> [u8; 12] {
-    let mut rows = [0u8; 12];
-    let (top, bits): (usize, &[u8]) = match ch {
-        'a' => (4, &[0x38, 0x04, 0x3C, 0x44, 0x3C]),
-        'b' => (1, &[0x40, 0x40, 0x40, 0x78, 0x44, 0x44, 0x78]),
-        'c' => (4, &[0x38, 0x44, 0x40, 0x44, 0x38]),
-        'd' => (1, &[0x04, 0x04, 0x04, 0x3C, 0x44, 0x44, 0x3C]),
-        'e' => (4, &[0x38, 0x44, 0x7C, 0x40, 0x38]),
-        'f' => (1, &[0x18, 0x20, 0x70, 0x20, 0x20, 0x20, 0x20]),
-        'g' => (4, &[0x38, 0x44, 0x44, 0x3C, 0x04, 0x44, 0x38]),
-        'h' => (1, &[0x40, 0x40, 0x40, 0x78, 0x44, 0x44, 0x44]),
-        'i' => (2, &[0x10, 0x00, 0x30, 0x10, 0x10, 0x10, 0x38]),
-        'j' => (2, &[0x08, 0x00, 0x18, 0x08, 0x08, 0x08, 0x48, 0x30]),
-        'k' => (1, &[0x40, 0x40, 0x48, 0x50, 0x60, 0x50, 0x48]),
-        'l' => (1, &[0x30, 0x10, 0x10, 0x10, 0x10, 0x10, 0x38]),
-        'm' => (4, &[0x78, 0x54, 0x54, 0x54, 0x54]),
-        'n' => (4, &[0x78, 0x44, 0x44, 0x44, 0x44]),
-        'o' => (4, &[0x38, 0x44, 0x44, 0x44, 0x38]),
-        'p' => (4, &[0x78, 0x44, 0x44, 0x78, 0x40, 0x40, 0x40]),
-        'q' => (4, &[0x3C, 0x44, 0x44, 0x3C, 0x04, 0x04, 0x04]),
-        'r' => (4, &[0x58, 0x64, 0x40, 0x40, 0x40]),
-        's' => (4, &[0x3C, 0x40, 0x38, 0x04, 0x78]),
-        't' => (2, &[0x20, 0x20, 0x70, 0x20, 0x20, 0x20, 0x18]),
-        'u' => (4, &[0x44, 0x44, 0x44, 0x44, 0x3C]),
-        'v' => (4, &[0x44, 0x44, 0x44, 0x28, 0x10]),
-        'w' => (4, &[0x44, 0x54, 0x54, 0x54, 0x28]),
-        'x' => (4, &[0x44, 0x28, 0x10, 0x28, 0x44]),
-        'y' => (4, &[0x44, 0x44, 0x44, 0x3C, 0x04, 0x44, 0x38]),
-        'z' => (4, &[0x7C, 0x08, 0x10, 0x20, 0x7C]),
-        _ => (4, &[0x7C, 0x44, 0x44, 0x44, 0x7C]),
-    };
-    for (index, bits) in bits.iter().enumerate() {
-        let row = top + index;
-        if row < rows.len() {
-            rows[row] = *bits;
+fn load_bytes(bytes: &[u8]) -> Result<Font, String> {
+    Font::from_bytes(bytes, FontSettings::default()).map_err(|err| err.to_string())
+}
+
+/// Select the face used by later `paint` calls on this thread.
+pub fn install_display_font(name: &str) -> Result<(), String> {
+    let font = resolve(name)?;
+    FACE.with(|face| *face.borrow_mut() = font);
+    Ok(())
+}
+
+/// Advance width in pixels for `text` at `px`, using the named face.
+pub fn measure_text(name: &str, px: f32, text: &str) -> Result<f32, String> {
+    let font = resolve(name)?;
+    Ok(advance(&font, px, text))
+}
+
+/// `(advance, ymin)` of one character. A descender has a negative `ymin`.
+pub fn glyph_metrics(name: &str, px: f32, ch: char) -> Result<(f32, i32), String> {
+    let font = resolve(name)?;
+    let metrics = font.metrics(ch, px.max(1.0));
+    Ok((metrics.advance_width, metrics.ymin))
+}
+
+pub fn draw(image: &mut Image, x: i32, y: i32, text: &str, color: Color, px: i32) {
+    let px = (px.max(6) as f32).min(72.0);
+    FACE.with(|face| {
+        let font = face.borrow();
+        let line = font
+            .horizontal_line_metrics(px)
+            .unwrap_or(fontdue::LineMetrics {
+                ascent: px * 0.8,
+                descent: -px * 0.2,
+                line_gap: 0.0,
+                new_line_size: px,
+            });
+        let baseline = y + line.ascent.round() as i32;
+        let mut cursor = x as f32;
+        for ch in text.chars().take(80) {
+            let (metrics, bitmap) = font.rasterize(ch, px);
+            blit(image, cursor, baseline, &metrics, &bitmap, color);
+            cursor += metrics.advance_width;
+        }
+    });
+}
+
+pub fn advance_current(text: &str, px: i32) -> i32 {
+    let px = (px.max(6) as f32).min(72.0);
+    FACE.with(|face| advance(&face.borrow(), px, text).round() as i32)
+}
+
+fn advance(font: &Font, px: f32, text: &str) -> f32 {
+    let px = px.max(1.0);
+    text.chars()
+        .take(80)
+        .map(|ch| font.metrics(ch, px).advance_width)
+        .sum()
+}
+
+fn blit(
+    image: &mut Image,
+    cursor: f32,
+    baseline: i32,
+    metrics: &Metrics,
+    bitmap: &[u8],
+    color: Color,
+) {
+    let origin_x = cursor.round() as i32 + metrics.xmin;
+    let origin_y = baseline - metrics.ymin - metrics.height as i32;
+    for row in 0..metrics.height {
+        for col in 0..metrics.width {
+            let coverage = bitmap[row * metrics.width + col];
+            if coverage > 127 {
+                image.put(origin_x + col as i32, origin_y + row as i32, color);
+            }
         }
     }
-    rows
 }
 
-fn glyph5(ch: char) -> [u8; 7] {
-    let ch = ch.to_ascii_uppercase();
-    match ch {
-        ' ' => [0, 0, 0, 0, 0, 0, 0],
-        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        '2' => [0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F],
-        '3' => [0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E],
-        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        '6' => [0x0E, 0x10, 0x1E, 0x11, 0x11, 0x11, 0x0E],
-        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E],
-        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        'C' => [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        'D' => [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
-        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        'G' => [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'I' => [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        'J' => [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
-        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        'M' => [0x11, 0x1B, 0x15, 0x11, 0x11, 0x11, 0x11],
-        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
-        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        'Q' => [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        'S' => [0x0E, 0x11, 0x10, 0x0E, 0x01, 0x11, 0x0E],
-        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11],
-        'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
-        'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-        '.' => [0, 0, 0, 0, 0, 0x04, 0x04],
-        ':' => [0, 0x04, 0x04, 0, 0x04, 0x04, 0],
-        '-' => [0, 0, 0, 0x1F, 0, 0, 0],
-        '+' => [0, 0x04, 0x04, 0x1F, 0x04, 0x04, 0],
-        '/' => [0x01, 0x02, 0x04, 0x08, 0x10, 0, 0],
-        '%' => [0x19, 0x1A, 0x02, 0x04, 0x0B, 0x13, 0x13],
-        '(' | ')' => [0x04, 0x08, 0x08, 0x08, 0x08, 0x08, 0x04],
-        _ => [0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F],
+fn resolve(name: &str) -> Result<Font, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || is_arimo(trimmed) {
+        return load_bytes(ARIMO);
     }
+    if is_cousine(trimmed) {
+        return load_bytes(COUSINE);
+    }
+    let path = std::path::Path::new(trimmed);
+    if path.is_file() {
+        let bytes = std::fs::read(path).map_err(|err| format!("display font {trimmed}: {err}"))?;
+        return load_bytes(&bytes).map_err(|err| format!("display font {trimmed}: {err}"));
+    }
+    Err(format!("display font '{trimmed}' was not found"))
+}
+
+fn is_arimo(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "arimo" | "sans" | "arial" | "helvetica" | "sans-serif"
+    )
+}
+
+fn is_cousine(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "cousine" | "mono" | "monospace" | "courier"
+    )
 }

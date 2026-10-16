@@ -6,6 +6,11 @@ use caqtdm_widgets::{cell_rect, ShapeForm, Visual, VisualKind};
 
 mod font;
 
+pub use font::{glyph_metrics, install_display_font, measure_text};
+
+/// Pixels kept free on the right of a plot that has a second Y scale.
+const Y2_GUTTER: i32 = 22;
+
 /// RGBA image, top-left origin, row-major.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -139,12 +144,8 @@ impl Image {
         }
     }
 
-    pub fn text(&mut self, x: i32, y: i32, text: &str, color: Color) {
-        let mut cursor = x;
-        for ch in text.chars().take(80) {
-            blit_glyph(self, cursor, y, ch, color);
-            cursor += font::ADVANCE;
-        }
+    pub fn text(&mut self, x: i32, y: i32, text: &str, color: Color, px: i32) {
+        font::draw(self, x, y, text, color, px);
     }
 
     pub fn to_ppm(&self) -> Vec<u8> {
@@ -344,7 +345,7 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 } else {
                     Color::rgb(40, 40, 40)
                 };
-                image.text(rect.x + 2, y, item, color);
+                image.text(rect.x + 2, y, item, color, visual.font_px);
             }
         }
         VisualKind::Bits {
@@ -366,7 +367,13 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                     },
                 );
                 if let Some(name) = names.get(bit as usize) {
-                    image.text(cell.x + 1, cell.y + 1, name, Color::rgb(255, 255, 255));
+                    image.text(
+                        cell.x + 1,
+                        cell.y + 1,
+                        name,
+                        Color::rgb(255, 255, 255),
+                        visual.font_px,
+                    );
                 }
             }
         }
@@ -394,17 +401,29 @@ fn paint_one(image: &mut Image, visual: &Visual) {
         if visual.rotation % 180 == 90 {
             let mut y = rect.y + 2;
             for ch in visual.text.chars().take(24) {
-                image.text(rect.x + 2, y, &ch.to_string(), visual.foreground);
+                image.text(
+                    rect.x + 2,
+                    y,
+                    &ch.to_string(),
+                    visual.foreground,
+                    visual.font_px,
+                );
                 y += visual.font_px.max(8);
             }
         } else if visual.text.contains('\n') {
             let mut y = rect.y + 2;
             for line in visual.text.lines().take(8) {
-                image.text(rect.x + 2, y, line, visual.foreground);
+                image.text(rect.x + 2, y, line, visual.foreground, visual.font_px);
                 y += visual.font_px.max(8);
             }
         } else {
-            image.text(rect.x + 2, rect.y + 2, &visual.text, visual.foreground);
+            image.text(
+                rect.x + 2,
+                rect.y + 2,
+                &visual.text,
+                visual.foreground,
+                visual.font_px,
+            );
         }
     }
 }
@@ -427,7 +446,13 @@ struct PlotPaint<'a> {
 
 fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotPaint<'_>) {
     if !plot_paint.title.is_empty() {
-        image.text(rect.x + 2, rect.y + 1, plot_paint.title, visual.foreground);
+        image.text(
+            rect.x + 2,
+            rect.y + 1,
+            plot_paint.title,
+            visual.foreground,
+            visual.font_px,
+        );
     }
     if !plot_paint.title_y.is_empty() {
         image.text(
@@ -435,6 +460,7 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             rect.y + 10,
             plot_paint.title_y,
             visual.foreground,
+            visual.font_px,
         );
     }
     if !plot_paint.title_x.is_empty() {
@@ -443,15 +469,31 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             rect.y + rect.height - 8,
             plot_paint.title_x,
             visual.foreground,
+            visual.font_px,
         );
     }
+    let y2 = plot_paint.y2_max > plot_paint.y2_min
+        && plot_paint.y2_min.is_finite()
+        && plot_paint.y2_max.is_finite();
+    let gutter = if y2 { Y2_GUTTER } else { 0 };
     let plot = Rect::new(
         rect.x + 4,
         rect.y + 18,
-        rect.width.saturating_sub(8).max(1),
+        rect.width.saturating_sub(8 + gutter).max(1),
         rect.height.saturating_sub(28).max(1),
     );
     image.stroke_rect(plot, visual.foreground);
+    if y2 {
+        paint_y2_axis(
+            image,
+            plot,
+            plot_paint.y2_min,
+            plot_paint.y2_max,
+            plot_paint.log_y,
+            visual.foreground,
+            visual.font_px,
+        );
+    }
     let ticks = plot_paint.x_ticks.clamp(1, 12);
     for tick in 0..ticks {
         let x = plot.x + (plot.width * tick as i32) / ticks as i32;
@@ -493,14 +535,14 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
 fn paint_tabs(image: &mut Image, rect: Rect, visual: &Visual, labels: &[String], current: usize) {
     let mut x = rect.x + 2;
     for (index, label) in labels.iter().enumerate() {
-        let width = (label.len() as i32 * font::ADVANCE + 8).max(16);
+        let width = (font::advance_current(label, visual.font_px) + 8).max(16);
         let tab = Rect::new(x, rect.y + 1, width, 14);
         if index == current {
             image.fill_rect(tab, visual.foreground);
-            image.text(x + 2, rect.y + 4, label, visual.background);
+            image.text(x + 2, rect.y + 4, label, visual.background, visual.font_px);
         } else {
             image.stroke_rect(tab, visual.foreground);
-            image.text(x + 2, rect.y + 4, label, visual.foreground);
+            image.text(x + 2, rect.y + 4, label, visual.foreground, visual.font_px);
         }
         x += width + 2;
     }
@@ -782,7 +824,7 @@ fn paint_buttons(
             } else {
                 visual.foreground
             };
-            image.text(inset.x + 2, inset.y + 2, label, ink);
+            image.text(inset.x + 2, inset.y + 2, label, ink, visual.font_px);
         }
     }
 }
@@ -863,6 +905,41 @@ fn paint_series_scaled(
     }
 }
 
+fn paint_y2_axis(
+    image: &mut Image,
+    plot: Rect,
+    min: f64,
+    max: f64,
+    log_y: bool,
+    color: Color,
+    px: i32,
+) {
+    let right = plot.x + plot.width - 1;
+    let span = (plot.height - 1).max(1);
+    for frac in [0.0_f64, 0.5, 1.0] {
+        let y = plot.y + plot.height - 1 - (frac * f64::from(span)) as i32;
+        image.line(right, y, right + 5, y, color);
+        let value = if log_y {
+            let lo = if min <= 0.0 { 1e-6 } else { min };
+            let hi = if max <= lo { lo * 10.0 } else { max };
+            10f64.powf(lo.log10() + frac * (hi.log10() - lo.log10()))
+        } else {
+            min + frac * (max - min)
+        };
+        image.text(right + 7, y - px.max(6) / 2, &tick_label(value), color, px);
+    }
+}
+
+fn tick_label(value: f64) -> String {
+    if value.fract().abs() < 1e-6 && value.abs() < 1_000_000.0 {
+        format!("{value:.0}")
+    } else if value.abs() >= 1000.0 || (value != 0.0 && value.abs() < 0.01) {
+        format!("{value:.2e}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
 fn series_color(index: usize, first: Color) -> Color {
     const PALETTE: [Color; 4] = [
         Color::rgb(0x4f, 0xc3, 0xf7),
@@ -874,17 +951,6 @@ fn series_color(index: usize, first: Color) -> Color {
         first
     } else {
         PALETTE[index % PALETTE.len()]
-    }
-}
-
-fn blit_glyph(image: &mut Image, x: i32, y: i32, ch: char, color: Color) {
-    let rows = font::glyph(ch);
-    for (row, bits) in rows.iter().enumerate() {
-        for col in 0..font::WIDTH {
-            if bits & (1 << (7 - col)) != 0 {
-                image.put(x + col, y + row as i32, color);
-            }
-        }
     }
 }
 
@@ -931,7 +997,15 @@ mod tests {
                 rotation: 0,
             },
         ]);
-        assert_eq!(image.pixel(5, 4).unwrap().g, 205);
+        let mut ink = false;
+        for y in 2..24 {
+            for x in 2..40 {
+                if image.pixel(x, y).unwrap().g == 205 {
+                    ink = true;
+                }
+            }
+        }
+        assert!(ink, "A was not painted");
         assert!(image.pixel(96, 10).unwrap().g > 100);
         assert!(image.to_ppm().starts_with(b"P6\n"));
     }
@@ -1113,6 +1187,22 @@ mod tests {
         assert!(left.b > 150 && left.r < 80, "first axis");
         let right = image.pixel(20, 34).unwrap();
         assert!(right.r > 200 && right.b < 100, "second axis {right:?}");
+        // Right-hand ruler: plot is (4, 18, 50, 32), ticks stick out past x=53.
+        let tick = image.pixel(56, 18).unwrap();
+        assert!(tick.b > 150, "top tick of the second scale");
+        let gap = image.pixel(56, 26).unwrap();
+        assert!(gap.b < 40, "gap between right-hand ticks");
+        let mut labeled = false;
+        for y in 8..28 {
+            for x in 58..80 {
+                if let Some(pixel) = image.pixel(x, y) {
+                    if pixel.b > 150 {
+                        labeled = true;
+                    }
+                }
+            }
+        }
+        assert!(labeled, "second scale label");
     }
 
     #[test]
@@ -1310,16 +1400,47 @@ mod tests {
 
     #[test]
     fn lowercase_is_a_different_glyph_from_uppercase() {
-        let upper = font::glyph('H');
-        let lower = font::glyph('e');
-        assert_ne!(upper, lower);
-        assert!(upper.iter().take(7).any(|row| *row != 0));
-        assert_eq!(lower[1], 0, "e sits below the cap height");
-        assert!(lower[4] != 0);
-        assert!(font::glyph('g')[10] != 0, "g has a descender");
-        assert_eq!(font::HEIGHT, 12);
-        let image = paint(&[visual(VisualKind::Label, "He", Color::rgb(0, 0, 0))]);
-        let gap = image.pixel(4 + font::WIDTH, 6).unwrap();
-        assert_eq!((gap.r, gap.g, gap.b), (10, 10, 10), "letter spacing");
+        let (wide, h_ymin) = glyph_metrics("Arimo", 16.0, 'H').unwrap();
+        let (narrow, _) = glyph_metrics("Arimo", 16.0, 'i').unwrap();
+        let (_, g_ymin) = glyph_metrics("Arimo", 16.0, 'g').unwrap();
+        assert!(wide > narrow + 2.0, "proportional advances");
+        assert!(h_ymin >= 0, "H sits on the baseline");
+        assert!(g_ymin < 0, "g descends below the baseline");
+        let (mono_i, _) = glyph_metrics("Cousine", 16.0, 'i').unwrap();
+        let (mono_w, _) = glyph_metrics("Cousine", 16.0, 'W').unwrap();
+        assert!((mono_i - mono_w).abs() < 0.1, "Cousine is monospace");
+        let arimo_i = rightmost_ink("iH", "Arimo");
+        let arimo_w = rightmost_ink("WH", "Arimo");
+        assert!(
+            arimo_w > arimo_i + 4,
+            "Arimo paints W further right than i ({arimo_w} vs {arimo_i})"
+        );
+        let cousine_i = rightmost_ink("iH", "Cousine");
+        let cousine_w = rightmost_ink("WH", "Cousine");
+        assert!(
+            (cousine_i - cousine_w).abs() <= 1,
+            "Cousine paints the next glyph at the same advance ({cousine_i} vs {cousine_w})"
+        );
+        install_display_font("Arimo").unwrap();
+    }
+
+    fn rightmost_ink(text: &str, face: &str) -> i32 {
+        install_display_font(face).unwrap();
+        let mut label = visual(VisualKind::Label, text, Color::rgb(0, 220, 0));
+        label.font_px = 16;
+        label.rect = Rect::new(2, 2, 160, 28);
+        label.background = Color::rgb(240, 240, 240);
+        let image = paint(&[label]);
+        let mut right = 0;
+        for y in 3..29 {
+            for x in 3..161 {
+                let pixel = image.pixel(x, y).unwrap();
+                if pixel.g > 180 && pixel.r < 40 {
+                    right = right.max(x);
+                }
+            }
+        }
+        assert!(right > 4, "{face} {text} painted no glyph");
+        right
     }
 }

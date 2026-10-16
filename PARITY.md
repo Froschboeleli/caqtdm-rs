@@ -50,8 +50,8 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caMultiLineString | Label text, including line breaks | done |
 | caThermo | Vertical fraction bar. Channel warning and alarm limits paint yellow and red bands. The bar pixel and a red band pixel are checked | done |
 | caMeter | Fraction drives a needle. A zero fraction points left, and that pixel is checked | done |
-| caCartesianPlot | Traces from `channel`, `channels`, and `channels_1`..`channels_6`. Zoom windows both axes. `YAxisType` log10 places the sample with log10. The second curve uses `YaxisLimits` pair 2. Paint tests check the log pixel and the second-curve pixel | done |
-| caStripPlot | Same traces, log scale, and second Y window. `timeSpan` keeps the last N samples, and a paint test shows only that window | done |
+| caCartesianPlot | Traces from `channel`, `channels`, and `channels_1`..`channels_6`. Zoom windows both axes. `YAxisType` log10 places the sample with log10. The second curve uses `YaxisLimits` pair 2 and a right-hand tick ruler (top, middle, bottom, and a label). Paint tests check the log pixel, the second-curve pixel, and a tick pixel | done |
+| caStripPlot | Same traces, log scale, and the right-hand second Y ruler. `timeSpan` keeps the last N samples, and a paint test shows only that window | done |
 | caByte | Read-only bit cells | done |
 | caTable | One column per channel (`channel`, `channels`, `channels_1`..`channels_6`). A two-channel scalar row is asserted | done |
 | caWaveTable | `numberOfRows` by `numberOfColumns`, row-major. A 2x2 grid with user precision 0 is asserted | done |
@@ -103,7 +103,7 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | gps | receiver plugin | Simulated `utc`, `lat` 47.3769, `lon` 8.5417, `alt` 408, `sats` 8. A write to `lat` is polled back. No receiver hardware | done |
 | archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json`. HIPA and PRO send the `gmv()` argument block (`hipa-lgexp.psi.ch`, `proscan-lgexp.psi.ch`) and apply the `Valerr` hold-last rule. SF posts the plugin JSON and reads `globalSeconds` / `value.mean`. The unpublished `libgmv` codec is not in the upstream tree | done |
 | modbus | Modbus TCP | MBAP and function codes 1, 2, 3, 4, 5, 6, 15, and 16. Address 40001 is register 0 | done |
-| opcua | OPC UA binary | Hello/Acknowledge, a Read of a numeric NodeId, and Basic256Sha256 OpenSecureChannel: X.509, RSA-OAEP-SHA1, RSA-SHA256, then P_SHA256 into the AES-256-CBC and HMAC-SHA256 chunk. Other policies are not implemented | done |
+| opcua | OPC UA binary | Hello/Acknowledge, a Read of a numeric NodeId, and OpenSecureChannel for Basic128Rsa15 (RSA PKCS#1 v1.5, RSA-SHA1, AES-128-CBC, HMAC-SHA1, P_SHA1), Basic256 (RSA-OAEP-SHA1, RSA-SHA1, AES-256-CBC, HMAC-SHA1, P_SHA1), Basic256Sha256 (RSA-OAEP-SHA1, RSA-SHA256, AES-256-CBC, HMAC-SHA256, P_SHA256), and Aes128_Sha256_RsaOaep (RSA-OAEP-SHA1, RSA-SHA256, AES-128-CBC, HMAC-SHA256, P_SHA256). A test derives matching keys and round-trips a symmetric chunk for each | done |
 | bsread | 0MQ bsread | Three-part bsread on length-prefixed TCP, and as ZMTP 3.0 frames with NULL, PLAIN, and CURVE. CURVE is the CurveZMQ HELLO/WELCOME/INITIATE/READY/MESSAGE exchange. Not a link to libzmq | done |
 | epics3 | Channel Access | DBR types 0..34 round-trip. The soft IOC serves string, short, float, enum, char, long, and double on create, read, write, and monitor, including waveforms | done |
 | epics4 | PV Access / pvxs | Search, scalar get/put/monitor, and `get_nt` / `put_nt` carrying `epics:nt/NTScalar:1.0` on the wire | done |
@@ -115,11 +115,11 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | Feature | Upstream | Rust | Status |
 | --- | --- | --- | --- |
 | Desktop viewer | Qt `caQtDM_Viewer` | egui/eframe: paint, click, drag slider, tabs, menus, related files, macro reload. `action_for` is what the pointer handler calls. A test drives a slider drag, a plot click, a plot drag (both zoom axes), a tab, a menu row, and hit-testing | done |
-| Headless render | Qt grab / print | PPM rasterizer and an 8x12 bitmap (lowercase and descenders). Plot zoom, log scale, and the upstream `graphics.edl` pixels are tested. Widget text is not Qt metrics | done |
-| CLI | `-display`, `-macro`, and many server flags | `dump`, `validate`, `convert`, `paint`, `print`, `widgets`, `config`, `run`, `serve`, `-macro`, `-cs`, `--ca`, `--pva`, `-config`, `-attach`. Also `-noMsg`, `-noResize`, `-x`, `-style`, `-stylefile`, `-displayFont`, `-dg`, `-url`, `-option`, `-httpconfig`, `-emptycache`, `-server`, `-host`, `-server_port`, `-web_server_port`, `-web_timeout`, `-web_instance_limit`, `-web_interaction_timeout`, `-web_launcher_root_file`, `-web_allow_insecure_cashell_commands`, `-savetoimage`, `-print`. `-novnc` stays with the VNC exclusion | done |
+| Headless render | Qt grab / print | PPM rasterizer. Text uses fontdue with Arimo (proportional) and Cousine (monospace). A test checks advances, a descender, and that the next painted glyph follows that advance. Coverage above half is the exact widget color. Plot zoom, log scale, and the upstream `graphics.edl` pixels are tested | done |
+| CLI | `-display`, `-macro`, and many server flags | `dump`, `validate`, `convert`, `paint`, `print`, `widgets`, `config`, `run`, `serve`, `-macro`, `-cs`, `--ca`, `--pva`, `-config`, `-attach`. Also `-noMsg`, `-noResize`, `-x`, `-style`, `-stylefile`, `-displayFont`, `-dg`, `-url`, `-option`, `-httpconfig`, `-emptycache`, `-server`, `-host`, `-server_port`, `-web_server_port`, `-web_timeout`, `-web_instance_limit`, `-web_interaction_timeout`, `-web_launcher_root_file`, `-web_allow_insecure_cashell_commands`, `-savetoimage`, `-print`, `-novnc`, `-novnc_readonly`. `-displayFont` selects Arimo, Cousine, or a `.ttf` path, and an unknown name is an error | done |
 | Macro file | `-macrodefs` | one `KEY=VALUE` per line, then `-macro` overrides | done |
 | Shell policy | runs commands, web flag can allow them | dry-run unless `--execute-shell`. `caScriptButton` never runs | done |
-| HTTP / WebSocket | `-server`, web launcher | `GET /` and one RFC 6455 text frame on a local port. VNC/RFB is excluded: the remote surface is HTTP and WebSocket | done |
+| HTTP / WebSocket | `-server`, web launcher | `GET /` and one RFC 6455 text frame on a local port. `-novnc` also speaks RFB 3.8 (raw encoding, security None) on TCP and the same bytes in WebSocket binary frames. `-novnc_readonly` drops pointer and key events. A test reads a red pixel off the RFB socket and checks the version string `RFB 003.008` | done |
 | Stylesheets | `-style`, `-stylefile` | `color`, `background-color`, and `font-size` on a widget `styleSheet` | done |
 | Single instance | `-attach` | TCP handshake. `run -attach HOST:PORT` sends the display path and does not open a second window | done |
 | Qt Designer plugins | `caQtDM_QtControls/plugins` | excluded. The runtime reads `.ui` files. It does not host Qt Designer | excluded |
@@ -149,12 +149,11 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 
 These limits apply to rows marked done:
 
-- Qt Designer plugin binaries, Python `%P/` execution, and VNC/RFB are excluded. `-novnc` is part of that exclusion.
+- Qt Designer plugin binaries and Python `%P/` execution stay excluded.
 - HIPA and PRO speak the `gmv()` argument block. The site `libgmv` library is not in the upstream tree, so that codec is not reproduced.
-- OPC UA security here is Basic256Sha256 OpenSecureChannel plus the symmetric chunk. The other policies in `opcua_core.cpp` are not implemented.
+- OPC UA implements None plus Basic128Rsa15, Basic256, Basic256Sha256, and Aes128_Sha256_RsaOaep. Aes256_Sha256_RsaPss, which `opcua_core.cpp` ranks first, is not implemented.
 - bsread ZeroMQ is a ZMTP 3.0 peer (NULL, PLAIN, CURVE), not a link to libzmq.
 - GPS publishes a fixed site (latitude, longitude, altitude, satellite count) and accepts a write. It is not a receiver.
-- The second Y axis is the per-curve window (`YaxisLimits` pair 2, or `YaxisLimitsMin_2` / `Max_2`). A right-hand tick ruler is not drawn.
-- Headless text is an 8x12 bitmap. It is not Qt's font metrics.
-- `-x` and `-displayFont` are accepted and reported. Upstream ignores the font flag, and this runtime has no edit mode.
+- Headless glyphs are thresholded: coverage above 127 paints the exact widget color. That is not Qt's subpixel hinter.
+- `-x` is execute-only. This runtime has no edit mode. `-displayFont` selects Arimo, Cousine, or a TrueType file. Upstream ignores that flag.
 - MEDM and EDM objects that upstream does not emit are skipped. They are not turned into a stand-in widget.

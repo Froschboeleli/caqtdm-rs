@@ -326,18 +326,41 @@ fn basic256sha256_chunk_and_zmtp_bsread() {
     let sig = [4u8; 32];
     let iv = [1u8; 16];
     let body = b"read-request".to_vec();
-    let sealed = seal_secure_chunk(7, 3, 11, &body, &key, &sig, &iv).unwrap();
+    let sealed = seal_secure_chunk(
+        caqtdm_datasource::SecurityPolicy::Basic256Sha256,
+        7,
+        3,
+        11,
+        &body,
+        caqtdm_datasource::SymKeys {
+            enc: &key,
+            sig: &sig,
+            iv: &iv,
+        },
+    )
+    .unwrap();
     assert!(sealed
         .windows(POLICY_BASIC256SHA256.len())
         .any(|w| w == POLICY_BASIC256SHA256.as_bytes()));
     assert!(!sealed.windows(body.len()).any(|w| w == body.as_slice()));
-    let (token, sequence, request, plain) =
-        caqtdm_datasource::open_secure_chunk(&sealed, &key, &sig).unwrap();
+    let (token, sequence, request, plain) = caqtdm_datasource::open_secure_chunk(
+        caqtdm_datasource::SecurityPolicy::Basic256Sha256,
+        &sealed,
+        &key,
+        &sig,
+    )
+    .unwrap();
     assert_eq!((token, sequence, request, plain), (7, 3, 11, body));
     let mut tampered = sealed.clone();
     let last = tampered.len() - 1;
     tampered[last] ^= 0x01;
-    assert!(caqtdm_datasource::open_secure_chunk(&tampered, &key, &sig).is_err());
+    assert!(caqtdm_datasource::open_secure_chunk(
+        caqtdm_datasource::SecurityPolicy::Basic256Sha256,
+        &tampered,
+        &key,
+        &sig
+    )
+    .is_err());
 
     let greet = greeting(false);
     assert!(parse_greeting(&greet).is_ok());
@@ -416,39 +439,65 @@ fn hipa_pro_and_sf_retrievers_round_trip() {
 fn opcua_open_secure_channel_derives_matching_keys() {
     use caqtdm_datasource::{
         client_finish, client_open, identity_named, open_secure_chunk, seal_secure_chunk,
-        server_accept,
+        server_accept, SecurityPolicy,
     };
 
     let client = identity_named("client").unwrap();
     let server = identity_named("server").unwrap();
-    let nonce = b"client-nonce-32-bytes-pad-pad!!!";
-    let server_nonce = b"server-nonce-32-bytes-pad-pad!!!";
-    assert_eq!(nonce.len(), 32);
-    let opn = client_open(&client, &server.cert_der, nonce).unwrap();
-    assert!(opn.starts_with(b"OPNF"));
-    assert!(!opn.windows(nonce.len()).any(|window| window == nonce));
-    let (reply, server_keys) = server_accept(&server, &opn, server_nonce).unwrap();
-    let client_keys = client_finish(&client, &reply, nonce).unwrap();
-    assert_eq!(client_keys, server_keys);
-    assert_eq!(client_keys.channel_id, 7);
-    assert_eq!(client_keys.token_id, 3);
-    let sealed = seal_secure_chunk(
-        client_keys.token_id,
-        1,
-        1,
-        b"read",
-        &client_keys.client_enc,
-        &client_keys.client_sign,
-        &client_keys.client_iv,
+    for policy in [
+        SecurityPolicy::Basic128Rsa15,
+        SecurityPolicy::Basic256,
+        SecurityPolicy::Basic256Sha256,
+        SecurityPolicy::Aes128Sha256RsaOaep,
+    ] {
+        let nonce = vec![0x11u8; policy.nonce_len()];
+        let server_nonce = vec![0x22u8; policy.nonce_len()];
+        let opn = client_open(policy, &client, &server.cert_der, &nonce).unwrap();
+        assert!(opn.starts_with(b"OPNF"));
+        assert!(opn
+            .windows(policy.uri().len())
+            .any(|window| window == policy.uri().as_bytes()));
+        assert!(!opn.windows(nonce.len()).any(|window| window == nonce));
+        let (reply, server_keys) = server_accept(policy, &server, &opn, &server_nonce).unwrap();
+        let client_keys = client_finish(policy, &client, &reply, &nonce).unwrap();
+        assert_eq!(client_keys, server_keys);
+        assert_eq!(client_keys.client_enc.len(), policy.enc_key_len());
+        assert_eq!(client_keys.client_sign.len(), policy.sign_key_len());
+        assert_eq!(client_keys.client_iv.len(), 16);
+        let sealed = seal_secure_chunk(
+            policy,
+            client_keys.token_id,
+            1,
+            1,
+            b"read",
+            caqtdm_datasource::SymKeys {
+                enc: &client_keys.client_enc,
+                sig: &client_keys.client_sign,
+                iv: &client_keys.client_iv,
+            },
+        )
+        .unwrap();
+        let opened = open_secure_chunk(
+            policy,
+            &sealed,
+            &server_keys.client_enc,
+            &server_keys.client_sign,
+        )
+        .unwrap();
+        assert_eq!(opened.3, b"read");
+        let mut tampered = opn.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(server_accept(policy, &server, &tampered, &server_nonce).is_err());
+    }
+    let other = client_open(
+        SecurityPolicy::Basic256,
+        &client,
+        &server.cert_der,
+        &[0x33; 32],
     )
     .unwrap();
-    let opened =
-        open_secure_chunk(&sealed, &server_keys.client_enc, &server_keys.client_sign).unwrap();
-    assert_eq!(opened.3, b"read");
-    let mut tampered = opn.clone();
-    let last = tampered.len() - 1;
-    tampered[last] ^= 1;
-    assert!(server_accept(&server, &tampered, server_nonce).is_err());
+    assert!(server_accept(SecurityPolicy::Basic128Rsa15, &server, &other, &[0x44; 16]).is_err());
 }
 
 #[test]

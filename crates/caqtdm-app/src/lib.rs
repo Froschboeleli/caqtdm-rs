@@ -18,11 +18,15 @@ use caqtdm_widgets::{load_image_notes, supported_classes, Session};
 
 mod config;
 mod net;
+mod rfb;
 
 pub use config::ConfigFile;
 pub use net::{
     attach_to, http_get, serve_attach, serve_attach_at, serve_http, serve_http_at,
     websocket_accept, websocket_roundtrip,
+};
+pub use rfb::{
+    novnc_version, rfb_framebuffer, rfb_pointer, serve_novnc, serve_rfb, RfbEvent, RfbFrame,
 };
 
 #[derive(Debug, Clone)]
@@ -57,6 +61,8 @@ struct Options {
     web_timeout: u64,
     web_limit: usize,
     launcher_root: String,
+    novnc: bool,
+    novnc_readonly: bool,
     options: Vec<(String, String)>,
 }
 
@@ -154,6 +160,7 @@ fn paint_display(options: &Options) -> Result<String, String> {
     );
     session.allow_shell = options.execute_shell;
     session.tick(0);
+    install_font(options)?;
     let mut visuals = session.visuals();
     let mut search = SearchPath::from_file(&path);
     if let Some(parent) = path.parent() {
@@ -270,6 +277,8 @@ fn default_options() -> Options {
         web_timeout: 0,
         web_limit: 1000,
         launcher_root: String::new(),
+        novnc: false,
+        novnc_readonly: false,
         options: Vec::new(),
     }
 }
@@ -289,6 +298,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "-emptycache" => options.empty_cache = true,
             "-web_interaction_timeout" => options.web_interaction = true,
             "-web_allow_insecure_cashell_commands" => options.allow_insecure_shell = true,
+            "-novnc" => options.novnc = true,
+            "-novnc_readonly" => options.novnc_readonly = true,
             "-server" => options.server = true,
             "-print" => options.command = "print".into(),
             "-macro"
@@ -374,8 +385,11 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     if options.allow_insecure_shell {
         options.execute_shell = true;
     }
+    if options.novnc_readonly && !options.novnc {
+        return Err("novnc-readonly can only be used together with -novnc".into());
+    }
     if options.command.is_empty() {
-        options.command = if options.server && options.file.is_none() {
+        options.command = if options.novnc || (options.server && options.file.is_none()) {
             "serve".into()
         } else if options.file.is_some() {
             "run".into()
@@ -489,12 +503,67 @@ fn serve_flags(options: &Options) -> Result<String, String> {
     let status = server_status(options);
     let http = serve_http_at(
         std::net::SocketAddr::new(host, web_port),
-        stop,
+        Arc::clone(&stop),
         status,
         options.web_limit,
     )
     .map_err(|err| err.to_string())?;
-    Ok(format!("http {http}\nattach {attach}"))
+    let mut text = format!("http {http}\nattach {attach}");
+    if options.novnc {
+        install_font(options)?;
+        let frame = framebuffer(options)?;
+        let vnc = serve_rfb(
+            std::net::SocketAddr::new(host, 0),
+            Arc::clone(&stop),
+            frame.clone(),
+        )
+        .map_err(|err| err.to_string())?;
+        let novnc = serve_novnc(std::net::SocketAddr::new(host, 0), stop, frame)
+            .map_err(|err| err.to_string())?;
+        text.push_str(&format!(
+            "\nvnc {}\nnovnc {}\nreadonly {}",
+            vnc.0, novnc.0, options.novnc_readonly
+        ));
+    }
+    Ok(text)
+}
+
+fn install_font(options: &Options) -> Result<(), String> {
+    let name = if options.display_font.is_empty() {
+        "Arimo"
+    } else {
+        options.display_font.as_str()
+    };
+    caqtdm_paint::install_display_font(name)
+}
+
+fn framebuffer(options: &Options) -> Result<RfbFrame, String> {
+    if options.file.is_some() {
+        let path = require_file(options, "novnc")?;
+        let display = load_display(&path, options)?;
+        let mut session = Session::open(
+            display.root,
+            standard_hub(options),
+            &parse_macro_list(&options.macros),
+        );
+        session.tick(0);
+        let image = paint_in(&session.visuals(), 0, 0);
+        return Ok(RfbFrame {
+            width: image.width.min(u16::MAX as u32) as u16,
+            height: image.height.min(u16::MAX as u32) as u16,
+            rgba: image.rgba,
+            readonly: options.novnc_readonly,
+        });
+    }
+    let mut rgba = vec![0u8; 8 * 8 * 4];
+    rgba[0] = 255;
+    rgba[3] = 255;
+    Ok(RfbFrame {
+        width: 8,
+        height: 8,
+        rgba,
+        readonly: options.novnc_readonly,
+    })
 }
 
 fn effective_web_port(options: &Options) -> u16 {
@@ -668,7 +737,7 @@ Options:
   -noResize           report that the window should not be resized
   -style NAME         style name reported on the status page
   -stylefile FILE     color, background-color, and font-size for widgets
-  -displayFont NAME   accepted and reported (the rasterizer keeps its own font)
+  -displayFont NAME   Arimo, Cousine, or a .ttf path for headless text
   -dg WxH             paint canvas size (also -displayGeometry, +X+Y ignored)
   -url DIR            extra directory for included displays
   -option k=v,k2=v2   plugin options (bsmodulo, bsoffset)
@@ -683,6 +752,8 @@ Options:
   -web_interaction_timeout
   -web_launcher_root_file FILE
   -web_allow_insecure_cashell_commands
+  -novnc              RFB 3.8 server and the same bytes over a WebSocket
+  -novnc_readonly     drop pointer and key events (requires -novnc)
   -print              same as the print command
 "
     .to_string()

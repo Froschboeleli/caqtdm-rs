@@ -6,8 +6,10 @@
 //! through the data-source hub. Shell commands stay dry-run unless
 //! [`Session::allow_shell`] is set.
 
+mod image;
 mod runtime;
 mod visual;
 
-pub use runtime::{supported_classes, Session};
+pub use image::{decode_ppm, load_image_notes};
+pub use runtime::{supported_classes, toggled_bit_value, Session};
 pub use visual::{Action, Effect, ShapeForm, Visual, VisualKind};

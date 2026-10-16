@@ -116,7 +116,7 @@ fn widget_from_adl(object: &Node) -> WidgetNode {
     if let Some(text) = scalar(object, "textix").or_else(|| scalar(object, "label")) {
         node.set_prop("text", PropValue::String(text.to_string()));
     }
-    if let Some(chan) = scalar(object, "chan") {
+    if let Some(chan) = scalar(object, "chan").or_else(|| scalar_in_controls(object, "chan")) {
         node.set_prop("channel", PropValue::String(chan.to_string()));
     }
     if kind == "composite" {
@@ -157,6 +157,17 @@ fn widget_from_adl(object: &Node) -> WidgetNode {
             node.set_prop("labels", PropValue::String(labels.join(";")));
             node.set_prop("files", PropValue::String(files.join(";")));
         }
+    }
+    if let Some(min) = scalar_in_controls(object, "lopr").and_then(|s| s.parse::<f64>().ok()) {
+        node.set_prop("minValue", PropValue::Double(min));
+        node.set_prop("limitsMode", PropValue::Enum("User".into()));
+    }
+    if let Some(max) = scalar_in_controls(object, "hopr").and_then(|s| s.parse::<f64>().ok()) {
+        node.set_prop("maxValue", PropValue::Double(max));
+        node.set_prop("limitsMode", PropValue::Enum("User".into()));
+    }
+    if let Some(end) = scalar_in_controls(object, "endBit").and_then(|s| s.parse::<f64>().ok()) {
+        node.set_prop("endBit", PropValue::Double(end));
     }
     if let Some(points) = scalar(object, "points") {
         node.set_prop(
@@ -231,6 +242,23 @@ fn group<'a>(object: &'a Node, name: &str) -> Option<&'a Node> {
         }
         None
     })
+}
+
+fn scalar_in_controls<'a>(object: &'a Node, name: &str) -> Option<&'a str> {
+    if let Some(value) = scalar(object, name) {
+        return Some(value);
+    }
+    for field in &object.fields {
+        if field.name.eq_ignore_ascii_case("object") {
+            continue;
+        }
+        if let Value::Group(group) = &field.value {
+            if let Some(value) = scalar(group, name) {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn scalar<'a>(object: &'a Node, name: &str) -> Option<&'a str> {

@@ -1,0 +1,47 @@
+4 0 1
+beginScreenProperties
+major 4
+minor 0
+release 1
+w 360
+h 140
+title "RF"
+endScreenProperties
+
+object activeXTextClass
+beginObjectProperties
+major 4
+minor 0
+release 1
+x 8
+y 8
+w 120
+h 22
+controlPv "sim://sine:10:3000:50"
+fgAlarm 1
+endObjectProperties
+
+object activeBarClass
+beginObjectProperties
+major 4
+minor 0
+release 1
+x 140
+y 8
+w 24
+h 80
+indicatorPv "sim://ramp:0:100:4000"
+endObjectProperties
+
+object activeRelatedDisplayClass
+beginObjectProperties
+major 4
+minor 0
+release 1
+x 180
+y 8
+w 100
+h 28
+displayFileName "gauges.ui"
+buttonLabel "Gauges"
+endObjectProperties

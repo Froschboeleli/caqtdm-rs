@@ -23,6 +23,20 @@ fn widgets_and_sample_display() {
     let converted = execute(&args(&["convert", ui, "-macro", "SYS=VAC"])).unwrap();
     assert!(converted.contains("caStripPlot"));
 
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/displays");
+    let edl_path = format!("{root}/rf.edl");
+    let edl = execute(&args(&["convert", &edl_path])).unwrap();
+    assert!(edl.contains("caRelatedDisplay"));
+    assert!(edl.contains("gauges.ui"));
+    let alh_path = format!("{root}/vacuum.alh");
+    let alh = execute(&args(&["dump", &alh_path])).unwrap();
+    assert!(alh.contains("caAlarmTree"));
+    assert!(alh.contains("sim://sine:1:5000:2"));
+    let prc_path = format!("{root}/magnets.prc");
+    let prc = execute(&args(&["convert", &prc_path])).unwrap();
+    assert!(prc.contains("caTextEntry"));
+    assert!(prc.contains("intern://VAC:SETPOINT"));
+
     let dir = std::env::temp_dir().join(format!("caqtdm-paint-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let ppm = dir.join("vacuum.ppm");

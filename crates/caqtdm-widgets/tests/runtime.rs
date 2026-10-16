@@ -1,7 +1,10 @@
 use caqtdm_core::{parse_macro_list, Severity};
 use caqtdm_datasource::{Hub, InternSource};
 use caqtdm_ui::load_str;
-use caqtdm_widgets::{supported_classes, Action, Effect, Session, ShapeForm, VisualKind};
+use caqtdm_widgets::{
+    decode_ppm, load_image_notes, supported_classes, toggled_bit_value, Action, Effect, Session,
+    ShapeForm, VisualKind,
+};
 
 fn ui() -> &'static str {
     r#"<?xml version="1.0"?>
@@ -160,4 +163,90 @@ fn alarm_calc_visibility_and_writes() {
         .unwrap();
     assert!(!shape.visible);
     assert!(supported_classes().contains(&"caCartesianPlot"));
+    assert!(supported_classes().contains(&"caReplaceMacro"));
+}
+
+#[test]
+fn byte_toggle_macro_menu_and_ppm() {
+    assert_eq!(toggled_bit_value(0, 8, 10.0, 0, 80), 2.0);
+    assert_eq!(toggled_bit_value(1, 8, 0.0, 0, 80), 0.0);
+
+    let ui = r#"<?xml version="1.0"?>
+<ui version="4.0"><class>Form</class>
+<widget class="QWidget" name="Form">
+ <property name="geometry"><rect><x>0</x><y>0</y><width>200</width><height>80</height></rect></property>
+ <widget class="caByteController" name="bits">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>80</width><height>20</height></rect></property>
+  <property name="channel"><string>intern://BITS</string></property>
+  <property name="endBit"><number>7</number></property>
+ </widget>
+ <widget class="caReplaceMacro" name="sector">
+  <property name="geometry"><rect><x>0</x><y>28</y><width>80</width><height>40</height></rect></property>
+  <property name="macroKey"><string>SYS</string></property>
+  <property name="macroValues"><string>VAC,RF</string></property>
+ </widget>
+ <widget class="caImage" name="pic">
+  <property name="geometry"><rect><x>100</x><y>0</y><width>8</width><height>8</height></rect></property>
+  <property name="filename"><string>mark.ppm</string></property>
+ </widget>
+</widget></ui>"#;
+    let display = load_str(ui, std::path::Path::new("bits.ui")).unwrap();
+    let soft = InternSource::new();
+    soft.insert("BITS", caqtdm_core::ChannelData::scalar(1.0));
+    let mut hub = Hub::new("intern");
+    hub.register(Box::new(soft));
+    let mut session = Session::open(display.root, hub, &parse_macro_list(""));
+    session.tick(0);
+    let bits = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "bits")
+        .unwrap();
+    assert!(matches!(bits.kind, VisualKind::Bits { value: 1, count: 8 }));
+    let value = toggled_bit_value(1, 8, 0.0, bits.rect.x, bits.rect.width);
+    session.act(Action::SetNumber { id: bits.id, value });
+    session.tick(10);
+    let bits = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "bits")
+        .unwrap();
+    assert!(matches!(bits.kind, VisualKind::Bits { value: 0, .. }));
+
+    let menu = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "sector")
+        .unwrap();
+    let effects = session.act(Action::Choose {
+        id: menu.id,
+        index: 1,
+    });
+    assert_eq!(
+        effects,
+        vec![Effect::SetMacro {
+            key: "SYS".into(),
+            value: "RF".into(),
+        }]
+    );
+
+    let ppm = b"P6\n2 1\n255\n\xff\x00\x00\x00\x00\xff";
+    let (w, h, rgba) = decode_ppm(ppm).unwrap();
+    assert_eq!((w, h), (2, 1));
+    assert_eq!(rgba[0], 255);
+    assert_eq!(rgba[7], 255);
+    let mut visuals = session.visuals();
+    load_image_notes(&mut visuals, |note| {
+        assert_eq!(note, "mark.ppm");
+        Some(ppm.to_vec())
+    });
+    let pic = visuals.into_iter().find(|v| v.name == "pic").unwrap();
+    assert!(matches!(
+        pic.kind,
+        VisualKind::Image {
+            width: 2,
+            height: 1,
+            ..
+        }
+    ));
 }

@@ -1,0 +1,11 @@
+GROUP NULL Vacuum
+$GUIDANCE
+Watch the ion pump current and the sector valve.
+$END
+    CHANNEL Pump sim://sine:1:5000:2 -----
+    CHANNEL Valve intern://VAC:SETPOINT -----
+GROUP NULL RF
+$COMMAND
+echo rf-trip
+$END
+    CHANNEL Ampl sim://sine:10:3000:50 -----

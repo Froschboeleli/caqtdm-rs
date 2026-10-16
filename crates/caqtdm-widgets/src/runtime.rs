@@ -173,6 +173,13 @@ impl Session {
             self.write_number(node, index as f64);
             return Vec::new();
         }
+        if node.class_name == "caReplaceMacro" {
+            let values = macro_values(node);
+            let key = node.prop_str("macroKey").unwrap_or("").to_string();
+            let value = values.get(index).cloned().unwrap_or_default();
+            self.log.push(format!("macro {key}={value}"));
+            return vec![Effect::SetMacro { key, value }];
+        }
         let entries = related_entries(node);
         if let Some((_, file)) = entries.get(index) {
             let macros = node
@@ -315,6 +322,13 @@ impl Session {
                     .or_else(|| node.prop_str("channel"))
                     .unwrap_or("image")
                     .to_string(),
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+            },
+            "caReplaceMacro" => VisualKind::Menu {
+                items: macro_values(node),
+                selected: 0,
             },
             "caCalc" => VisualKind::Label,
             "caInclude" => VisualKind::Frame,
@@ -611,6 +625,30 @@ fn polyline_points(node: &WidgetNode) -> Vec<caqtdm_core::Point> {
         .collect()
 }
 
+fn macro_values(node: &WidgetNode) -> Vec<String> {
+    let raw = node.prop_str("macroValues").unwrap_or("");
+    raw.split([';', ','])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Left-to-right cells, least significant bit on the left, matching the rasterizer.
+pub fn toggled_bit_value(value: u32, count: u32, x: f32, left: i32, width: i32) -> f64 {
+    let count = count.clamp(1, 32);
+    let span = f64::from(width.max(1));
+    let mut index = ((f64::from(x) - f64::from(left)) / span * f64::from(count)).floor() as i32;
+    if index < 0 {
+        index = 0;
+    }
+    if index as u32 >= count {
+        index = (count - 1) as i32;
+    }
+    let next = value ^ (1_u32 << index);
+    f64::from(next)
+}
+
 fn menu_items(node: &WidgetNode, data: Option<&ChannelData>) -> Vec<String> {
     if let Some(data) = data {
         if !data.enum_strings.is_empty() {
@@ -769,6 +807,7 @@ pub fn supported_classes() -> &'static [&'static str] {
         "caAlarmLog",
         "caDoubleTabWidget",
         "caRowColMenu",
+        "caReplaceMacro",
         "QLabel",
         "QPushButton",
         "QLineEdit",

@@ -107,6 +107,10 @@ display {
   label0="Details"
   name0="details.adl"
 }
+valuator {
+  object { x=8 y=80 width=160 height=20 }
+  control { chan="SR:VAC:SET" lopr="0" hopr="10" }
+}
 "#;
     let display = load_str(adl, Path::new("vac.adl")).unwrap();
     assert_eq!(display.source, SourceFormat::Adl);
@@ -121,6 +125,12 @@ display {
         if w.class_name == "caLabel" {
             assert_eq!(w.enum_tail("visibility"), Some("IfNotZero"));
             assert_eq!(w.prop_str("visibilityCalc"), Some("A"));
+        }
+        if w.class_name == "caSlider" {
+            assert_eq!(w.prop_str("channel"), Some("SR:VAC:SET"));
+            assert_eq!(w.prop_f64("minValue"), Some(0.0));
+            assert_eq!(w.prop_f64("maxValue"), Some(10.0));
+            assert_eq!(w.enum_tail("limitsMode"), Some("User"));
         }
     });
 }
@@ -146,10 +156,25 @@ h 20
 controlPv "RF:AMPL"
 fgAlarm 1
 endObjectProperties
+object activeRelatedDisplayClass
+beginObjectProperties
+x 4
+y 40
+w 80
+h 24
+displayFileName "gauges.ui"
+buttonLabel "Gauges"
+endObjectProperties
 "#;
     let display = load_str(edl, Path::new("rf.edl")).unwrap();
     assert_eq!(display.root.rect.width, 320);
     assert_eq!(display.root.count_class("caLineEdit"), 1);
+    assert_eq!(display.root.count_class("caRelatedDisplay"), 1);
+    display.root.walk(&mut |w| {
+        if w.class_name == "caRelatedDisplay" {
+            assert_eq!(w.prop_str("files"), Some("gauges.ui"));
+        }
+    });
 
     let alh = r#"
 GROUP NULL Vacuum

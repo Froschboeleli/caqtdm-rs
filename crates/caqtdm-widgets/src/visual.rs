@@ -18,26 +18,70 @@ pub struct Visual {
 #[derive(Debug, Clone, PartialEq)]
 pub enum VisualKind {
     Label,
-    Entry { writable: bool },
+    Entry {
+        writable: bool,
+    },
     Button,
-    Toggle { on: bool },
-    Slider { fraction: f64, min: f64, max: f64 },
-    Gauge { fraction: f64, circular: bool },
-    Thermo { fraction: f64 },
-    Meter { fraction: f64 },
-    Led { on: bool },
-    Shape { form: ShapeForm, filled: bool },
-    Polyline { points: Vec<Point>, closed: bool },
-    Plot { series: Vec<Vec<f64>> },
-    Waterfall { rows: Vec<Vec<f64>> },
-    Bits { value: u32, count: u32 },
-    Table { cells: Vec<Vec<String>> },
-    Menu { items: Vec<String>, selected: usize },
-    Related { entries: Vec<(String, String)> },
-    Command { line: String },
+    Toggle {
+        on: bool,
+    },
+    Slider {
+        fraction: f64,
+        min: f64,
+        max: f64,
+    },
+    Gauge {
+        fraction: f64,
+        circular: bool,
+    },
+    Thermo {
+        fraction: f64,
+    },
+    Meter {
+        fraction: f64,
+    },
+    Led {
+        on: bool,
+    },
+    Shape {
+        form: ShapeForm,
+        filled: bool,
+    },
+    Polyline {
+        points: Vec<Point>,
+        closed: bool,
+    },
+    Plot {
+        series: Vec<Vec<f64>>,
+    },
+    Waterfall {
+        rows: Vec<Vec<f64>>,
+    },
+    Bits {
+        value: u32,
+        count: u32,
+    },
+    Table {
+        cells: Vec<Vec<String>>,
+    },
+    Menu {
+        items: Vec<String>,
+        selected: usize,
+    },
+    Related {
+        entries: Vec<(String, String)>,
+    },
+    Command {
+        line: String,
+    },
     Clock,
     Frame,
-    Image { note: String },
+    Image {
+        note: String,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
     Unknown,
 }
 
@@ -54,9 +98,20 @@ pub enum ShapeForm {
 /// Something the runtime asks the viewer to do after a click or a write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    Open { file: String, macros: String },
+    Open {
+        file: String,
+        macros: String,
+    },
     Message(String),
-    Shell { command: String, ran: bool },
+    Shell {
+        command: String,
+        ran: bool,
+    },
+    /// `caReplaceMacro` asked the viewer to change a macro and reload.
+    SetMacro {
+        key: String,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

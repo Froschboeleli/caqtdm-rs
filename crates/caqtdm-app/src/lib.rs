@@ -13,7 +13,7 @@ use caqtdm_epics_ca::CaSource;
 use caqtdm_epics_pva::PvaSource;
 use caqtdm_paint::paint;
 use caqtdm_ui::{expand_includes, load_path, SearchPath, WidgetNode};
-use caqtdm_widgets::{supported_classes, Session};
+use caqtdm_widgets::{load_image_notes, supported_classes, Session};
 
 #[derive(Debug, Clone)]
 struct Options {
@@ -49,7 +49,11 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             let display = load_display(&path, &options)?;
             let mut lines = vec![format!("source {:?}", display.source)];
             display.root.walk(&mut |node| {
-                let channel = node.prop_str("channel").unwrap_or("");
+                let channel = node
+                    .prop_str("channel")
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| node.prop_str("files"))
+                    .unwrap_or("");
                 lines.push(format!("{} {} {}", node.class_name, node.name, channel));
             });
             Ok(lines.join("\n"))
@@ -64,7 +68,15 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             );
             session.allow_shell = options.execute_shell;
             session.tick(0);
-            let image = paint(&session.visuals());
+            let mut visuals = session.visuals();
+            let mut search = SearchPath::from_file(&path);
+            if let Some(parent) = path.parent() {
+                search.push(parent);
+            }
+            load_image_notes(&mut visuals, |note| {
+                search.find(note).and_then(|file| std::fs::read(file).ok())
+            });
+            let image = paint(&visuals);
             let dest = options
                 .output
                 .clone()
@@ -84,7 +96,8 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             }
             let opts = options.clone();
             let factory = Arc::new(move || standard_hub(&opts));
-            caqtdm_egui::launch(session, search, macros, factory).map_err(|e| e.to_string())?;
+            caqtdm_egui::launch(session, path, search, macros, factory)
+                .map_err(|e| e.to_string())?;
             Ok(String::new())
         }
         other => Err(format!("unknown command {other}\n{}", help_text())),

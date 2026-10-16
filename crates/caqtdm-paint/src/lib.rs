@@ -243,11 +243,41 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 );
             }
         }
+        VisualKind::Image {
+            rgba,
+            width,
+            height,
+            ..
+        } => blit_rgba(image, rect, rgba, *width, *height),
         VisualKind::Frame => {}
         _ => {}
     }
     if !visual.text.is_empty() && !matches!(visual.kind, VisualKind::Frame) {
         image.text(rect.x + 2, rect.y + 2, &visual.text, visual.foreground);
+    }
+}
+
+fn blit_rgba(image: &mut Image, rect: Rect, rgba: &[u8], width: u32, height: u32) {
+    if width == 0 || height == 0 || rect.width <= 0 || rect.height <= 0 {
+        return;
+    }
+    let need = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    if rgba.len() < need {
+        return;
+    }
+    for y in 0..rect.height {
+        for x in 0..rect.width {
+            let sx = (x as u32 * width) / rect.width as u32;
+            let sy = (y as u32 * height) / rect.height as u32;
+            let i = ((sy * width + sx) * 4) as usize;
+            image.put(
+                rect.x + x,
+                rect.y + y,
+                Color::rgba(rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]),
+            );
+        }
     }
 }
 
@@ -419,5 +449,24 @@ mod tests {
         assert_eq!(image.pixel(5, 4).unwrap().g, 205);
         assert!(image.pixel(96, 10).unwrap().g > 100);
         assert!(image.to_ppm().starts_with(b"P6\n"));
+    }
+
+    #[test]
+    fn ppm_image_is_stretched_into_the_widget() {
+        let mut picture = visual(
+            VisualKind::Image {
+                note: "mark.ppm".into(),
+                width: 2,
+                height: 1,
+                rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            },
+            "",
+            Color::rgb(0, 0, 0),
+        );
+        picture.rect = Rect::new(0, 0, 2, 1);
+        picture.class_name = "caImage".into();
+        let image = paint(&[picture]);
+        assert_eq!(image.pixel(0, 0).unwrap().r, 255);
+        assert_eq!(image.pixel(1, 0).unwrap().b, 255);
     }
 }

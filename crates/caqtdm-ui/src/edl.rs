@@ -44,6 +44,13 @@ fn split_blocks(text: &str) -> Vec<Block> {
             continue;
         }
         if trimmed.starts_with("begin") {
+            if current
+                .as_ref()
+                .is_some_and(|block| block.header.starts_with("object "))
+                && trimmed.contains("ObjectProperties")
+            {
+                continue;
+            }
             if let Some(block) = current.take() {
                 blocks.push(block);
             }
@@ -164,6 +171,15 @@ fn widget_from_edl(block: &Block) -> WidgetNode {
     }
     if let Some(form) = form {
         node.set_prop("form", PropValue::Enum(format!("caGraphics::Form::{form}")));
+    }
+    if class_name == "caRelatedDisplay" {
+        if let Some(file) = field(block, "displayFileName").or_else(|| field(block, "file")) {
+            let label = field(block, "buttonLabel")
+                .or_else(|| field(block, "label"))
+                .unwrap_or("open");
+            node.set_prop("labels", PropValue::String(label.to_string()));
+            node.set_prop("files", PropValue::String(file.to_string()));
+        }
     }
     node
 }

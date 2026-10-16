@@ -25,10 +25,12 @@ struct Options {
     execute_shell: bool,
     ca: Option<SocketAddr>,
     pva: Option<SocketAddr>,
+    macro_file: Option<PathBuf>,
 }
 
 pub fn execute(args: &[String]) -> Result<String, String> {
-    let options = parse_args(args)?;
+    let mut options = parse_args(args)?;
+    options.macros = merge_macros(&options)?;
     match options.command.as_str() {
         "help" => Ok(help_text()),
         "widgets" => Ok(supported_classes().join("\n")),
@@ -170,6 +172,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         execute_shell: false,
         ca: None,
         pva: None,
+        macro_file: None,
     };
     let mut i = 1;
     while i < args.len() {
@@ -177,13 +180,14 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         match arg {
             "-h" | "--help" | "-help" => options.command = "help".into(),
             "--execute-shell" => options.execute_shell = true,
-            "-macro" | "--macro" | "-cs" | "--cs" | "-o" | "--output" | "-display" | "--ca"
-            | "--pva" => {
+            "-macro" | "--macro" | "-macrodefs" | "-cs" | "--cs" | "-o" | "--output"
+            | "-display" | "--ca" | "--pva" => {
                 let value = args
                     .get(i + 1)
                     .ok_or_else(|| format!("{arg} needs a value"))?;
                 match arg {
                     "-macro" | "--macro" => options.macros = value.clone(),
+                    "-macrodefs" => options.macro_file = Some(PathBuf::from(value)),
                     "-cs" | "--cs" => options.control_system = value.clone(),
                     "-o" | "--output" => options.output = Some(PathBuf::from(value)),
                     "-display" => options.file = Some(PathBuf::from(value)),
@@ -215,6 +219,25 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
+fn merge_macros(options: &Options) -> Result<String, String> {
+    let mut parts = Vec::new();
+    if let Some(path) = &options.macro_file {
+        let text = std::fs::read_to_string(path)
+            .map_err(|err| format!("macro file {}: {err}", path.display()))?;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            parts.push(line.to_string());
+        }
+    }
+    if !options.macros.is_empty() {
+        parts.push(options.macros.clone());
+    }
+    Ok(parts.join(","))
+}
+
 fn parse_addr(text: &str) -> Result<SocketAddr, String> {
     text.parse().map_err(|_| format!("bad address {text}"))
 }
@@ -235,6 +258,7 @@ Commands:
 Options:
   -display FILE
   -macro KEY=VALUE,KEY2=VALUE2
+  -macrodefs FILE     one KEY=VALUE per line, then -macro overrides
   -cs PLUGIN          default control system (epics3)
   --ca HOST:PORT      Channel Access server
   --pva HOST:PORT     PV Access server (scalar subset)

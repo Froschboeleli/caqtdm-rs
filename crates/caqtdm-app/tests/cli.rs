@@ -16,7 +16,10 @@ fn widgets_and_sample_display() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../examples/displays/vacuum.ui"
     );
-    let dumped = execute(&args(&["dump", ui, "-macro", "SYS=VAC"])).unwrap();
+    let defs = std::env::temp_dir().join(format!("caqtdm-macros-{}", std::process::id()));
+    std::fs::write(&defs, "# sector\nSYS=VAC\n").unwrap();
+    let dumped = execute(&args(&["dump", ui, "-macrodefs", defs.to_str().unwrap()])).unwrap();
+    let _ = std::fs::remove_file(&defs);
     assert!(dumped.contains("caLabel"));
     assert!(dumped.contains("intern://VAC:SETPOINT"));
 

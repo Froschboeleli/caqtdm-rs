@@ -222,12 +222,49 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 }
             }
         }
-        VisualKind::Plot { series } => {
-            for (index, samples) in series.iter().enumerate() {
-                paint_series(image, rect, samples, series_color(index, visual.foreground));
+        VisualKind::Plot {
+            series,
+            title,
+            title_x,
+            title_y,
+            y_min,
+            y_max,
+            x_ticks,
+        } => {
+            paint_plot(
+                image,
+                rect,
+                visual,
+                &PlotPaint {
+                    series,
+                    title,
+                    title_x,
+                    title_y,
+                    y_min: *y_min,
+                    y_max: *y_max,
+                    x_ticks: *x_ticks,
+                },
+            );
+        }
+        VisualKind::Tabs { labels, current } => {
+            paint_tabs(image, rect, visual, labels, *current);
+        }
+        VisualKind::Menu { items, selected } if visual.class_name == "caChoice" => {
+            for (index, item) in items.iter().enumerate() {
+                let y = rect.y + 2 + index as i32 * 14;
+                let color = if index == *selected {
+                    visual.foreground
+                } else {
+                    Color::rgb(40, 40, 40)
+                };
+                image.text(rect.x + 2, y, item, color);
             }
         }
-        VisualKind::Bits { value, count } => {
+        VisualKind::Bits {
+            value,
+            count,
+            names,
+        } => {
             let n = (*count).clamp(1, 32) as i32;
             let w = (rect.width / n).max(2);
             for bit in 0..n {
@@ -241,6 +278,9 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                         Color::rgb(60, 60, 60)
                     },
                 );
+                if let Some(name) = names.get(bit as usize) {
+                    image.text(cell.x + 1, cell.y + 1, name, Color::rgb(255, 255, 255));
+                }
             }
         }
         VisualKind::Image {
@@ -252,8 +292,98 @@ fn paint_one(image: &mut Image, visual: &Visual) {
         VisualKind::Frame => {}
         _ => {}
     }
-    if !visual.text.is_empty() && !matches!(visual.kind, VisualKind::Frame) {
-        image.text(rect.x + 2, rect.y + 2, &visual.text, visual.foreground);
+    if !visual.text.is_empty()
+        && !matches!(
+            visual.kind,
+            VisualKind::Frame | VisualKind::Plot { .. } | VisualKind::Tabs { .. }
+        )
+        && visual.class_name != "caChoice"
+    {
+        if visual.rotation % 180 == 90 {
+            let mut y = rect.y + 2;
+            for ch in visual.text.chars().take(24) {
+                image.text(rect.x + 2, y, &ch.to_string(), visual.foreground);
+                y += visual.font_px.max(8);
+            }
+        } else {
+            image.text(rect.x + 2, rect.y + 2, &visual.text, visual.foreground);
+        }
+    }
+}
+
+struct PlotPaint<'a> {
+    series: &'a [Vec<f64>],
+    title: &'a str,
+    title_x: &'a str,
+    title_y: &'a str,
+    y_min: f64,
+    y_max: f64,
+    x_ticks: u32,
+}
+
+fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotPaint<'_>) {
+    if !plot_paint.title.is_empty() {
+        image.text(rect.x + 2, rect.y + 1, plot_paint.title, visual.foreground);
+    }
+    if !plot_paint.title_y.is_empty() {
+        image.text(
+            rect.x + 2,
+            rect.y + 10,
+            plot_paint.title_y,
+            visual.foreground,
+        );
+    }
+    if !plot_paint.title_x.is_empty() {
+        image.text(
+            rect.x + 2,
+            rect.y + rect.height - 8,
+            plot_paint.title_x,
+            visual.foreground,
+        );
+    }
+    let plot = Rect::new(
+        rect.x + 4,
+        rect.y + 18,
+        rect.width.saturating_sub(8).max(1),
+        rect.height.saturating_sub(28).max(1),
+    );
+    image.stroke_rect(plot, visual.foreground);
+    let ticks = plot_paint.x_ticks.clamp(1, 12);
+    for tick in 0..ticks {
+        let x = plot.x + (plot.width * tick as i32) / ticks as i32;
+        image.line(
+            x,
+            plot.y + plot.height - 1,
+            x,
+            plot.y + plot.height - 4,
+            visual.foreground,
+        );
+    }
+    for (index, samples) in plot_paint.series.iter().enumerate() {
+        paint_series_scaled(
+            image,
+            plot,
+            samples,
+            series_color(index, visual.foreground),
+            plot_paint.y_min,
+            plot_paint.y_max,
+        );
+    }
+}
+
+fn paint_tabs(image: &mut Image, rect: Rect, visual: &Visual, labels: &[String], current: usize) {
+    let mut x = rect.x + 2;
+    for (index, label) in labels.iter().enumerate() {
+        let width = (label.len() as i32 * 6 + 8).max(16);
+        let tab = Rect::new(x, rect.y + 1, width, 14);
+        if index == current {
+            image.fill_rect(tab, visual.foreground);
+            image.text(x + 2, rect.y + 4, label, visual.background);
+        } else {
+            image.stroke_rect(tab, visual.foreground);
+            image.text(x + 2, rect.y + 4, label, visual.foreground);
+        }
+        x += width + 2;
     }
 }
 
@@ -311,12 +441,25 @@ fn paint_shape(image: &mut Image, rect: Rect, form: ShapeForm, filled: bool, vis
     }
 }
 
-fn paint_series(image: &mut Image, rect: Rect, samples: &[f64], color: Color) {
+fn paint_series_scaled(
+    image: &mut Image,
+    rect: Rect,
+    samples: &[f64],
+    color: Color,
+    y_min: f64,
+    y_max: f64,
+) {
     if samples.len() < 2 || rect.width < 2 || rect.height < 2 {
         return;
     }
-    let min = samples.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let (min, max) = if y_max > y_min {
+        (y_min, y_max)
+    } else {
+        (
+            samples.iter().copied().fold(f64::INFINITY, f64::min),
+            samples.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        )
+    };
     let span = if max > min { max - min } else { 1.0 };
     let mut prev = None;
     for (i, sample) in samples.iter().enumerate() {
@@ -425,6 +568,8 @@ mod tests {
             kind,
             visible: true,
             severity: Severity::NoAlarm,
+            font_px: 10,
+            rotation: 0,
         }
     }
 
@@ -444,6 +589,8 @@ mod tests {
                 kind: VisualKind::Led { on: true },
                 visible: true,
                 severity: Severity::NoAlarm,
+                font_px: 10,
+                rotation: 0,
             },
         ]);
         assert_eq!(image.pixel(5, 4).unwrap().g, 205);

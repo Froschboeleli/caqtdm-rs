@@ -26,6 +26,7 @@ pub struct Session {
     waterfall: BTreeMap<String, VecDeque<Vec<f64>>>,
     pending: BTreeMap<String, f64>,
     toggles: BTreeMap<String, bool>,
+    tabs: BTreeMap<String, usize>,
     pub log: Vec<String>,
     pub allow_shell: bool,
     now_ms: u64,
@@ -45,6 +46,7 @@ impl Session {
             waterfall: BTreeMap::new(),
             pending: BTreeMap::new(),
             toggles: BTreeMap::new(),
+            tabs: BTreeMap::new(),
             log: Vec::new(),
             allow_shell: false,
             now_ms: 0,
@@ -80,6 +82,7 @@ impl Session {
                 self.cache.insert(name, data);
             }
         }
+        self.propagate_rescale();
     }
 
     pub fn visuals(&self) -> Vec<Visual> {
@@ -154,6 +157,31 @@ impl Session {
                 self.log.push(format!("shell {command}"));
                 vec![Effect::Shell { command, ran }]
             }
+            "caSpinbox" | "QSpinBox" | "QDoubleSpinBox" => {
+                let current = self
+                    .primary(node)
+                    .and_then(|d| d.value.as_f64())
+                    .unwrap_or(0.0);
+                let step = node.prop_f64("incrementValue").unwrap_or(1.0);
+                self.write_number(node, current + step);
+                Vec::new()
+            }
+            "caHMIConfig" => {
+                let expr = node.prop_str("valueOrCalc").unwrap_or("0");
+                let value = if node
+                    .enum_tail("calculationType")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("Calc"))
+                {
+                    eval_calc(expr, &self.calc_inputs(node)).unwrap_or(0.0)
+                } else {
+                    expr.parse().unwrap_or(0.0)
+                };
+                if let Some(out) = node.prop_str("outputA").filter(|s| !s.is_empty()) {
+                    let _ = self.hub.put(out, &PutValue::Double(value));
+                    self.log.push(format!("put {out} = {value}"));
+                }
+                Vec::new()
+            }
             "caApplyNumeric" => {
                 if let Some(value) = self.pending.get(&node.name).copied() {
                     self.write_number(node, value);
@@ -171,6 +199,11 @@ impl Session {
             || node.class_name == "QComboBox"
         {
             self.write_number(node, index as f64);
+            return Vec::new();
+        }
+        if node.class_name == "caDoubleTabWidget" || node.class_name == "QTabWidget" {
+            self.tabs.insert(node.name.clone(), index);
+            self.log.push(format!("tab {} {index}", node.name));
             return Vec::new();
         }
         if node.class_name == "caReplaceMacro" {
@@ -237,6 +270,8 @@ impl Session {
             kind,
             visible,
             severity: data.map(|d| d.severity).unwrap_or(Severity::NotConnected),
+            font_px: font_px_of(node),
+            rotation: rotation_of(node),
         }
     }
 
@@ -290,15 +325,28 @@ impl Session {
                     .enum_tail("polystyle")
                     .is_some_and(|s| s.eq_ignore_ascii_case("Polygon")),
             },
-            "caCartesianPlot" | "caStripPlot" | "caScan2D" => VisualKind::Plot {
+            "caCartesianPlot" | "caStripPlot" => VisualKind::Plot {
                 series: self.plot_series(node),
+                title: node.prop_str("Title").unwrap_or("").to_string(),
+                title_x: node.prop_str("TitleX").unwrap_or("").to_string(),
+                title_y: node.prop_str("TitleY").unwrap_or("").to_string(),
+                y_min: node.prop_f64("YaxisLimitsMin_1").unwrap_or(f64::NAN),
+                y_max: node.prop_f64("YaxisLimitsMax_1").unwrap_or(f64::NAN),
+                x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
             },
+            "caScan2D" => scan_kind(
+                node,
+                data,
+                self.axis_count(node, "channelWidth"),
+                self.axis_count(node, "channelHeight"),
+            ),
             "caWaterfallPlot" => VisualKind::Waterfall {
                 rows: self.waterfall_rows(node),
             },
             "caByte" | "caByteController" | "caBitnames" => VisualKind::Bits {
                 value: value as u32,
-                count: node.prop_f64("endBit").unwrap_or(15.0) as u32 + 1,
+                count: bit_count(node),
+                names: bit_names(node),
             },
             "caTable" | "caWaveTable" => VisualKind::Table {
                 cells: table_cells(node, data),
@@ -313,26 +361,36 @@ impl Session {
             "caShellCommand" | "caScriptButton" => VisualKind::Command {
                 line: shell_line(node),
             },
-            "caClock" => VisualKind::Clock,
-            "caFrame" | "QFrame" | "QGroupBox" | "QWidget" | "QMainWindow" | "QDialog"
-            | "QTabWidget" | "caDoubleTabWidget" => VisualKind::Frame,
-            "caImage" | "caCamera" => VisualKind::Image {
-                note: node
-                    .prop_str("filename")
-                    .or_else(|| node.prop_str("channel"))
-                    .unwrap_or("image")
-                    .to_string(),
-                width: 0,
-                height: 0,
-                rgba: Vec::new(),
+            "caClock" => VisualKind::Clock {
+                analog: node
+                    .enum_tail("timeType")
+                    .is_some_and(|t| t.eq_ignore_ascii_case("Analog")),
             },
+            "caDoubleTabWidget" | "QTabWidget" => VisualKind::Tabs {
+                labels: tab_labels(node),
+                current: self.tabs.get(&node.name).copied().unwrap_or_else(|| {
+                    node.prop_f64("currentIndex").unwrap_or(0.0).max(0.0) as usize
+                }),
+            },
+            "caFrame" | "QFrame" | "QGroupBox" | "QWidget" | "QMainWindow" | "QDialog" => {
+                VisualKind::Frame
+            }
+            "caImage" | "caCamera" => image_kind(
+                node,
+                data,
+                self.axis_count(node, "channelWidth"),
+                self.axis_count(node, "channelHeight"),
+            ),
             "caReplaceMacro" => VisualKind::Menu {
                 items: macro_values(node),
                 selected: 0,
             },
             "caCalc" => VisualKind::Label,
             "caInclude" => VisualKind::Frame,
-            "caAlarmTree" | "caAlarmLog" => VisualKind::Table {
+            "caAlarmTree" => VisualKind::Table {
+                cells: alarm_tree_cells(node),
+            },
+            "caAlarmLog" => VisualKind::Table {
                 cells: alarm_rows(data),
             },
             "caLineDraw" => VisualKind::Polyline {
@@ -421,6 +479,21 @@ impl Session {
         inputs
     }
 
+    /// Width or height from a number property, or from the channel named by that property.
+    fn axis_count(&self, node: &WidgetNode, key: &str) -> u32 {
+        if let Some(number) = node.prop_f64(key) {
+            if number > 0.0 {
+                return number as u32;
+            }
+        }
+        node.prop_str(key)
+            .filter(|name| name.contains("://") || name.chars().any(|c| c.is_ascii_alphabetic()))
+            .and_then(|name| self.cache.get(name))
+            .and_then(|data| data.value.as_f64())
+            .unwrap_or(0.0)
+            .max(0.0) as u32
+    }
+
     fn primary<'a>(&'a self, node: &WidgetNode) -> Option<&'a ChannelData> {
         node_channels(node)
             .first()
@@ -445,6 +518,29 @@ impl Session {
             .and_then(|raw| self.waterfall.get(raw))
             .map(|rows| rows.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    fn propagate_rescale(&mut self) {
+        let jobs: Vec<(String, f64)> = self
+            .nodes
+            .iter()
+            .filter(|node| node.class_name == "wmSignalRescale")
+            .flat_map(|node| {
+                let mut out = Vec::new();
+                if let Some(name) = node.prop_str("softChannelA").filter(|s| !s.is_empty()) {
+                    out.push((name.to_string(), f64::from(node.rect.width)));
+                }
+                if let Some(name) = node.prop_str("softChannelB").filter(|s| !s.is_empty()) {
+                    out.push((name.to_string(), f64::from(node.rect.height)));
+                }
+                out
+            })
+            .collect();
+        for (name, value) in jobs {
+            if self.hub.put(&name, &PutValue::Double(value)).is_ok() {
+                self.log.push(format!("rescale {name} = {value}"));
+            }
+        }
     }
 
     fn channels(&self) -> Vec<String> {
@@ -518,7 +614,24 @@ fn substitute(node: &mut WidgetNode, macros: &MacroMap) {
 
 fn node_channels(node: &WidgetNode) -> Vec<String> {
     let mut out = Vec::new();
-    for key in ["channel", "channelB", "pv", "enumChannel", "channels"] {
+    for key in [
+        "channel",
+        "channelData",
+        "channelWidth",
+        "channelHeight",
+        "channelB",
+        "channelC",
+        "channelD",
+        "pv",
+        "enumChannel",
+        "channelEnum",
+        "channelValue",
+        "softChannelA",
+        "softChannelB",
+        "outputA",
+        "outputB",
+        "channels",
+    ] {
         if let Some(prop) = node.prop(key) {
             if key == "channels" {
                 out.extend(prop.as_string_list());
@@ -533,11 +646,11 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
 }
 
 fn colors(node: &WidgetNode, data: Option<&ChannelData>) -> (Color, Color) {
-    let fg = node
+    let mut fg = node
         .prop("foreground")
         .and_then(PropValue::as_color)
         .unwrap_or_else(|| Color::rgb(20, 20, 20));
-    let bg = node
+    let mut bg = node
         .prop("background")
         .and_then(PropValue::as_color)
         .unwrap_or_else(|| Color::rgb(236, 236, 236));
@@ -553,6 +666,14 @@ fn colors(node: &WidgetNode, data: Option<&ChannelData>) -> (Color, Color) {
             return (Color::rgb(90, 90, 90), Color::rgb(255, 255, 255));
         }
         return (alarm_color(data.severity), bg);
+    }
+    if let Some(sheet) = node.prop_str("styleSheet") {
+        if let Some(color) = crate::style::css_color(sheet, "color") {
+            fg = color;
+        }
+        if let Some(color) = crate::style::css_color(sheet, "background-color") {
+            bg = color;
+        }
     }
     (fg, bg)
 }
@@ -623,6 +744,192 @@ fn polyline_points(node: &WidgetNode) -> Vec<caqtdm_core::Point> {
             })
         })
         .collect()
+}
+
+fn font_px_of(node: &WidgetNode) -> i32 {
+    if let Some(sheet) = node.prop_str("styleSheet") {
+        if let Some(px) = crate::style::css_px(sheet, "font-size") {
+            return px;
+        }
+    }
+    let mode = node.enum_tail("fontScaleMode").unwrap_or("None");
+    let scaled = match mode.to_ascii_lowercase().as_str() {
+        "height" | "heightandwidth" => (f64::from(node.rect.height.max(1)) * 0.7) as i32,
+        "width" => (f64::from(node.rect.width.max(1)) * 0.2) as i32,
+        _ => 0,
+    };
+    if scaled > 0 {
+        return scaled.clamp(6, 64);
+    }
+    node.prop("font")
+        .and_then(|value| match value {
+            PropValue::Font(font) => Some(font.point_size),
+            _ => None,
+        })
+        .unwrap_or(10)
+}
+
+fn rotation_of(node: &WidgetNode) -> i32 {
+    if node.class_name == "caLabelVertical" {
+        return 90;
+    }
+    let angle = node.prop_f64("tiltAngle").unwrap_or(0.0) as i32;
+    if angle != 0 {
+        return angle;
+    }
+    match node.enum_tail("direction").unwrap_or("") {
+        "Up" | "Down" => 90,
+        _ => 0,
+    }
+}
+
+fn bit_count(node: &WidgetNode) -> u32 {
+    let start = node.prop_f64("startBit").unwrap_or(0.0).max(0.0) as u32;
+    let end = node.prop_f64("endBit").unwrap_or(15.0).max(0.0) as u32;
+    end.saturating_sub(start).saturating_add(1).clamp(1, 32)
+}
+
+fn bit_names(node: &WidgetNode) -> Vec<String> {
+    let raw = node
+        .prop_str("trueStrings")
+        .or_else(|| node.prop_str("names"))
+        .unwrap_or("");
+    raw.split([';', ','])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn tab_labels(node: &WidgetNode) -> Vec<String> {
+    let mut labels = Vec::new();
+    for key in ["itemsHorizontal", "itemsVertical", "items"] {
+        if let Some(text) = node.prop_str(key) {
+            labels.extend(
+                text.split([';', ','])
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    if labels.is_empty() {
+        labels.push("Page".into());
+    }
+    labels
+}
+
+fn scan_kind(node: &WidgetNode, data: Option<&ChannelData>, width: u32, height: u32) -> VisualKind {
+    if let Some(data) = data {
+        if width > 0 && height > 0 {
+            let samples = data.value.as_f64_slice();
+            if samples.len() >= (width * height) as usize {
+                return VisualKind::Image {
+                    note: "scan2d".into(),
+                    width,
+                    height,
+                    rgba: samples_to_rgba(&samples, width, height),
+                };
+            }
+        }
+    }
+    VisualKind::Plot {
+        series: vec![data.map(|d| d.value.as_f64_slice()).unwrap_or_default()],
+        title: node.prop_str("Title").unwrap_or("").to_string(),
+        title_x: String::new(),
+        title_y: String::new(),
+        y_min: f64::NAN,
+        y_max: f64::NAN,
+        x_ticks: 2,
+    }
+}
+
+fn image_kind(
+    node: &WidgetNode,
+    data: Option<&ChannelData>,
+    width: u32,
+    height: u32,
+) -> VisualKind {
+    let note = node
+        .prop_str("filename")
+        .or_else(|| node.prop_str("channel"))
+        .or_else(|| node.prop_str("channelData"))
+        .unwrap_or("image")
+        .to_string();
+    if let Some(PvValue::Bytes(bytes)) = data.map(|d| &d.value) {
+        if width > 0 && height > 0 {
+            let rgba = camera_rgba(bytes, width, height);
+            if !rgba.is_empty() {
+                return VisualKind::Image {
+                    note,
+                    width,
+                    height,
+                    rgba,
+                };
+            }
+        }
+    }
+    VisualKind::Image {
+        note,
+        width: 0,
+        height: 0,
+        rgba: Vec::new(),
+    }
+}
+
+fn camera_rgba(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let pixels = (width as usize).saturating_mul(height as usize);
+    if pixels == 0 {
+        return Vec::new();
+    }
+    let mut rgba = Vec::with_capacity(pixels * 4);
+    if bytes.len() >= pixels * 3 {
+        for chunk in bytes.chunks(3).take(pixels) {
+            rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+        }
+    } else if bytes.len() >= pixels {
+        for byte in bytes.iter().take(pixels) {
+            rgba.extend_from_slice(&[*byte, *byte, *byte, 255]);
+        }
+    }
+    rgba
+}
+
+fn samples_to_rgba(samples: &[f64], width: u32, height: u32) -> Vec<u8> {
+    let pixels = (width as usize).saturating_mul(height as usize);
+    let mut rgba = Vec::with_capacity(pixels * 4);
+    let max = samples
+        .iter()
+        .take(pixels)
+        .copied()
+        .fold(1.0_f64, f64::max)
+        .max(1.0);
+    for sample in samples.iter().take(pixels) {
+        let level = ((*sample / max).clamp(0.0, 1.0) * 255.0) as u8;
+        rgba.extend_from_slice(&[level, level, level, 255]);
+    }
+    rgba
+}
+
+fn alarm_tree_cells(node: &WidgetNode) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    fn walk(node: &WidgetNode, rows: &mut Vec<Vec<String>>) {
+        if node.class_name != "caAlarmTree" && node.class_name != "caFrame" {
+            rows.push(vec![
+                node.name.clone(),
+                node.prop_str("channel").unwrap_or("").to_string(),
+                node.prop_str("mask").unwrap_or("").to_string(),
+            ]);
+        }
+        for child in &node.children {
+            walk(child, rows);
+        }
+    }
+    walk(node, &mut rows);
+    if rows.is_empty() {
+        rows.push(vec!["empty".into()]);
+    }
+    rows
 }
 
 fn macro_values(node: &WidgetNode) -> Vec<String> {
@@ -808,6 +1115,8 @@ pub fn supported_classes() -> &'static [&'static str] {
         "caDoubleTabWidget",
         "caRowColMenu",
         "caReplaceMacro",
+        "caHMIConfig",
+        "wmSignalRescale",
         "QLabel",
         "QPushButton",
         "QLineEdit",

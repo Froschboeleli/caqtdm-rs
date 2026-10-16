@@ -116,7 +116,7 @@ impl eframe::App for Viewer {
 impl Viewer {
     fn handle(&mut self, visual: Visual, pos: egui::Pos2) {
         let action = match &visual.kind {
-            VisualKind::Bits { value, count } if visual.class_name == "caByteController" => {
+            VisualKind::Bits { value, count, .. } if visual.class_name == "caByteController" => {
                 Action::SetNumber {
                     id: visual.id,
                     value: toggled_bit_value(
@@ -136,6 +136,10 @@ impl Viewer {
                     value: min + (max - min) * f64::from(fraction),
                 }
             }
+            VisualKind::Tabs { labels, .. } if !labels.is_empty() => Action::Choose {
+                id: visual.id,
+                index: row_index(pos.x, visual.rect.x, 48.0, labels.len()),
+            },
             VisualKind::Menu { items, .. } if !items.is_empty() => Action::Choose {
                 id: visual.id,
                 index: row_index(pos.y, visual.rect.y, 16.0, items.len()),

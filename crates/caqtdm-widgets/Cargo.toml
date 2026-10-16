@@ -11,3 +11,4 @@ description = "Widget runtime for caQtDM displays"
 caqtdm-core.workspace = true
 caqtdm-ui.workspace = true
 caqtdm-datasource.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }

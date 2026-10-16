@@ -153,6 +153,14 @@ impl ChannelData {
         }
     }
 
+    pub fn bytes(bytes: Vec<u8>) -> Self {
+        let count = bytes.len();
+        let mut data = Self::scalar(0.0);
+        data.value = PvValue::Bytes(bytes);
+        data.element_count = count.max(1);
+        data
+    }
+
     pub fn scalar(value: f64) -> Self {
         Self {
             connected: true,

@@ -13,6 +13,10 @@ pub struct Visual {
     pub kind: VisualKind,
     pub visible: bool,
     pub severity: Severity,
+    /// Pixel size used by the rasterizer. Comes from the font or from font scaling.
+    pub font_px: i32,
+    /// Degrees clockwise. `caLabelVertical` uses 90.
+    pub rotation: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +57,12 @@ pub enum VisualKind {
     },
     Plot {
         series: Vec<Vec<f64>>,
+        title: String,
+        title_x: String,
+        title_y: String,
+        y_min: f64,
+        y_max: f64,
+        x_ticks: u32,
     },
     Waterfall {
         rows: Vec<Vec<f64>>,
@@ -60,6 +70,7 @@ pub enum VisualKind {
     Bits {
         value: u32,
         count: u32,
+        names: Vec<String>,
     },
     Table {
         cells: Vec<Vec<String>>,
@@ -74,7 +85,14 @@ pub enum VisualKind {
     Command {
         line: String,
     },
-    Clock,
+    Clock {
+        analog: bool,
+    },
+    /// `caDoubleTabWidget` / `QTabWidget`. `current` selects the visible page.
+    Tabs {
+        labels: Vec<String>,
+        current: usize,
+    },
     Frame,
     Image {
         note: String,

@@ -338,6 +338,17 @@ fn curve_style_grid_and_x_axis_change_the_plot() {
         off.r > 220 && off.g > 220,
         "grid off leaves the widget background, got {off:?}"
     );
+    // Qt DashLine at width 1 is 4 on, 2 off. The line starts at plot.x + 1.
+    let fourth = lines.pixel(8, 22).unwrap();
+    let gap = lines.pixel(9, 22).unwrap();
+    assert!(
+        fourth.r > 100 && fourth.r < 180 && fourth.g > 100,
+        "DashLine keeps the fourth pixel on, got {fourth:?}"
+    );
+    assert!(
+        gap.r > 220 && gap.g > 220,
+        "DashLine turns the fifth pixel off, got {gap:?}"
+    );
     assert_ne!(
         lines.pixel(18, 47).unwrap(),
         none.pixel(18, 47).unwrap(),
@@ -537,4 +548,280 @@ fn waterfall(map: &str) -> caqtdm_paint::Image {
         .find(|v| v.name == "fall")
         .unwrap();
     paint(&[drawn])
+}
+
+#[test]
+fn cartesian_vectors_count_trigger_and_erase_change_the_trace() {
+    let intern = InternSource::new();
+    let mut xs = ChannelData::scalar(0.0);
+    xs.value = PvValue::Doubles(vec![0.0, 9.0, 10.0]);
+    let mut ys = ChannelData::scalar(0.0);
+    ys.value = PvValue::Doubles(vec![0.0, 8.0, 0.0]);
+    intern.insert("X", xs);
+    intern.insert("Y", ys);
+    let mut plot = WidgetNode::new("caCartesianPlot", "plot");
+    plot.rect = Rect::new(0, 0, 80, 60);
+    plot.set_prop(
+        "channels_1",
+        PropValue::String("intern://X;intern://Y".into()),
+    );
+    plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
+    plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
+    plot.set_prop("grid", PropValue::Bool(false));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    session.tick(1_000);
+    let drawn = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap();
+    match &drawn.kind {
+        VisualKind::Plot { series, xs, .. } => {
+            assert_eq!(series[0], vec![0.0, 8.0, 0.0]);
+            assert_eq!(xs[0], vec![0.0, 9.0, 10.0]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let image = paint(&[drawn]);
+    assert!(image.pixel(67, 25).unwrap().r > 250, "the peak sits at X=9");
+    assert!(
+        image.pixel(39, 25).unwrap().r < 250,
+        "index 1 is not the X position"
+    );
+
+    assert_eq!(
+        scalar_trace("PlotNPointsAndStop", "2", &[1.0, 2.0, 9.0], None),
+        vec![1.0, 2.0]
+    );
+    assert_eq!(
+        scalar_trace("PlotLastNPoints", "2", &[1.0, 2.0, 9.0], None),
+        vec![2.0, 9.0]
+    );
+    assert_eq!(
+        scalar_trace(
+            "PlotNPointsAndStop",
+            "intern://C",
+            &[1.0, 2.0, 9.0],
+            Some(2.0)
+        ),
+        vec![1.0, 2.0]
+    );
+    assert_eq!(
+        trigger_trace(4.0, 0.0),
+        vec![1.0],
+        "a steady trigger keeps the previous point"
+    );
+    assert_eq!(trigger_trace(4.0, 1.0), vec![1.0, 4.0]);
+
+    let (before, after) = erase_trace();
+    assert_eq!(before, vec![8.0, 8.0]);
+    assert!(after.is_empty(), "ifnotzero clears when erase becomes 1");
+}
+
+fn scalar_trace(mode: &str, count: &str, values: &[f64], count_channel: Option<f64>) -> Vec<f64> {
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(values[0]));
+    if let Some(count) = count_channel {
+        intern.insert("C", ChannelData::scalar(count));
+    }
+    let mut plot = WidgetNode::new("caCartesianPlot", "plot");
+    plot.rect = Rect::new(0, 0, 40, 30);
+    plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("plotMode", PropValue::Enum(mode.into()));
+    plot.set_prop("countNumOrChannel", PropValue::String(count.into()));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern.clone()));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    for (step, value) in values.iter().enumerate() {
+        intern.insert("A", ChannelData::scalar(*value));
+        session.tick((step as u64 + 1) * 1_000);
+    }
+    series_of(&session)
+}
+
+fn trigger_trace(second: f64, next_trigger: f64) -> Vec<f64> {
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(1.0));
+    intern.insert("T", ChannelData::scalar(0.0));
+    let mut plot = WidgetNode::new("caCartesianPlot", "plot");
+    plot.rect = Rect::new(0, 0, 40, 30);
+    plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("countNumOrChannel", PropValue::String("3".into()));
+    plot.set_prop("triggerChannel", PropValue::String("intern://T".into()));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern.clone()));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    session.tick(1_000);
+    intern.insert("A", ChannelData::scalar(second));
+    session.tick(2_000);
+    intern.insert("T", ChannelData::scalar(next_trigger));
+    session.tick(3_000);
+    series_of(&session)
+}
+
+fn erase_trace() -> (Vec<f64>, Vec<f64>) {
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(8.0));
+    intern.insert("E", ChannelData::scalar(0.0));
+    let mut plot = WidgetNode::new("caCartesianPlot", "plot");
+    plot.rect = Rect::new(0, 0, 80, 60);
+    plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("countNumOrChannel", PropValue::String("2".into()));
+    plot.set_prop("eraseChannel", PropValue::String("intern://E".into()));
+    plot.set_prop("eraseMode", PropValue::Enum("ifnotzero".into()));
+    plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
+    plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
+    plot.set_prop("grid", PropValue::Bool(false));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern.clone()));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    session.tick(1_000);
+    session.tick(2_000);
+    let before = series_of(&session);
+    let drawn = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap();
+    let ink = paint(&[drawn]);
+    assert!(ink.pixel(4, 25).unwrap().r > 250, "the trace is painted");
+    intern.insert("E", ChannelData::scalar(1.0));
+    session.tick(3_000);
+    let after = series_of(&session);
+    let drawn = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap();
+    let cleared = paint(&[drawn]);
+    assert!(
+        cleared.pixel(4, 25).unwrap().r < 250,
+        "erase removes the painted trace"
+    );
+    (before, after)
+}
+
+fn series_of(session: &Session) -> Vec<f64> {
+    match &session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap()
+        .kind
+    {
+        VisualKind::Plot { series, .. } => series[0].clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn strip_refresh_period_sync_and_archive_backfill() {
+    let low = strip_samples("Low", &[0, 100, 200, 300, 400]);
+    let high = strip_samples("High", &[0, 100, 200, 300, 400]);
+    assert_eq!(low.len(), 2, "Low refresh waits 400 ms");
+    assert_eq!(high.len(), 5, "High refresh waits 100 ms");
+
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(5.0));
+    let mut narrow = WidgetNode::new("caStripPlot", "narrow");
+    narrow.rect = Rect::new(0, 0, 80, 60);
+    narrow.set_prop("channel", PropValue::String("intern://A".into()));
+    narrow.set_prop("XaxisSyncGroup", PropValue::Double(3.0));
+    narrow.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
+    narrow.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
+    let mut wide = WidgetNode::new("caStripPlot", "wide");
+    wide.rect = Rect::new(0, 70, 80, 60);
+    wide.set_prop("channel", PropValue::String("intern://A".into()));
+    wide.set_prop("XaxisSyncGroup", PropValue::Double(3.0));
+    wide.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
+    wide.set_prop("YaxisLimitsMax_1", PropValue::Double(100_000.0));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.extend([narrow, wide]);
+    let drawn = open(root, intern);
+    let narrow = drawn
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "narrow")
+        .unwrap();
+    match &narrow.kind {
+        VisualKind::Plot { align_px, .. } => assert_eq!(*align_px, 20),
+        other => panic!("{other:?}"),
+    }
+
+    let intern = InternSource::new();
+    intern.insert("VAC", ChannelData::scalar(4.0));
+    let mut strip = WidgetNode::new("caStripPlot", "strip");
+    strip.rect = Rect::new(0, 0, 80, 40);
+    strip.set_prop("channel", PropValue::String("intern://VAC".into()));
+    strip.set_prop("secondsPast", PropValue::Double(10.0));
+    strip.set_prop("nrOfBins", PropValue::Double(2.0));
+    strip.set_prop("secondsUpdate", PropValue::Double(1_000.0));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(strip);
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    session
+        .set_archive_fixture("channel VAC\n0,1,0\n5000,3,0\n9000,9,0\n")
+        .unwrap();
+    session.tick(10_000);
+    match &session.visuals()[1].kind {
+        VisualKind::Plot { series, .. } => assert_eq!(series[0], vec![1.0, 6.0]),
+        other => panic!("{other:?}"),
+    }
+    session.tick(10_500);
+    let urls = session.archive_requests();
+    assert_eq!(urls.len(), 1, "secondsUpdate holds the next request");
+    assert!(urls[0].contains("/api/4/binned?"), "{}", urls[0]);
+    assert!(urls[0].contains("channelName=VAC"));
+    assert!(urls[0].contains("binCount=2"));
+    assert!(urls[0].contains("backend=sf-archiver"));
+    let (hms, date) = caqtdm_paint::axis_time_lines(0, 0);
+    assert_eq!((hms.as_str(), date.as_str()), ("00:00:00", "01-01-70"));
+    let (hms, date) = caqtdm_paint::axis_time_lines(23 * 3_600, 2 * 3_600);
+    assert_eq!((hms.as_str(), date.as_str()), ("01:00:00", "02-01-70"));
+    let ellipse = styled_plot(|plot| {
+        plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
+        plot.set_prop("symbol_1", PropValue::Enum("Ellipse".into()));
+        plot.set_prop("symbolResizeFactor", PropValue::Double(10.0));
+        plot.set_prop("grid", PropValue::Bool(false));
+    });
+    let edge = ellipse.pixel(45, 37).unwrap();
+    assert!(
+        edge.r > 236 && edge.r < 252,
+        "the ellipse edge is antialiased, got {edge:?}"
+    );
+}
+
+fn strip_samples(refresh: &str, ticks: &[u64]) -> Vec<f64> {
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(5.0));
+    let mut strip = WidgetNode::new("caStripPlot", "strip");
+    strip.rect = Rect::new(0, 0, 80, 40);
+    strip.set_prop("channel", PropValue::String("intern://A".into()));
+    strip.set_prop("period", PropValue::Double(1.0));
+    strip.set_prop("units", PropValue::Enum("Second".into()));
+    strip.set_prop("refreshRate", PropValue::Enum(refresh.into()));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(strip);
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    for tick in ticks {
+        session.tick(*tick);
+    }
+    match &session.visuals()[1].kind {
+        VisualKind::Plot { series, .. } => series[0].clone(),
+        other => panic!("{other:?}"),
+    }
 }

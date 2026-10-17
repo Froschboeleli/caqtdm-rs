@@ -451,6 +451,9 @@ mod tests {
             time_x: false,
             grid_color: Color::rgb(160, 160, 160),
             scale_color: None,
+            xs: Vec::new(),
+            align_px: 0,
+            time_at: 0.0,
         });
         assert_eq!(
             action_for(&plot, 50.0, 20.0, false),

@@ -110,12 +110,18 @@ pub enum VisualKind {
         x_limits: Option<(f64, f64)>,
         /// `XaxisType::log10` places the sample index on a log10 axis.
         log_x: bool,
-        /// `XaxisType::time` stamps UTC `hh:mm:ss` under the axis.
+        /// `XaxisType::time` stamps local `hh:mm:ss` and `dd-MM-yy`.
         time_x: bool,
         /// `gridColor`. Absent is Qt gray.
         grid_color: Color,
         /// `scaleColor` for the tick marks. Absent uses the foreground.
         scale_color: Option<Color>,
+        /// X samples parallel to `series`. Empty keeps the sample index as X.
+        xs: Vec<Vec<f64>>,
+        /// Extra left inset so a non-zero `XaxisSyncGroup` shares one scale width.
+        align_px: i32,
+        /// Unix milliseconds for the right-hand time label. 0 uses `x_limits`.
+        time_at: f64,
     },
     Waterfall {
         rows: Vec<Vec<f64>>,
@@ -224,8 +230,9 @@ pub struct TreeRow {
     pub cells: Vec<String>,
 }
 
-/// `caCartesianPlot::curvSymbol`. These are geometric stand-ins for `QwtSymbol`.
-/// `Rect` is drawn as `Ellipse` because `myMarker` maps it that way.
+/// `caCartesianPlot::curvSymbol`, drawn with coverage on the edge the way
+/// `QwtSymbol` antialiases its pixmap. `Rect` is `Ellipse` because `myMarker`
+/// maps it that way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurveSymbol {
     NoSymbol,

@@ -9,8 +9,10 @@ use caqtdm_core::{
     alarm_color, apply_macros, eval_calc, eval_visibility, format_number, CalcInputs, ChannelData,
     Color, FormatType, MacroMap, PropValue, PutValue, PvValue, Severity,
 };
-use caqtdm_datasource::Hub;
+use caqtdm_datasource::{values_in_window, ArchiveHttpQuery, ArchiveSample, Hub};
 use caqtdm_ui::WidgetNode;
+
+use crate::curves::{parse_curve, strip_timing, CurveKind, CurveSlot, PlotMode};
 
 use crate::visual::{
     qt_global_color, Action, ColorMap, CurveStyle, CurveSymbol, Effect, GridCell, ShapeForm,
@@ -35,6 +37,16 @@ pub struct Session {
     cursors: BTreeMap<String, Vec<f64>>,
     /// Alarm-tree group names that are folded shut.
     collapsed: BTreeSet<String>,
+    /// Cartesian curve buffers, keyed by widget name. Absent means scalar history.
+    curves: BTreeMap<String, Vec<CurveSlot>>,
+    /// Strip samples taken on the display timer.
+    strips: BTreeMap<String, Vec<f64>>,
+    strip_at: BTreeMap<String, u64>,
+    archive_at: BTreeMap<String, u64>,
+    seen: BTreeMap<String, f64>,
+    counts: BTreeMap<String, i32>,
+    archive: BTreeMap<String, Vec<ArchiveSample>>,
+    archive_urls: Vec<String>,
     alarm_log: VecDeque<Vec<String>>,
     last_severity: BTreeMap<String, Severity>,
     pub log: Vec<String>,
@@ -60,6 +72,14 @@ impl Session {
             zooms: BTreeMap::new(),
             cursors: BTreeMap::new(),
             collapsed: BTreeSet::new(),
+            curves: BTreeMap::new(),
+            strips: BTreeMap::new(),
+            strip_at: BTreeMap::new(),
+            archive_at: BTreeMap::new(),
+            seen: BTreeMap::new(),
+            counts: BTreeMap::new(),
+            archive: BTreeMap::new(),
+            archive_urls: Vec::new(),
             alarm_log: VecDeque::new(),
             last_severity: BTreeMap::new(),
             log: Vec::new(),
@@ -98,7 +118,20 @@ impl Session {
                 self.cache.insert(name, data);
             }
         }
+        self.refresh_plots();
         self.propagate_rescale();
+    }
+
+    /// Fixture for archiveHTTP backfill. The network host is not required.
+    pub fn set_archive_fixture(&mut self, text: &str) -> Result<(), String> {
+        let parsed = caqtdm_datasource::parse_fixture(text).map_err(|err| err.to_string())?;
+        self.archive = parsed;
+        Ok(())
+    }
+
+    /// archiveHTTP URLs the strip or cartesian asked for.
+    pub fn archive_requests(&self) -> &[String] {
+        &self.archive_urls
     }
 
     fn note_alarm(&mut self, name: &str, data: &ChannelData) {
@@ -652,7 +685,7 @@ impl Session {
     }
 
     fn plot_kind(&self, node: &WidgetNode) -> VisualKind {
-        let series = self.plot_series(node);
+        let (series, xs) = self.plot_samples(node);
         let series_len = series.len().clamp(1, 7);
         let series_axes: Vec<(f64, f64)> = (0..series_len)
             .map(|index| axis_pair(node, index as u32))
@@ -698,10 +731,32 @@ impl Session {
             time_x: axis_named(node, "XaxisType", "time"),
             grid_color: prop_color(node, "gridColor").unwrap_or(Color::rgb(160, 160, 160)),
             scale_color: prop_color(node, "scaleColor"),
+            xs,
+            align_px: self.align_px(node),
+            time_at: if axis_named(node, "XaxisType", "time") {
+                self.now_ms as f64
+            } else {
+                0.0
+            },
         }
     }
 
-    fn plot_series(&self, node: &WidgetNode) -> Vec<Vec<f64>> {
+    fn plot_samples(&self, node: &WidgetNode) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        if node.class_name == "caCartesianPlot" && cartesian_active(node) {
+            if let Some(slots) = self.curves.get(&node.name) {
+                let series = slots.iter().map(|slot| slot.shown_y.clone()).collect();
+                let xs = slots.iter().map(|slot| slot.shown_x.clone()).collect();
+                return (series, xs);
+            }
+        }
+        if node.class_name == "caStripPlot" && self.strips.contains_key(&node.name) {
+            let mut samples = self.archive_backfill(node);
+            if let Some(live) = self.strips.get(&node.name) {
+                samples.extend(live.iter().copied());
+            }
+            samples = trim_span(node, samples);
+            return (vec![samples], Vec::new());
+        }
         let span = if node.class_name == "caStripPlot" {
             node.prop_f64("timeSpan")
                 .map(|n| n as usize)
@@ -709,7 +764,7 @@ impl Session {
         } else {
             None
         };
-        node_channels(node)
+        let series = node_channels(node)
             .into_iter()
             .map(|raw| {
                 let mut samples: Vec<f64> = self
@@ -724,7 +779,220 @@ impl Session {
                 }
                 samples
             })
-            .collect()
+            .collect();
+        (series, Vec::new())
+    }
+
+    fn refresh_plots(&mut self) {
+        let nodes = self.nodes.clone();
+        for node in &nodes {
+            if node.class_name == "caCartesianPlot" && cartesian_active(node) {
+                self.refresh_cartesian(node);
+            }
+            if node.class_name == "caStripPlot" {
+                self.refresh_strip(node);
+            }
+        }
+    }
+
+    fn refresh_cartesian(&mut self, node: &WidgetNode) {
+        let specs = curve_inputs(node);
+        let mut slots = self.curves.remove(&node.name).unwrap_or_default();
+        if slots.len() != specs.len() {
+            slots = specs.iter().map(|spec| CurveSlot::new(spec.0)).collect();
+        }
+        for (slot, spec) in slots.iter_mut().zip(&specs) {
+            let x = self.channel_samples(&spec.1);
+            let y = self.channel_samples(&spec.2);
+            slot.store(x.as_deref(), y.as_deref());
+        }
+        let count = self.curve_count(node);
+        let mode = plot_mode(node);
+        let fire = match node
+            .prop_str("triggerChannel")
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            Some(name) => self
+                .cache
+                .get(name)
+                .and_then(|data| data.value.as_f64())
+                .is_some_and(|value| self.changed(&format!("{}:trigger", node.name), value)),
+            None => true,
+        };
+        if fire {
+            for slot in &mut slots {
+                slot.display(mode, count);
+            }
+        }
+        if self.erase_now(node) {
+            for slot in &mut slots {
+                slot.erase();
+            }
+        }
+        self.note_archive(node);
+        self.curves.insert(node.name.clone(), slots);
+    }
+
+    fn refresh_strip(&mut self, node: &WidgetNode) {
+        let past = node.prop_f64("secondsPast").unwrap_or(0.0);
+        let timed = node.prop("period").is_some()
+            || node.prop("refreshRate").is_some()
+            || node.prop("units").is_some();
+        if !timed && past <= 0.0 {
+            return;
+        }
+        if timed {
+            let history = (node.rect.width.saturating_sub(8)).max(1);
+            let period = node.prop_f64("period").unwrap_or(60.0);
+            let units = node.enum_tail("units").unwrap_or("Second");
+            let refresh = node.enum_tail("refreshRate").unwrap_or("Medium");
+            let timing = strip_timing(period, units, history, refresh);
+            let due = self
+                .strip_at
+                .get(&node.name)
+                .is_none_or(|last| self.now_ms.saturating_sub(*last) >= timing.paint_ms);
+            if due {
+                if let Some(sample) = node_channels(node)
+                    .first()
+                    .and_then(|name| self.cache.get(name))
+                    .and_then(|data| data.value.as_f64())
+                {
+                    self.strips
+                        .entry(node.name.clone())
+                        .or_default()
+                        .push(sample);
+                }
+                self.strip_at.insert(node.name.clone(), self.now_ms);
+            } else {
+                self.strips.entry(node.name.clone()).or_default();
+            }
+        } else {
+            self.strips.entry(node.name.clone()).or_default();
+        }
+        self.note_archive(node);
+    }
+
+    fn note_archive(&mut self, node: &WidgetNode) {
+        let past = node.prop_f64("secondsPast").unwrap_or(0.0);
+        if past <= 0.0 {
+            return;
+        }
+        let update_ms = (node.prop_f64("secondsUpdate").unwrap_or(0.0) * 1000.0) as u64;
+        let due = self
+            .archive_at
+            .get(&node.name)
+            .is_none_or(|last| self.now_ms.saturating_sub(*last) >= update_ms);
+        if !due {
+            return;
+        }
+        let Some(channel) = node_channels(node).into_iter().next() else {
+            return;
+        };
+        let bins = node.prop_f64("nrOfBins").unwrap_or(-1.0) as i32;
+        let query =
+            ArchiveHttpQuery::from_window(&archive_name(&channel), self.now_ms, past as u64, bins);
+        self.archive_urls.push(query.url());
+        self.archive_at.insert(node.name.clone(), self.now_ms);
+    }
+
+    fn archive_backfill(&self, node: &WidgetNode) -> Vec<f64> {
+        let past = node.prop_f64("secondsPast").unwrap_or(0.0);
+        if past <= 0.0 {
+            return Vec::new();
+        }
+        let Some(channel) = node_channels(node).into_iter().next() else {
+            return Vec::new();
+        };
+        let name = archive_name(&channel);
+        let Some(samples) = self
+            .archive
+            .get(&name)
+            .or_else(|| self.archive.get(&channel))
+        else {
+            return Vec::new();
+        };
+        let end = self.now_ms;
+        let begin = end.saturating_sub((past * 1000.0) as u64);
+        let bins = node.prop_f64("nrOfBins").unwrap_or(-1.0) as i32;
+        values_in_window(samples, begin, end, bins)
+    }
+
+    fn channel_samples(&self, name: &str) -> Option<Vec<f64>> {
+        if name.is_empty() {
+            return None;
+        }
+        let data = self.cache.get(name)?;
+        match &data.value {
+            PvValue::Doubles(values) if values.len() > 1 => Some(values.clone()),
+            _ => data.value.as_f64().map(|value| vec![value]),
+        }
+    }
+
+    fn curve_count(&mut self, node: &WidgetNode) -> i32 {
+        let Some(text) = node.prop_str("countNumOrChannel") else {
+            return 0;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            return 0;
+        }
+        if let Ok(number) = text.parse::<i32>() {
+            return number;
+        }
+        if let Some(value) = self.cache.get(text).and_then(|data| data.value.as_f64()) {
+            if value >= 0.5 {
+                let number = value.round() as i32;
+                self.counts.insert(node.name.clone(), number);
+                return number;
+            }
+        }
+        self.counts.get(&node.name).copied().unwrap_or(0)
+    }
+
+    fn erase_now(&self, node: &WidgetNode) -> bool {
+        let Some(name) = node
+            .prop_str("eraseChannel")
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            return false;
+        };
+        let Some(value) = self.cache.get(name).and_then(|data| data.value.as_f64()) else {
+            return false;
+        };
+        let zero = value as i32 == 0;
+        if node
+            .enum_tail("eraseMode")
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("ifzero"))
+        {
+            zero
+        } else {
+            !zero
+        }
+    }
+
+    fn changed(&mut self, key: &str, value: f64) -> bool {
+        match self.seen.insert(key.to_string(), value) {
+            Some(old) => (old - value).abs() > 1e-9,
+            None => true,
+        }
+    }
+
+    fn align_px(&self, node: &WidgetNode) -> i32 {
+        let group = node.prop_f64("XaxisSyncGroup").unwrap_or(0.0) as i32;
+        if group == 0 {
+            return 0;
+        }
+        let own = y_extent(node);
+        let max = self
+            .nodes
+            .iter()
+            .filter(|other| other.class_name == node.class_name && sync_group(other) == group)
+            .map(y_extent)
+            .max()
+            .unwrap_or(own);
+        (max - own).max(0)
     }
 
     fn waterfall_rows(&self, node: &WidgetNode) -> Vec<Vec<f64>> {
@@ -1074,6 +1342,99 @@ fn substitute(node: &mut WidgetNode, macros: &MacroMap) {
     }
 }
 
+fn cartesian_active(node: &WidgetNode) -> bool {
+    curve_inputs(node).iter().any(|spec| {
+        !spec.1.is_empty()
+            || node
+                .prop_str("channels")
+                .is_some_and(|text| text.contains(';'))
+            || (1..=6).any(|index| {
+                node.prop_str(&format!("channels_{index}"))
+                    .is_some_and(|text| text.contains(';'))
+            })
+    }) || node.prop_str("plotMode").is_some()
+        || node.prop_str("countNumOrChannel").is_some()
+        || node
+            .prop_str("triggerChannel")
+            .is_some_and(|text| !text.trim().is_empty())
+        || node
+            .prop_str("eraseChannel")
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn curve_inputs(node: &WidgetNode) -> Vec<(CurveKind, String, String)> {
+    let mut out = Vec::new();
+    let mut indexed = false;
+    for index in 1..=6 {
+        if let Some(text) = node.prop_str(&format!("channels_{index}")) {
+            indexed = true;
+            if let Some(spec) = parse_curve(text) {
+                out.push(spec);
+            }
+        }
+    }
+    if !indexed {
+        if let Some(text) = node.prop_str("channels") {
+            if let Some(spec) = parse_curve(text) {
+                out.push(spec);
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(text) = node.prop_str("channel") {
+            if let Some(spec) = parse_curve(text) {
+                out.push(spec);
+            }
+        }
+    }
+    out
+}
+
+fn plot_mode(node: &WidgetNode) -> PlotMode {
+    if node
+        .enum_tail("plotMode")
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("PlotLastNPoints"))
+    {
+        PlotMode::Last
+    } else {
+        PlotMode::Stop
+    }
+}
+
+fn trim_span(node: &WidgetNode, mut samples: Vec<f64>) -> Vec<f64> {
+    if let Some(span) = node
+        .prop_f64("timeSpan")
+        .map(|n| n as usize)
+        .filter(|n| *n > 0)
+    {
+        if samples.len() > span {
+            samples = samples[samples.len() - span..].to_vec();
+        }
+    }
+    samples
+}
+
+fn archive_name(channel: &str) -> String {
+    channel
+        .rsplit_once("://")
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_else(|| channel.to_string())
+}
+
+fn sync_group(node: &WidgetNode) -> i32 {
+    node.prop_f64("XaxisSyncGroup").unwrap_or(0.0) as i32
+}
+
+fn y_extent(node: &WidgetNode) -> i32 {
+    let (_, hi) = axis_pair(node, 0);
+    let label = if hi.is_finite() {
+        format!("{hi:.3}")
+    } else {
+        "0.000".to_string()
+    };
+    label.len() as i32 * 5
+}
+
 fn node_channels(node: &WidgetNode) -> Vec<String> {
     let mut out = Vec::new();
     for key in [
@@ -1108,6 +1469,8 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
         "channelYCPT",
         "channelXNEWDATA",
         "channelYNEWDATA",
+        "triggerChannel",
+        "eraseChannel",
     ] {
         if let Some(prop) = node.prop(key) {
             if key == "channels" || key.starts_with("channels_") {
@@ -1124,6 +1487,12 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
                     }
                 }
             }
+        }
+    }
+    if let Some(text) = node.prop_str("countNumOrChannel") {
+        let text = text.trim();
+        if !text.is_empty() && text.parse::<i32>().is_err() && !out.contains(&text.to_string()) {
+            out.push(text.to_string());
         }
     }
     out
@@ -1429,6 +1798,9 @@ fn scan_waveform(
         time_x: axis_named(node, "XaxisType", "time"),
         grid_color: prop_color(node, "gridColor").unwrap_or(Color::rgb(160, 160, 160)),
         scale_color: prop_color(node, "scaleColor"),
+        xs: Vec::new(),
+        align_px: 0,
+        time_at: 0.0,
     }
 }
 

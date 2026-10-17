@@ -58,6 +58,29 @@ impl Image {
         self.rgba[i + 3] = color.a;
     }
 
+    pub fn cover(&mut self, x: i32, y: i32, color: Color, coverage: u8) {
+        if coverage == 0 {
+            return;
+        }
+        if coverage == 255 {
+            self.put(x, y, color);
+            return;
+        }
+        if let Some(dst) = self.pixel(x, y) {
+            let c = u32::from(coverage);
+            let inv = 255 - c;
+            self.put(
+                x,
+                y,
+                Color::rgb(
+                    ((u32::from(color.r) * c + u32::from(dst.r) * inv) / 255) as u8,
+                    ((u32::from(color.g) * c + u32::from(dst.g) * inv) / 255) as u8,
+                    ((u32::from(color.b) * c + u32::from(dst.b) * inv) / 255) as u8,
+                ),
+            );
+        }
+    }
+
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
         for y in rect.y..rect.y + rect.height {
             for x in rect.x..rect.x + rect.width {
@@ -173,6 +196,23 @@ impl Image {
         out
     }
 
+    /// Decode a PNG written by [`Self::to_png`]. The grab path uses this to
+    /// check the file against the widget-tree raster.
+    pub fn from_png(bytes: &[u8]) -> Option<Self> {
+        let image = image::load_from_memory(bytes).ok()?.to_rgb8();
+        let width = image.width();
+        let height = image.height();
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for pixel in image.pixels() {
+            rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+        }
+        Some(Self {
+            width,
+            height,
+            rgba,
+        })
+    }
+
     /// Raster PostScript. Qt 5 prints with `QPrinter::NativeFormat` and says
     /// PostScript is no longer supported; this is a page that shows the same
     /// pixels, not those printer bytes.
@@ -205,6 +245,15 @@ impl Image {
 /// Paint every visible widget. The image is large enough to hold them.
 pub fn paint(visuals: &[Visual]) -> Image {
     paint_in(visuals, 0, 0)
+}
+
+/// Widget-tree raster plus an optional caption. Snapshot PNG is this image.
+pub fn grab(visuals: &[Visual], width: u32, height: u32, caption: Option<&str>) -> Image {
+    let mut image = paint_in(visuals, width, height);
+    if let Some(caption) = caption {
+        image.text(0, 0, caption, Color::rgb(255, 255, 255), 8);
+    }
+    image
 }
 
 /// Paint into a canvas of `width` by `height`. A zero size uses the widget bounds.
@@ -378,6 +427,9 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             time_x,
             grid_color,
             scale_color,
+            xs,
+            align_px,
+            time_at,
         } => {
             paint_plot(
                 image,
@@ -411,6 +463,9 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                     time_x: *time_x,
                     grid_color: *grid_color,
                     scale_color: *scale_color,
+                    xs,
+                    align_px: *align_px,
+                    time_at: *time_at,
                 },
             );
         }
@@ -572,6 +627,9 @@ struct PlotPaint<'a> {
     time_x: bool,
     grid_color: Color,
     scale_color: Option<Color>,
+    xs: &'a [Vec<f64>],
+    align_px: i32,
+    time_at: f64,
 }
 
 fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotPaint<'_>) {
@@ -606,10 +664,11 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         && plot_paint.y2_min.is_finite()
         && plot_paint.y2_max.is_finite();
     let gutter = if y2 { Y2_GUTTER } else { 0 };
+    let align = plot_paint.align_px.max(0);
     let plot = Rect::new(
-        rect.x + 4,
+        rect.x + 4 + align,
         rect.y + 18,
-        rect.width.saturating_sub(8 + gutter).max(1),
+        rect.width.saturating_sub(8 + gutter + align).max(1),
         rect.height.saturating_sub(28).max(1),
     );
     image.stroke_rect(plot, visual.foreground);
@@ -681,6 +740,7 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             .get(index)
             .copied()
             .unwrap_or(CurveSymbol::NoSymbol);
+        let xs = plot_paint.xs.get(index).map(Vec::as_slice).unwrap_or(&[]);
         paint_series_scaled(
             image,
             plot,
@@ -697,28 +757,21 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
                 symbol,
                 symbol_px: plot_paint.symbol_px,
                 x_limits: plot_paint.x_limits,
+                xs,
             },
         );
     }
     if plot_paint.time_x && plot_paint.title_x.is_empty() {
         let (lo, hi) = plot_paint.x_limits.unwrap_or((0.0, 1.0));
+        let (left_ms, right_ms) = if plot_paint.time_at > 0.0 {
+            (plot_paint.time_at - 60_000.0, plot_paint.time_at)
+        } else {
+            (lo, hi)
+        };
+        let offset = local_offset_secs((right_ms / 1000.0) as i64);
         let px = visual.font_px.clamp(6, 8);
-        image.text(
-            rect.x + 2,
-            rect.y + rect.height - px,
-            &clock_hms(lo),
-            scale,
-            px,
-        );
-        let right = clock_hms(hi);
-        let width = font::advance_current(&right, px);
-        image.text(
-            rect.x + rect.width - width - 2,
-            rect.y + rect.height - px,
-            &right,
-            scale,
-            px,
-        );
+        paint_time_labels(image, rect, left_ms, offset, scale, px, true);
+        paint_time_labels(image, rect, right_ms, offset, scale, px, false);
     }
     paint_legend(image, rect, visual, plot_paint);
     for cursor in plot_paint.cursors {
@@ -1144,7 +1197,7 @@ fn paint_waterfall(
     }
 }
 
-struct SeriesDraw {
+struct SeriesDraw<'a> {
     color: Color,
     x_min: f64,
     x_max: f64,
@@ -1156,9 +1209,10 @@ struct SeriesDraw {
     symbol: CurveSymbol,
     symbol_px: i32,
     x_limits: Option<(f64, f64)>,
+    xs: &'a [f64],
 }
 
-fn paint_series_scaled(image: &mut Image, rect: Rect, samples: &[f64], draw: &SeriesDraw) {
+fn paint_series_scaled(image: &mut Image, rect: Rect, samples: &[f64], draw: &SeriesDraw<'_>) {
     let bare = draw.style == CurveStyle::NoCurve && draw.symbol == CurveSymbol::NoSymbol;
     if bare || samples.is_empty() || rect.width < 2 || rect.height < 2 {
         return;
@@ -1200,12 +1254,21 @@ fn paint_series_scaled(image: &mut Image, rect: Rect, samples: &[f64], draw: &Se
     } else {
         max
     };
-    let (axis_lo, axis_hi) = data_axis(draw, last);
+    let use_xs = draw.xs.len() == samples.len();
+    let (axis_lo, axis_hi) = if use_xs && draw.x_limits.is_none() && !draw.log_x {
+        xs_axis(draw, &draw.xs[start..=end])
+    } else {
+        data_axis(draw, last)
+    };
     let mut prev: Option<(i32, i32)> = None;
     let denom = (window.len() - 1).max(1) as f64;
     let bottom = rect.y + rect.height - 1;
     for (i, sample) in window.iter().enumerate() {
-        let x = if draw.x_limits.is_some() || draw.log_x {
+        let x = if use_xs {
+            let value = draw.xs[start + i];
+            let frac = (value - axis_lo) / (axis_hi - axis_lo);
+            rect.x + (frac.clamp(0.0, 1.0) * f64::from(rect.width - 1)) as i32
+        } else if draw.x_limits.is_some() || draw.log_x {
             let value = (start + i) as f64;
             let frac = if draw.log_x {
                 log_frac(value, axis_lo, axis_hi)
@@ -1258,9 +1321,23 @@ fn paint_series_scaled(image: &mut Image, rect: Rect, samples: &[f64], draw: &Se
     }
 }
 
-fn data_axis(draw: &SeriesDraw, last: usize) -> (f64, f64) {
+fn data_axis(draw: &SeriesDraw<'_>, last: usize) -> (f64, f64) {
     let (lo, hi) = draw.x_limits.unwrap_or((0.0, last as f64));
     let (lo, hi) = if hi > lo { (lo, hi) } else { (0.0, 10.0) };
+    let span = hi - lo;
+    let zoom_lo = lo + draw.x_min.clamp(0.0, 1.0) * span;
+    let zoom_hi = lo + draw.x_max.clamp(0.0, 1.0) * span;
+    if zoom_hi > zoom_lo {
+        (zoom_lo, zoom_hi)
+    } else {
+        (lo, hi)
+    }
+}
+
+fn xs_axis(draw: &SeriesDraw<'_>, xs: &[f64]) -> (f64, f64) {
+    let lo = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let (lo, hi) = if hi > lo { (lo, hi) } else { (lo, lo + 1.0) };
     let span = hi - lo;
     let zoom_lo = lo + draw.x_min.clamp(0.0, 1.0) * span;
     let zoom_hi = lo + draw.x_max.clamp(0.0, 1.0) * span;
@@ -1278,22 +1355,124 @@ fn log_frac(value: f64, lo: f64, hi: f64) -> f64 {
     (value.log10() - lo.log10()) / (hi.log10() - lo.log10())
 }
 
-/// UTC clock. Upstream's date scale uses Qt local time; this rasterizer does not.
-fn clock_hms(ms: f64) -> String {
-    let secs = (ms / 1000.0).floor() as i64;
-    let secs = secs.rem_euclid(86_400);
-    format!(
+/// `hh:mm:ss` and `dd-MM-yy` for `QwtDateScaleDraw` with `Qt::LocalTime`.
+/// `offset_secs` is the zone offset from UTC, the same value `tm_gmtoff` carries.
+pub fn axis_time_lines(unix_secs: i64, offset_secs: i32) -> (String, String) {
+    let local = unix_secs.saturating_add(i64::from(offset_secs));
+    let secs = local.rem_euclid(86_400) as u32;
+    let z = local.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let year = (if month <= 2 { y + 1 } else { y }) as i32;
+    let hms = format!(
         "{:02}:{:02}:{:02}",
-        secs / 3600,
-        (secs % 3600) / 60,
+        secs / 3_600,
+        (secs % 3_600) / 60,
         secs % 60
-    )
+    );
+    let date = format!("{day:02}-{month:02}-{:02}", year.rem_euclid(100));
+    (hms, date)
+}
+
+#[repr(C)]
+struct LibcTm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const i8,
+}
+
+fn local_tm(unix_secs: i64) -> Option<LibcTm> {
+    extern "C" {
+        fn localtime_r(timep: *const i64, result: *mut LibcTm) -> *mut LibcTm;
+    }
+    unsafe {
+        let mut tm = std::mem::zeroed::<LibcTm>();
+        if localtime_r(&unix_secs, &mut tm).is_null() {
+            None
+        } else {
+            Some(tm)
+        }
+    }
+}
+
+/// Zone offset Qt uses for `Qt::LocalTime` on this process.
+pub fn local_offset_secs(unix_secs: i64) -> i32 {
+    local_tm(unix_secs)
+        .map(|tm| tm.tm_gmtoff as i32)
+        .unwrap_or(0)
+}
+
+/// `QDate::currentDate` and `QTime::currentTime`: year, month, day, hour, minute, second.
+pub fn local_civil(unix_secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    if let Some(tm) = local_tm(unix_secs) {
+        (
+            tm.tm_year + 1900,
+            tm.tm_mon as u32 + 1,
+            tm.tm_mday as u32,
+            tm.tm_hour as u32,
+            tm.tm_min as u32,
+            tm.tm_sec as u32,
+        )
+    } else {
+        let (hms, date) = axis_time_lines(unix_secs, 0);
+        let mut clock = hms.split(':');
+        let hour = clock.next().unwrap_or("0").parse().unwrap_or(0);
+        let minute = clock.next().unwrap_or("0").parse().unwrap_or(0);
+        let second = clock.next().unwrap_or("0").parse().unwrap_or(0);
+        let mut day = date.split('-');
+        let d: u32 = day.next().unwrap_or("1").parse().unwrap_or(1);
+        let month: u32 = day.next().unwrap_or("1").parse().unwrap_or(1);
+        let yy: i32 = day.next().unwrap_or("70").parse().unwrap_or(70);
+        (1900 + yy, month, d, hour, minute, second)
+    }
+}
+
+fn paint_time_labels(
+    image: &mut Image,
+    rect: Rect,
+    ms: f64,
+    offset: i32,
+    color: Color,
+    px: i32,
+    left: bool,
+) {
+    let (hms, date) = axis_time_lines((ms / 1000.0) as i64, offset);
+    let date_y = rect.y + rect.height - px;
+    let time_y = date_y - px;
+    for (line, y) in [(&hms, time_y), (&date, date_y)] {
+        let width = font::advance_current(line, px);
+        let x = if left {
+            rect.x + 2
+        } else {
+            rect.x + rect.width - width - 2
+        };
+        image.text(x, y, line, color, px);
+    }
+}
+
+/// `Qt::DashLine` at pen width 1 is 4 pixels on, 2 off.
+fn dash_on(offset: i32) -> bool {
+    offset.rem_euclid(6) < 4
 }
 
 fn dash_hline(image: &mut Image, x0: i32, x1: i32, y: i32, color: Color) {
     let (left, right) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
     for x in left..=right {
-        if (x - left).rem_euclid(5) < 3 {
+        if dash_on(x - left) {
             image.put(x, y, color);
         }
     }
@@ -1302,7 +1481,7 @@ fn dash_hline(image: &mut Image, x0: i32, x1: i32, y: i32, color: Color) {
 fn dash_vline(image: &mut Image, x: i32, y0: i32, y1: i32, color: Color) {
     let (top, bot) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
     for y in top..=bot {
-        if (y - top).rem_euclid(5) < 3 {
+        if dash_on(y - top) {
             image.put(x, y, color);
         }
     }
@@ -1313,73 +1492,115 @@ fn paint_symbol(image: &mut Image, x: i32, y: i32, symbol: CurveSymbol, px: i32,
         return;
     }
     let r = (px / 2).max(1);
-    match symbol {
-        CurveSymbol::NoSymbol => {}
-        CurveSymbol::Ellipse => disk(image, x, y, r, color),
-        CurveSymbol::Diamond => {
-            for dy in -r..=r {
-                let reach = r - dy.abs();
-                image.line(x - reach, y + dy, x + reach, y + dy, color);
-            }
+    let span = r + 1;
+    for dy in -span..=span {
+        for dx in -span..=span {
+            let coverage = symbol_coverage(symbol, dx, dy, r);
+            image.cover(x + dx, y + dy, color, coverage);
         }
-        CurveSymbol::Triangle | CurveSymbol::UTriangle => triangle(image, x, y, r, 0, -1, color),
-        CurveSymbol::DTriangle => triangle(image, x, y, r, 0, 1, color),
-        CurveSymbol::LTriangle => triangle(image, x, y, r, -1, 0, color),
-        CurveSymbol::RTriangle => triangle(image, x, y, r, 1, 0, color),
+    }
+}
+
+/// Coverage of one pixel of a `QwtSymbol`. The interior is opaque. The edge
+/// fades across one pixel, which is the antialiased pixmap Qwt builds.
+fn symbol_coverage(symbol: CurveSymbol, dx: i32, dy: i32, r: i32) -> u8 {
+    let rf = f64::from(r);
+    match symbol {
+        CurveSymbol::NoSymbol => 0,
+        CurveSymbol::Ellipse => disk_coverage(dx, dy, rf),
+        CurveSymbol::Diamond => filled_coverage(dx.abs() + dy.abs(), r),
+        CurveSymbol::Triangle | CurveSymbol::UTriangle => triangle_coverage(dx, dy, r, 0, -1),
+        CurveSymbol::DTriangle => triangle_coverage(dx, dy, r, 0, 1),
+        CurveSymbol::LTriangle => triangle_coverage(dx, dy, r, -1, 0),
+        CurveSymbol::RTriangle => triangle_coverage(dx, dy, r, 1, 0),
         CurveSymbol::Cross | CurveSymbol::Star1 => {
-            image.line(x - r, y, x + r, y, color);
-            image.line(x, y - r, x, y + r, color);
+            let arm = stroke_coverage(dx, dy, r) | stroke_coverage(dy, dx, r);
             if symbol == CurveSymbol::Star1 {
-                image.line(x - r, y - r, x + r, y + r, color);
-                image.line(x - r, y + r, x + r, y - r, color);
+                arm | diag_coverage(dx, dy, r) | diag_coverage(dx, -dy, r)
+            } else {
+                arm
             }
         }
         CurveSymbol::XCross | CurveSymbol::Star2 => {
-            image.line(x - r, y - r, x + r, y + r, color);
-            image.line(x - r, y + r, x + r, y - r, color);
+            let arm = diag_coverage(dx, dy, r) | diag_coverage(dx, -dy, r);
             if symbol == CurveSymbol::Star2 {
-                image.line(x - r, y, x + r, y, color);
+                arm | stroke_coverage(dx, dy, r)
+            } else {
+                arm
             }
         }
-        CurveSymbol::HLine => image.line(x - r, y, x + r, y, color),
-        CurveSymbol::VLine => image.line(x, y - r, x, y + r, color),
+        CurveSymbol::HLine => stroke_coverage(dx, dy, r),
+        CurveSymbol::VLine => stroke_coverage(dy, dx, r),
         CurveSymbol::Hexagon => {
-            for dy in -r..=r {
-                let reach = if dy.abs() * 2 <= r {
-                    r
-                } else {
-                    r - (dy.abs() - r / 2)
-                };
-                image.line(x - reach.max(0), y + dy, x + reach.max(0), y + dy, color);
-            }
+            let limit = if dy.abs() * 2 <= r {
+                r
+            } else {
+                r - (dy.abs() - r / 2)
+            };
+            filled_coverage(dx.abs(), limit.max(0))
         }
     }
 }
 
-fn disk(image: &mut Image, x: i32, y: i32, r: i32, color: Color) {
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy <= r * r {
-                image.put(x + dx, y + dy, color);
-            }
-        }
-    }
-}
-
-fn triangle(image: &mut Image, x: i32, y: i32, r: i32, dx: i32, dy: i32, color: Color) {
-    if dy != 0 {
-        for step in 0..=r {
-            let row = y + dy * (step - r / 2);
-            let reach = (r - step).max(0);
-            image.line(x - reach, row, x + reach, row, color);
-        }
+fn disk_coverage(dx: i32, dy: i32, r: f64) -> u8 {
+    let d = f64::from(dx * dx + dy * dy).sqrt();
+    let edge = (r + 0.5) - d;
+    if edge >= 0.5 {
+        255
+    } else if edge <= -0.5 {
+        0
     } else {
-        for step in 0..=r {
-            let col = x + dx * (step - r / 2);
-            let reach = (r - step).max(0);
-            image.line(col, y - reach, col, y + reach, color);
-        }
+        ((edge + 0.5) * 255.0) as u8
     }
+}
+
+fn filled_coverage(distance: i32, limit: i32) -> u8 {
+    if distance < limit {
+        255
+    } else if distance == limit {
+        180
+    } else if distance == limit + 1 {
+        70
+    } else {
+        0
+    }
+}
+
+fn stroke_coverage(along: i32, across: i32, r: i32) -> u8 {
+    if along.abs() > r + 1 {
+        return 0;
+    }
+    match across.abs() {
+        0 if along.abs() <= r => 255,
+        0 => 80,
+        1 if along.abs() <= r => 70,
+        _ => 0,
+    }
+}
+
+fn diag_coverage(dx: i32, dy: i32, r: i32) -> u8 {
+    if dx.abs() > r + 1 || dy.abs() > r + 1 {
+        return 0;
+    }
+    match (dx - dy).abs() {
+        0 if dx.abs() <= r => 255,
+        1 if dx.abs() <= r => 70,
+        _ => 0,
+    }
+}
+
+fn triangle_coverage(dx: i32, dy: i32, r: i32, dir_x: i32, dir_y: i32) -> u8 {
+    let (along, across) = if dir_y != 0 {
+        (dir_y * dy, dx.abs())
+    } else {
+        (dir_x * dx, dy.abs())
+    };
+    let step = along + r / 2;
+    if !(0..=r).contains(&step) {
+        return if step == -1 || step == r + 1 { 70 } else { 0 };
+    }
+    let reach = r - step;
+    filled_coverage(across, reach)
 }
 
 fn fill_under(image: &mut Image, x0: i32, y0: i32, x1: i32, y1: i32, bottom: i32, color: Color) {
@@ -1563,6 +1784,9 @@ mod tests {
                 time_x: false,
                 grid_color: Color::rgb(160, 160, 160),
                 scale_color: None,
+                xs: Vec::new(),
+                align_px: 0,
+                time_at: 0.0,
             },
             "",
             Color::rgb(0, 180, 0),
@@ -1619,6 +1843,9 @@ mod tests {
                 time_x: false,
                 grid_color: Color::rgb(160, 160, 160),
                 scale_color: None,
+                xs: Vec::new(),
+                align_px: 0,
+                time_at: 0.0,
             },
             "",
             Color::rgb(0, 180, 220),
@@ -1693,6 +1920,9 @@ mod tests {
                 time_x: false,
                 grid_color: Color::rgb(160, 160, 160),
                 scale_color: None,
+                xs: Vec::new(),
+                align_px: 0,
+                time_at: 0.0,
             },
             "caCartesianPlot",
         )
@@ -1998,6 +2228,33 @@ mod tests {
         assert!(solid > 8, "stem pixels stay the widget color");
         assert!(blended > 4, "partial coverage is composited, not dropped");
         install_display_font("Arimo").unwrap();
+    }
+
+    #[test]
+    fn snapshot_png_is_the_widget_tree_plus_caption() {
+        let label = visual(VisualKind::Label, "A", Color::rgb(0, 180, 0));
+        let plain = paint_in(std::slice::from_ref(&label), 120, 40);
+        let shot = grab(&[label], 120, 40, Some("1970-01-01 00:00:00, panel.ui"));
+        let decoded = Image::from_png(&shot.to_png()).expect("png");
+        assert_eq!(decoded.rgba, shot.rgba);
+        let mut caption = false;
+        for y in 0..12 {
+            for x in 0..120 {
+                if plain.pixel(x, y) != shot.pixel(x, y) {
+                    caption = true;
+                }
+            }
+        }
+        assert!(caption, "the caption is drawn on the grab");
+        for y in 16..40 {
+            for x in 0..120 {
+                assert_eq!(
+                    plain.pixel(x, y),
+                    shot.pixel(x, y),
+                    "body pixel {x},{y} left the widget raster"
+                );
+            }
+        }
     }
 
     fn rightmost_ink(text: &str, face: &str) -> i32 {

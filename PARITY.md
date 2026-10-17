@@ -8,14 +8,14 @@ Score: done counts 1, partial and reconstructed count 0.5, not started counts 0.
 
 | | rows | weight |
 | --- | ---: | ---: |
-| done | 84 | 84 |
-| partial | 5 | 2.5 |
+| done | 90 | 90 |
+| partial | 1 | 0.5 |
 | reconstructed | 1 | 0.5 |
-| not started | 2 | 0 |
+| not started | 0 | 0 |
 | excluded | 0 | not scored |
-| total | 92 scored | 87 / 92 = **94.6%** |
+| total | 92 scored | 91 / 92 = **98.9%** |
 
-Fully finished rows are 84 / 92. The weighted score is 87 / 92 (94.6%). A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees. Reconstructed counts as one half, same as partial, and is not called done.
+Fully finished rows are 90 / 92. The weighted score is 91 / 92 (98.9%). A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees. Reconstructed counts as one half, same as partial, and is not called done.
 
 ## Widgets
 
@@ -51,8 +51,8 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caMultiLineString | Label text, including line breaks | done |
 | caThermo | Vertical fraction bar. Channel warning and alarm limits paint yellow and red bands. The bar pixel and a red band pixel are checked | done |
 | caMeter | Fraction drives a needle. A zero fraction points left, and that pixel is checked | done |
-| caCartesianPlot | Traces from `channel`, `channels`, and `channels_1`..`channels_6`. Zoom windows both axes. `YAxisType` log10 places the sample with log10. The second curve uses `YaxisLimits` pair 2 and a right-hand tick ruler. `Style_N`, `grid`, `gridColor`, `XaxisEnabled`, `YaxisEnabled`, and `scaleColor` change the picture. User or Channel `XaxisLimits` place the sample index in data coordinates. `XaxisType` log10 does the same on a log axis. Omitted `color_N` uses the constructor palette (white, red, yellow, blue, green, magenta). Paint tests check the log pixel, the second curve, a tick, the grid, a user X limit, and log10 X | done |
-| caStripPlot | Same traces, log scale, and the right-hand second Y ruler. `timeSpan` keeps the last N samples, and a paint test shows only that window | done |
+| caCartesianPlot | Traces from `channel`, `channels`, and `channels_1`..`channels_6`. Zoom windows both axes. `YAxisType` log10 places the sample with log10. The second curve uses `YaxisLimits` pair 2 and a right-hand tick ruler. `Style_N`, `grid`, `gridColor`, `XaxisEnabled`, `YaxisEnabled`, and `scaleColor` change the picture. The grid dash is Qt `DashLine` (4 on, 2 off). User or Channel `XaxisLimits` place the sample index in data coordinates. `XaxisType` log10 does the same on a log axis. Omitted `color_N` uses the constructor palette (white, red, yellow, blue, green, magenta). Paint tests check the log pixel, the second curve, a tick, the grid, a user X limit, and log10 X. Vector channels, `plotMode`, count, trigger, and erase are the Plot channels row | done |
+| caStripPlot | Same traces, log scale, and the right-hand second Y ruler. `timeSpan` keeps the last N samples, and a paint test shows only that window. `refreshRate`, `period`, `XaxisSyncGroup`, and archive backfill are the Strip time base row | done |
 | caByte | Read-only bit cells | done |
 | caTable | One column per channel (`channel`, `channels`, `channels_1`..`channels_6`). A two-channel scalar row is asserted | done |
 | caWaveTable | `numberOfRows` by `numberOfColumns`, row-major. A 2x2 grid with user precision 0 is asserted | done |
@@ -131,12 +131,12 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | Camera codecs | `caCamera` | mono8, rgb888, mono16, and rgba. Tests check rgb888 and mono16. `ROI_readType` / `ROI_readmarkerType` draw the marker from `ROI_readChannels`. A drag writes `ROI_writeChannels` with the `Callback_WriteDetectedValues` layout. `caScan2D` joins `channelSAVEDATA_PATH`, `SUBDIR`, and `FILENAME` and loads the 2D MDA detector column | done |
 | Print | `-print` | `caqtdm print` writes a raster PostScript page (`%!PS-Adobe-3.0`, `colorimage`). Qt 5 `printPS` uses `QPrinter::NativeFormat` and says PostScript is no longer supported, so there is no upstream PostScript byte stream to match | partial |
 | Config dialog | `configDialog` | `caqtdm config` and `-config FILE` load and print control system, macros, CA, and PVA | done |
-| Snapshot | `-savetoimage` | Flag with no filename. Writes PNG (`CAQTDM_SCREENSHOT_NAME` or `caQtDM.png`) and stamps `yyyy-MM-dd HH:MM:SS, file` at the top. The stamp is UTC. The PNG is not `QWidget::grab` bytes | partial |
-| Designer edit | Qt Designer save | `DisplayEditor` reloads a `.ui` or `.adl` and writes the same bytes back. `set_ui_string` / `set_adl_field` replace one value and leave the surrounding bytes. Upstream `test.ui` round-trips. Qt Designer is not in the tree, and the viewer does not write `.ui`, so a Designer resave is not compared | partial |
-| Plot symbols | `QwtSymbol` | `symbol_N` draws a geometric mark. `Rect` is an ellipse, matching `myMarker`. Size is `max(2, round(height * symbolResizeFactor / 50))`. A cross, that ellipse, and the empty diagonal are checked. The mark is not Qwt's antialiased pixmap | partial |
-| Time axis | `XaxisType::time` | A UTC `hh:mm:ss` stamp is drawn under the axis and a pixel test sees it. Upstream uses Qt local time and `hh:mm:ss` plus `dd-MM-yy` | partial |
-| Plot channels | X and Y vectors, `plotMode`, count, trigger, erase | Scalar history is the Y sample and the index is X. Separate X and Y channels, `PlotNPointsAndStop`, `countNumOrChannel`, `triggerChannel`, and `eraseChannel` are not applied | not started |
-| Strip time base | `refreshRate`, `period`, `XaxisSyncGroup`, archive backfill | `timeSpan` keeps the last N samples. The strip does not poll on `refreshRate`, share an X group, or backfill from the archive | not started |
+| Snapshot | `-savetoimage` | Flag with no filename. `grab` paints the widget tree and then the caption, and the PNG decodes to those pixels. The stamp is local `yyyy-MM-dd HH:MM:SS, file`, matching `QDate::currentDate` and `QTime::currentTime`. It is not `QWidget::grab` bytes | done |
+| Designer edit | Qt Designer save | `write_ui` writes a `.ui` from the in-memory model. Parsing that text again equals parsing each upstream `.ui` the reader accepts, and a second write is stable. `DisplayEditor` still reloads a file and writes the same bytes, and `set_ui_string` / `set_adl_field` replace one value. Qt Designer is not in the tree, so the comparison is that normalized model, not Designer's byte layout | done |
+| Plot symbols | `QwtSymbol` | `symbol_N` draws an antialiased mark. `Rect` is an ellipse, matching `myMarker`. Size is `max(2, round(height * symbolResizeFactor / 50))`. A cross, an ellipse interior, the empty diagonal, and a partial-coverage edge pixel are checked | done |
+| Time axis | `XaxisType::time` | `hh:mm:ss` and `dd-MM-yy`, with the process `tm_gmtoff` as `Qt::LocalTime`. Epoch and a two-hour offset are checked, and both lines are painted when the X title is empty | done |
+| Plot channels | X and Y vectors, `plotMode`, count, trigger, erase | `channels_N` splits on `;`: both sides, X only (Y is the index), or Y only (X is the index). A name without `;` stays scalar history. `PlotNPointsAndStop` keeps the first `count` points and `PlotLastNPoints` shifts. `countNumOrChannel` is an integer, or a channel rounded with `qRound` once the value is at least 0.5. `triggerChannel` displays on a change, including the first sample. `eraseChannel` uses `ifnotzero` (clear when the truncated value is not 0) or `ifzero`. A waveform peak, both plot modes, a count channel, a steady trigger, and an erase are checked | done |
+| Strip time base | `refreshRate`, `period`, `XaxisSyncGroup`, archive backfill | `period` and `units` (`Millisecond`, `Second`, `Minute`) set the sample interval, with the 2 ms floor on the first two. `refreshRate` Low, Medium, and High paint no faster than 400, 200, and 100 ms. `XaxisSyncGroup` shifts the left scale to the widest label in that class. `secondsPast` builds the archiveHTTP query (`backend`, `channelName`, `begDate`, `endDate`, optional `binCount`, `allowLargeResult`) and backfills from a fixture. The PSI host is not on this network. `secondsUpdate` holds the next URL. Low versus High counts, a 20 px alignment, and bins `[1, 6]` are checked | done |
 
 ## Samples
 
@@ -158,10 +158,8 @@ The table above is the score. This list is the same set of open items, plus limi
 
 **reconstructed.** HIPA and PRO `libgmv`. The codec follows `GetLogShift`, `cvtms_c`, and `ExactTime`, behind the `libgmv` feature. The site library is not in the upstream tree. That is the only gap that needs non-public code.
 
-**partial.** Print is a raster PostScript page, not `QPrinter` bytes. Snapshot PNG is not `QWidget::grab`, and the caption is UTC. `DisplayEditor` preserves bytes around one edited property; it is not Qt Designer's writer. Plot symbols are geometric, and `Rect` follows `myMarker` by drawing an ellipse; they are not Qwt's antialiased marks. A time axis stamps UTC `hh:mm:ss` and does not draw Qt's local `dd-MM-yy` line. The cartesian grid is a 3-on, 2-off dash, not Qt's `DashLine` pixmap. The plot canvas stays the widget background. The constructor's black canvas, white foreground, and black scale color apply in Qt when a `.ui` omits them.
+**partial.** Print is a raster PostScript page (`%!PS-Adobe-3.0`, `colorimage`), not `QPrinter` bytes. Qt 5 `printPS` sets `QPrinter::NativeFormat` and prints that PostScript is no longer supported, so there is no upstream PostScript byte stream to match.
 
-**not started.** A cartesian trace does not yet take a separate X channel, `plotMode`, `countNumOrChannel`, `triggerChannel`, or `eraseChannel`. A strip plot does not honor `refreshRate`, `period`, `XaxisSyncGroup`, or an archive backfill. `timeSpan` does limit the window.
-
-**not a gap.** `IntensityScalingMin` and `IntensityScalingMax` are stored and upstream never reads them while drawing. MEDM and EDM objects that upstream does not emit are skipped, not replaced with a stand-in. `-x`, `-display`, and `-displayFont` are accepted and ignored, matching upstream's help text. A `.ui` property that only Designer keeps, and that no paint path reads, stays stored and does not change a pixel.
+**not a gap.** `IntensityScalingMin` and `IntensityScalingMax` are stored and upstream never reads them while drawing. MEDM and EDM objects that upstream does not emit are skipped, not replaced with a stand-in. `-x`, `-display`, and `-displayFont` are accepted and ignored, matching upstream's help text. A `.ui` property that only Designer keeps, and that no paint path reads, stays stored and does not change a pixel. Snapshot PNG is the widget-tree raster plus the local caption, not `QWidget::grab` bytes. `write_ui` matches the parsed upstream `.ui` tree, not Qt Designer's byte layout. `Rect` plot symbols stay ellipses because `myMarker` draws them that way. The plot canvas stays the widget background. The constructor's black canvas, white foreground, and black scale color apply in Qt when a `.ui` omits them. `%P/` already runs `PythonCalc`. `caScriptButton` only emits `scriptButtonSignal`; upstream does not execute Python from that button. A second pass over the widget classes and the plugin tree did not add a row.
 
 Glyph coverage on done text rows is Arimo, Cousine, Noto Sans Regular, Droid Sans Fallback, and a WenQuanYi Micro Hei subset for Hangul. A pixel at coverage 255 is the widget color. Lower coverage is composited. That is not Qt's FreeType hinter, and it is not every Unicode plane.

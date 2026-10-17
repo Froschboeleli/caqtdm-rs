@@ -6,6 +6,7 @@
 //! through the data-source hub. Shell commands stay dry-run unless
 //! [`Session::allow_shell`] is set.
 
+mod curves;
 mod designer;
 mod image;
 mod mda;

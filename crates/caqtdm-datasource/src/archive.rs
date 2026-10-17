@@ -278,6 +278,229 @@ pub fn serve_archiver(
     Ok(addr)
 }
 
+/// One archiveHTTP retrieval, matching `UrlHandlerHttp::assembleUrl`.
+///
+/// The live PSI host is not required. [`serve_archive_http`] answers the same
+/// path on the loopback, and [`values_in_window`] applies the request to a fixture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveHttpQuery {
+    pub host: String,
+    pub https: bool,
+    pub backend: String,
+    pub channel: String,
+    pub begin_secs: i64,
+    pub end_secs: i64,
+    /// `nrOfBins`. Zero or negative selects `/api/4/events`. A positive count
+    /// selects `/api/4/binned` and adds `binCount`.
+    pub bins: i32,
+    pub raw_path: String,
+    pub binned_path: String,
+}
+
+impl ArchiveHttpQuery {
+    pub fn defaults() -> Self {
+        let mut host = std::env::var("CAQTDM_ARCHIVEHTTP_URL")
+            .unwrap_or_else(|_| "data-api.psi.ch".to_string());
+        let mut https = false;
+        if let Some(rest) = host.strip_prefix("https://") {
+            https = true;
+            host = rest.to_string();
+        } else if let Some(rest) = host.strip_prefix("http://") {
+            host = rest.to_string();
+        }
+        host = host.trim_end_matches('/').to_string();
+        Self {
+            host,
+            https,
+            backend: std::env::var("CAQTDM_ARCHIVEHTTP_OVERRIDE_BACKEND")
+                .unwrap_or_else(|_| "sf-archiver".to_string()),
+            channel: String::new(),
+            begin_secs: 0,
+            end_secs: 0,
+            bins: 0,
+            raw_path: std::env::var("CAQTDM_ARCHIVEHTTP_APIPATH_RAW")
+                .unwrap_or_else(|_| "/api/4/events".to_string()),
+            binned_path: std::env::var("CAQTDM_ARCHIVEHTTP_APIPATH_BINNED")
+                .unwrap_or_else(|_| "/api/4/binned".to_string()),
+        }
+    }
+
+    /// `endSeconds = now`, `startSeconds = end - secondsPast`, as `WorkerHTTP::getFromArchive`.
+    pub fn from_window(channel: &str, end_ms: u64, seconds_past: u64, bins: i32) -> Self {
+        let end_secs = (end_ms / 1000) as i64;
+        let begin_secs = end_secs.saturating_sub(seconds_past as i64);
+        Self {
+            channel: channel.to_string(),
+            begin_secs,
+            end_secs,
+            bins,
+            ..Self::defaults()
+        }
+    }
+
+    pub fn url(&self) -> String {
+        let scheme = if self.https { "https" } else { "http" };
+        let path = if self.bins > 0 {
+            &self.binned_path
+        } else {
+            &self.raw_path
+        };
+        let begin = iso_utc(self.begin_secs);
+        let end = iso_utc(self.end_secs);
+        let mut query = format!(
+            "backend={}&channelName={}&begDate={}&endDate={}",
+            pct(&self.backend),
+            pct(&self.channel),
+            pct(&begin),
+            pct(&end)
+        );
+        if self.bins > 0 {
+            query.push_str(&format!("&binCount={}", self.bins));
+        }
+        query.push_str("&allowLargeResult=true");
+        format!(
+            "{scheme}://{host}{path}?{query}",
+            host = self.host,
+            path = path
+        )
+    }
+}
+
+/// Samples inside `[begin, end]`, averaged into `bins` buckets when `bins > 0`.
+pub fn values_in_window(
+    samples: &[ArchiveSample],
+    begin_ms: u64,
+    end_ms: u64,
+    bins: i32,
+) -> Vec<f64> {
+    let window: Vec<&ArchiveSample> = samples
+        .iter()
+        .filter(|sample| sample.time_ms >= begin_ms && sample.time_ms <= end_ms)
+        .collect();
+    if bins <= 0 || window.is_empty() {
+        return window.iter().map(|sample| sample.value).collect();
+    }
+    let span = end_ms.saturating_sub(begin_ms).max(1);
+    let mut sums = vec![0.0; bins as usize];
+    let mut counts = vec![0u32; bins as usize];
+    for sample in window {
+        let mut index =
+            ((sample.time_ms - begin_ms) as u128 * bins as u128 / span as u128) as usize;
+        if index >= bins as usize {
+            index = bins as usize - 1;
+        }
+        sums[index] += sample.value;
+        counts[index] += 1;
+    }
+    sums.iter()
+        .zip(counts)
+        .filter(|(_, count)| *count > 0)
+        .map(|(sum, count)| sum / f64::from(count))
+        .collect()
+}
+
+/// Loopback stand-in for `data-api.psi.ch`. The request must use the archiveHTTP path.
+pub fn serve_archive_http(
+    body: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<std::net::SocketAddr> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    std::thread::spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                    let mut buf = [0u8; 4096];
+                    let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    let ok = text.contains("/api/4/events")
+                        || text.contains("/api/4/binned")
+                        || text.contains("/api/4/backend/list");
+                    let payload = if ok {
+                        body.as_str()
+                    } else {
+                        "missing archiveHTTP path"
+                    };
+                    let status = if ok { "200 OK" } else { "404 Not Found" };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(addr)
+}
+
+pub fn fetch_archive_http(
+    addr: std::net::SocketAddr,
+    query: &ArchiveHttpQuery,
+) -> Result<String, DsError> {
+    let mut stream = std::net::TcpStream::connect(addr)
+        .map_err(|err| DsError::new(format!("archiveHTTP connect: {err}")))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .ok();
+    let url = query.url();
+    let path = url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.find('/').map(|i| &rest[i..]))
+        .unwrap_or("/");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: archive\r\nConnection: close\r\n\r\n");
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .map_err(|err| DsError::new(format!("archiveHTTP write: {err}")))?;
+    let mut buf = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut stream, &mut buf);
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if !text.contains("200 OK") {
+        return Err(DsError::new(format!(
+            "archiveHTTP request was not accepted: {text}"
+        )));
+    }
+    Ok(text.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+}
+
+fn iso_utc(unix_secs: i64) -> String {
+    let secs = unix_secs.rem_euclid(86_400) as u32;
+    let z = unix_secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let year = (if month <= 2 { y + 1 } else { y }) as i32;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        secs / 3_600,
+        (secs % 3_600) / 60,
+        secs % 60
+    )
+}
+
+fn pct(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 pub fn fetch_archiver(
     addr: std::net::SocketAddr,
     channel: &str,
@@ -297,4 +520,79 @@ pub fn fetch_archiver(
     let text = String::from_utf8_lossy(&buf);
     let body = text.split("\r\n\r\n").nth(1).unwrap_or(&text);
     parse_archiver_json(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    #[test]
+    fn archive_http_url_matches_the_plugin_query() {
+        let query = ArchiveHttpQuery {
+            host: "data-api.psi.ch".into(),
+            https: false,
+            backend: "sf-archiver".into(),
+            channel: "SR:VAC:P".into(),
+            begin_secs: 0,
+            end_secs: 60,
+            bins: 0,
+            raw_path: "/api/4/events".into(),
+            binned_path: "/api/4/binned".into(),
+        };
+        let url = query.url();
+        assert!(url.starts_with("http://data-api.psi.ch/api/4/events?"));
+        assert!(url.contains("backend=sf-archiver"));
+        assert!(url.contains("channelName=SR%3AVAC%3AP"));
+        assert!(url.contains("begDate=1970-01-01T00%3A00%3A00Z"));
+        assert!(url.contains("endDate=1970-01-01T00%3A01%3A00Z"));
+        assert!(url.ends_with("&allowLargeResult=true"));
+
+        let binned = ArchiveHttpQuery { bins: 4, ..query };
+        assert!(binned.url().contains("/api/4/binned?"));
+        assert!(binned.url().contains("binCount=4"));
+    }
+
+    #[test]
+    fn mock_bins_and_the_loopback_path() {
+        let samples = vec![
+            ArchiveSample {
+                time_ms: 0,
+                value: 1.0,
+                severity: Severity::NoAlarm,
+            },
+            ArchiveSample {
+                time_ms: 500,
+                value: 3.0,
+                severity: Severity::NoAlarm,
+            },
+            ArchiveSample {
+                time_ms: 1_500,
+                value: 10.0,
+                severity: Severity::NoAlarm,
+            },
+        ];
+        let raw = values_in_window(&samples, 0, 2_000, 0);
+        assert_eq!(raw, vec![1.0, 3.0, 10.0]);
+        let binned = values_in_window(&samples, 0, 2_000, 2);
+        assert_eq!(binned, vec![2.0, 10.0]);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let addr = serve_archive_http("[1,2]".into(), Arc::clone(&stop)).unwrap();
+        let query = ArchiveHttpQuery {
+            host: addr.ip().to_string(),
+            https: false,
+            backend: "sf-archiver".into(),
+            channel: "VAC".into(),
+            begin_secs: 0,
+            end_secs: 60,
+            bins: 0,
+            raw_path: "/api/4/events".into(),
+            binned_path: "/api/4/binned".into(),
+        };
+        let body = fetch_archive_http(addr, &query).unwrap();
+        assert_eq!(body, "[1,2]");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }

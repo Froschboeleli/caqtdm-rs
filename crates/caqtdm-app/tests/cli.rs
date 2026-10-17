@@ -94,9 +94,10 @@ fn config_print_attach_and_http() {
     assert!(std::fs::read(&ppm)
         .unwrap()
         .starts_with(b"%!PS-Adobe-3.0\n"));
+    let (year, month, day, hour, minute, second) = caqtdm_paint::local_civil(0);
     assert_eq!(
         caqtdm_app::snapshot_caption("panel.ui", 0),
-        "1970-01-01 00:00:00, panel.ui"
+        format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}, panel.ui")
     );
     let png = dir.join("vacuum.png");
     let shot = execute(&args(&[ui, "-savetoimage", "-o", png.to_str().unwrap()])).unwrap();

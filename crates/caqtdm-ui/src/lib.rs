@@ -12,6 +12,7 @@ mod model;
 mod prc;
 mod search;
 mod ui_xml;
+mod write_ui;
 
 pub use edit::DisplayEditor;
 pub use error::UiError;
@@ -20,6 +21,7 @@ pub use model::{
     assign_geometry, CustomWidget, DisplayFile, LayoutItem, LayoutNode, SourceFormat, WidgetNode,
 };
 pub use search::{fetch_http, fetch_https, SearchPath};
+pub use write_ui::write_ui;
 
 use std::path::Path;
 

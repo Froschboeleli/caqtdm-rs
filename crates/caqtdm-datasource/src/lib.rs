@@ -30,8 +30,9 @@ mod source;
 mod zmtp;
 
 pub use archive::{
-    build_archive_url, fetch_archiver, parse_archive_request, parse_archiver_json, parse_fixture,
-    samples_to_json, serve_archiver, ArchiveRequest, ArchiveSample, ArchiveSource,
+    build_archive_url, fetch_archive_http, fetch_archiver, parse_archive_request,
+    parse_archiver_json, parse_fixture, samples_to_json, serve_archive_http, serve_archiver,
+    values_in_window, ArchiveHttpQuery, ArchiveRequest, ArchiveSample, ArchiveSource,
 };
 #[cfg(feature = "libgmv")]
 pub use archive_sites::{

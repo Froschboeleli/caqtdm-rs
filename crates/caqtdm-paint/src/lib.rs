@@ -7,8 +7,10 @@ use caqtdm_widgets::{
 };
 
 mod font;
+mod print;
 
 pub use font::{glyph_metrics, install_display_font, measure_text};
+pub use print::{print_ps_layout, render_print_pdf, PrintLayout, PRINT_DPI};
 
 /// Pixels kept free on the right of a plot that has a second Y scale.
 const Y2_GUTTER: i32 = 22;
@@ -213,32 +215,10 @@ impl Image {
         })
     }
 
-    /// Raster PostScript. Qt 5 prints with `QPrinter::NativeFormat` and says
-    /// PostScript is no longer supported; this is a page that shows the same
-    /// pixels, not those printer bytes.
-    pub fn to_postscript(&self) -> Vec<u8> {
-        let w = self.width;
-        let h = self.height;
-        let mut out = format!(
-            "%!PS-Adobe-3.0\n%%BoundingBox: 0 0 {w} {h}\n%%Title: caQtDM\ngsave\n{w} {h} scale\n{w} {h} 8 [{w} 0 0 {h} neg 0 {h}]\n{{currentfile 3 string readhexstring pop}} false 3 colorimage\n"
-        )
-        .into_bytes();
-        let mut column = 0;
-        for px in self.rgba.chunks(4) {
-            for byte in &px[..3] {
-                out.extend_from_slice(format!("{byte:02X}").as_bytes());
-                column += 2;
-                if column >= 72 {
-                    out.push(b'\n');
-                    column = 0;
-                }
-            }
-        }
-        if column != 0 {
-            out.push(b'\n');
-        }
-        out.extend_from_slice(b"grestore\nshowpage\n%%EOF\n");
-        out
+    /// PDF page for `printPS`. Qt 5 uses `QPrinter::NativeFormat`, which writes
+    /// PDF when the destination is a file.
+    pub fn to_print_pdf(&self, caption: &str, full_path: &str) -> Vec<u8> {
+        render_print_pdf(self.width, self.height, &self.rgba, caption, full_path)
     }
 }
 

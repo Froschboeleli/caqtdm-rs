@@ -36,9 +36,10 @@ pub use archive::{
 };
 #[cfg(feature = "libgmv")]
 pub use archive_sites::{
-    apply_gmv, decode_gmv_reply, decode_gmv_request, encode_gmv_reply, encode_gmv_request,
-    exact_time, fetch_gmv, gmv_window, hipa_query, hours_from_now, pack_log_time, pro_query,
-    serve_gmv, unpack_log_time, GmvQuery, GmvSample, HIPA_HOST, PRO_HOST,
+    apply_gmv, day_of_year, decode_gmv_reply, decode_gmv_request, encode_gmv_reply,
+    encode_gmv_request, exact_time, fetch_gmv, filter_log_window, gmv_window, hipa_query,
+    hours_from_now, logging_year_code, pack_log_time, prepare_log_call, pro_query, reduce_log,
+    serve_gmv, unpack_log_time, GmvQuery, GmvSample, LogCall, LogClock, HIPA_HOST, PRO_HOST,
 };
 pub use archive_sites::{parse_sf_response, post_sf, serve_sf, sf_query, SfSample};
 pub use bsread::{

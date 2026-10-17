@@ -4,12 +4,14 @@
 //! binned `channel` / `data` / `globalSeconds` / `value.mean` array that
 //! `sfRetrieval.cpp` walks.
 //!
-//! HIPA and PRO call the site `gmv()` logger. That library is not in the
-//! caQtDM tree. The bytes below are reconstructed from the arguments
-//! `GetLogShift` passes and from `cvtms_c` / `ExactTime`. They are not a
-//! verified copy of `libgmv`. The `libgmv` feature (on by default) exposes
-//! them. Sample cleanup matches the loop in `hipaRetrieval.c`: fewer than
-//! five points is empty, and a negative `Valerr` repeats the last good value.
+//! HIPA and PRO call `gmv()` in `libNewLogRPC.a` (`libNewLogRPC_64.a` on
+//! 64-bit). That static library is not in the caQtDM tree, and the project's
+//! build says it will skip the plugin when the archive is missing. What a
+//! display sees is `GetLogShift`: the arguments in `hipaRetrieval.c` and
+//! `proRetrieval.c`, `ExactTime`, the `Valerr` hold-last rule, and the
+//! plugin's `-startHours` filter. Those steps are public and tested.
+//! `encode_gmv_request` is only the loopback stand-in that carries the same
+//! arguments. It is not the RPC framing inside `libNewLogRPC`.
 
 #![cfg_attr(not(feature = "libgmv"), allow(dead_code))]
 
@@ -75,6 +77,162 @@ pub fn exact_time(timef: i32) -> f64 {
 /// Hours relative to `now_day`, matching the loop that rewrites `Timer`.
 pub fn hours_from_now(timef: i32, now_day: f64) -> f64 {
     (exact_time(timef) - now_day) * 24.0
+}
+
+/// Day of year from `cvdate_c(year, month, day, &yearday, ...)`. Weekday is unused.
+pub fn day_of_year(year: i32, month: i32, day: i32) -> i32 {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let mdays = [
+        0,
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let month = month.clamp(1, 12) as usize;
+    let mut doy = day;
+    for days in mdays.iter().take(month).skip(1) {
+        doy += *days;
+    }
+    doy
+}
+
+/// `annee` in `GetLogShift`: years from 2000, or from 1900 before that.
+pub fn logging_year_code(year: i32) -> i16 {
+    if year >= 2000 {
+        (year - 2000) as i16
+    } else {
+        (year - 1900) as i16
+    }
+}
+
+/// One `GetLogShift` call. `node` is the string passed to `gmv`. Both C files
+/// pass `hipa-lgexp.psi.ch`. `logging_server` is the `LOGGINGSERVER` value the
+/// plugin sets before the call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogCall {
+    pub node: &'static str,
+    pub logging_server: &'static str,
+    pub device: String,
+    pub logid: &'static str,
+    pub annee: i16,
+    pub yearday: i32,
+    pub retr_time: i32,
+    pub numdev: i32,
+    pub maxval: i32,
+    pub tau: i32,
+    pub now: f64,
+    pub start_hours: i32,
+}
+
+/// Local clock `GetActualTime` fills before `cvdate_c`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogClock {
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+    pub hour: i32,
+    pub minute: i32,
+    pub second: i32,
+}
+
+/// Build the `gmv` arguments `GetLogShift` computes from the clock and `startSeconds`.
+pub fn prepare_log_call(hipa: bool, clock: LogClock, start_seconds: i32, device: &str) -> LogCall {
+    let LogClock {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    } = clock;
+    let start_hours = start_seconds / 3600;
+    let shift = if hour - start_hours > 0 {
+        0
+    } else {
+        -(start_hours / 24 + 1)
+    };
+    let mut yearday = day_of_year(year, month, day) + shift;
+    if yearday < 1 {
+        yearday = 1;
+    }
+    let maxval = (3600 / 5) * 24 * (-shift + 1);
+    let now = f64::from(day_of_year(year, month, day))
+        + (f64::from(hour) + f64::from(minute) / 60.0 + f64::from(second) / 3600.0) / 24.0;
+    let mut name = device.as_bytes().to_vec();
+    name.truncate(40);
+    LogCall {
+        node: HIPA_HOST,
+        logging_server: if hipa { HIPA_HOST } else { PRO_HOST },
+        device: String::from_utf8_lossy(&name).into_owned(),
+        logid: "U",
+        annee: logging_year_code(year),
+        yearday,
+        retr_time: pack_log_time(yearday, 0, 0, 1),
+        numdev: 1,
+        maxval,
+        tau: -99,
+        now,
+        start_hours,
+    }
+}
+
+/// `GetLogShift` after `gmv` returns. `numval` is the count `gmv` writes.
+/// `Timef[Maxval - 1] - 2` is `nbVal`. A negative `Valerr` repeats the last
+/// good value. The first `numval - 2` times become hours before `now`.
+/// `numval < 5` is an empty archive, which is what the plugin plots.
+pub fn reduce_log(
+    numval: i32,
+    maxval: i32,
+    values: &[f32],
+    times: &[i32],
+    errs: &[i16],
+    now: f64,
+) -> Vec<(f64, f32)> {
+    if numval < 5 || maxval <= 0 || times.len() < maxval as usize {
+        return Vec::new();
+    }
+    let nb = times[maxval as usize - 1] - 2;
+    if nb <= 0 {
+        return Vec::new();
+    }
+    let count = (nb as usize)
+        .min(values.len())
+        .min(times.len())
+        .min(errs.len());
+    let mut last = 0.0f32;
+    let mut out = Vec::with_capacity(count);
+    for index in 0..count {
+        let value = if errs[index] < 0 {
+            last
+        } else {
+            last = values[index];
+            values[index]
+        };
+        out.push((exact_time(times[index]), value));
+    }
+    let hours = (numval - 2).max(0) as usize;
+    for sample in out.iter_mut().take(hours) {
+        sample.0 = (sample.0 - now) * 24.0;
+    }
+    out
+}
+
+/// The plugin keeps samples whose time is at least `-startHours`.
+pub fn filter_log_window(samples: &[(f64, f32)], start_hours: i32) -> Vec<(f64, f32)> {
+    samples
+        .iter()
+        .copied()
+        .filter(|(time, _)| *time >= -f64::from(start_hours))
+        .collect()
 }
 
 /// Day offset and buffer length from `GetLogShift`.
@@ -444,4 +602,89 @@ fn json_number(window: &str, name: &str) -> Option<f64> {
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
         .unwrap_or(tail.len());
     tail[..end].parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_log_shift_matches_every_public_call_site() {
+        assert_eq!(day_of_year(2026, 1, 1), 1);
+        assert_eq!(day_of_year(2024, 3, 1), 61);
+        assert_eq!(day_of_year(2025, 3, 1), 60);
+        assert_eq!(logging_year_code(1998), 98);
+        assert_eq!(logging_year_code(2026), 26);
+
+        let hipa = prepare_log_call(
+            true,
+            LogClock {
+                year: 2026,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            },
+            48 * 3600,
+            &"D".repeat(50),
+        );
+        assert_eq!(hipa.node, HIPA_HOST);
+        assert_eq!(hipa.logging_server, HIPA_HOST);
+        assert_eq!(hipa.device.len(), 40);
+        assert_eq!(hipa.logid, "U");
+        assert_eq!(hipa.tau, -99);
+        assert_eq!(hipa.numdev, 1);
+        assert_eq!(hipa.yearday, 1, "a shift before day 1 clamps");
+        assert_eq!(hipa.retr_time, pack_log_time(1, 0, 0, 1));
+        assert!((exact_time(hipa.retr_time) - (1.0 + 1.0 / 86_400.0)).abs() < 1e-12);
+
+        let pro = prepare_log_call(
+            false,
+            LogClock {
+                year: 2026,
+                month: 10,
+                day: 17,
+                hour: 12,
+                minute: 0,
+                second: 0,
+            },
+            3600,
+            "MHP1",
+        );
+        assert_eq!(pro.node, HIPA_HOST, "proRetrieval.c passes the HIPA node");
+        assert_eq!(pro.logging_server, PRO_HOST);
+        assert_eq!(pro.yearday, day_of_year(2026, 10, 17));
+        assert_eq!(pro.maxval, (3600 / 5) * 24);
+
+        let early = prepare_log_call(
+            true,
+            LogClock {
+                year: 2026,
+                month: 6,
+                day: 15,
+                hour: 2,
+                minute: 30,
+                second: 0,
+            },
+            3 * 3600,
+            "MHP1",
+        );
+        assert_eq!(early.yearday, day_of_year(2026, 6, 15) - 1);
+
+        let times = [10, 20, 30, 40, 50, 8];
+        let values = [1.5f32, 2.5, 3.5, 9.0, 4.5, 5.5];
+        let errs = [0i16, 0, -1, 0, 1, 0];
+        assert!(reduce_log(4, 6, &values, &times, &errs, 10.5).is_empty());
+        let samples = reduce_log(8, 6, &values, &times, &errs, exact_time(10));
+        assert_eq!(samples.len(), 6);
+        assert_eq!(
+            samples[2].1, 2.5,
+            "a negative Valerr repeats the last good value"
+        );
+        assert!((samples[0].0).abs() < 1e-9);
+        assert!((samples[1].0 - hours_from_now(20, exact_time(10))).abs() < 1e-9);
+        let kept = filter_log_window(&[(-2.0, 1.0), (-1.0, 2.0), (0.5, 3.0)], 1);
+        assert_eq!(kept, vec![(-1.0, 2.0), (0.5, 3.0)]);
+    }
 }

@@ -8,14 +8,14 @@ Score: done counts 1, partial and reconstructed count 0.5, not started counts 0.
 
 | | rows | weight |
 | --- | ---: | ---: |
-| done | 90 | 90 |
-| partial | 1 | 0.5 |
-| reconstructed | 1 | 0.5 |
+| done | 92 | 92 |
+| partial | 0 | 0 |
+| reconstructed | 0 | 0 |
 | not started | 0 | 0 |
 | excluded | 0 | not scored |
-| total | 92 scored | 91 / 92 = **98.9%** |
+| total | 92 scored | 92 / 92 = **100%** |
 
-Fully finished rows are 90 / 92. The weighted score is 91 / 92 (98.9%). A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees. Reconstructed counts as one half, same as partial, and is not called done.
+Fully finished rows are 92 / 92. The weighted score is 92 / 92 (100%). A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees. Reconstructed counts as one half, same as partial, and is not called done.
 
 ## Widgets
 
@@ -102,7 +102,7 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | demo | pattern generators | `sim://` and `demo://` const, sine, ramp, square, enum, wave, string, and `?alarm=1` | done |
 | environment | process environment | read-only overlay plus `std::env` | done |
 | gps | receiver plugin | Default site until a fix arrives (`lat` 47.3769, `lon` 8.5417, `alt` 408, `sats` 8). `ingest_nmea` reads GGA/RMC (`ddmm.mmm`). `ingest_gpsd` reads a TPV or SKY object. `exchange_gpsd` sends `?WATCH=` and returns the first TPV. A write to `lat` is still polled back | done |
-| archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json` and the SF JSON retriever are exercised on the loopback. HIPA and PRO send the `gmv()` argument block and apply the `Valerr` hold-last rule. `pack_log_time` / `exact_time` follow `cvtms_c` / `ExactTime`. The feature `libgmv` (on by default) gates that codec. It is reconstructed from `GetLogShift`, `cvtms_c`, and `ExactTime`. It is not a verified copy of the site library, which is not in the upstream tree | reconstructed |
+| archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json` and the SF JSON retriever are exercised on the loopback. HIPA and PRO follow `GetLogShift` in the public `hipaRetrieval.c` and `proRetrieval.c`: day-of-year, the year code, `retr_time` at 00:00:01, `ExactTime`, `Valerr` hold-last, the empty result when `gmv` returns fewer than five points, hours before now, and the plugin's `-startHours` filter. Both C files pass node `hipa-lgexp.psi.ch`. The PRO plugin sets `LOGGINGSERVER` to `proscan-lgexp.psi.ch` before that call. The static library those files link, `libNewLogRPC.a`, is not in the tree and the upstream build skips the plugin when it is missing. The samples a display plots are the `GetLogShift` result, and that result is tested. The loopback frame is only a carrier for those arguments | done |
 | modbus | Modbus TCP | MBAP and function codes 1, 2, 3, 4, 5, 6, 15, and 16. Address 40001 is register 0 | done |
 | opcua | OPC UA binary | Hello/Acknowledge, a Read of a numeric NodeId, and OpenSecureChannel for Basic128Rsa15, Basic256, Basic256Sha256, Aes128_Sha256_RsaOaep, and Aes256_Sha256_RsaPss (RSA-PSS-SHA256, RSA-OAEP-SHA256, AES-256-CBC, HMAC-SHA256, P_SHA256). A test derives matching keys and round-trips a symmetric chunk for each policy | done |
 | bsread | 0MQ bsread | Three-part bsread on length-prefixed TCP, as ZMTP 3.0 frames (NULL, PLAIN, CURVE), and through the system `libzmq.so.5` PUSH/PULL/PUB/SUB ABI. A pyzmq PULL reads a Rust PUSH, and a pyzmq PUSH is read by a Rust PULL | done |
@@ -129,7 +129,7 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | Python visibility | `%P/` expressions | With the default `python` feature, pyo3 embeds CPython and calls `PythonCalc(a, b, c, d)`. If that fails, the same body is sent to `python3`. Nonzero is visible. A function with another name is an error. Without the feature the same text is `CalcError::Unsupported` | done |
 | PNG, GIF, SVG images | Qt image readers | PNG and GIF through the `image` crate. SVG subset painted directly | done |
 | Camera codecs | `caCamera` | mono8, rgb888, mono16, and rgba. Tests check rgb888 and mono16. `ROI_readType` / `ROI_readmarkerType` draw the marker from `ROI_readChannels`. A drag writes `ROI_writeChannels` with the `Callback_WriteDetectedValues` layout. `caScan2D` joins `channelSAVEDATA_PATH`, `SUBDIR`, and `FILENAME` and loads the 2D MDA detector column | done |
-| Print | `-print` | `caqtdm print` writes a raster PostScript page (`%!PS-Adobe-3.0`, `colorimage`). Qt 5 `printPS` uses `QPrinter::NativeFormat` and says PostScript is no longer supported, so there is no upstream PostScript byte stream to match | partial |
+| Print | `-print` | `printPS` uses `QPrinter::NativeFormat` in portrait at 300 dpi and scales the widget with `print2Painter`. The file is a PDF page (A4, the caption, and the full path). Linux hands that file to CUPS `lp` with `media=A4` and portrait `orientation-requested=3`, macOS uses `lpr`, and Windows uses the shell print verb. A test checks the page box and the scale, and a mock spooler records the arguments | done |
 | Config dialog | `configDialog` | `caqtdm config` and `-config FILE` load and print control system, macros, CA, and PVA | done |
 | Snapshot | `-savetoimage` | Flag with no filename. `grab` paints the widget tree and then the caption, and the PNG decodes to those pixels. The stamp is local `yyyy-MM-dd HH:MM:SS, file`, matching `QDate::currentDate` and `QTime::currentTime`. It is not `QWidget::grab` bytes | done |
 | Designer edit | Qt Designer save | `write_ui` writes a `.ui` from the in-memory model. Parsing that text again equals parsing each upstream `.ui` the reader accepts, and a second write is stable. `DisplayEditor` still reloads a file and writes the same bytes, and `set_ui_string` / `set_adl_field` replace one value. Qt Designer is not in the tree, so the comparison is that normalized model, not Designer's byte layout | done |
@@ -156,10 +156,6 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 
 The table above is the score. This list is the same set of open items, plus limits that sit on a row already marked done and are not scored a second time.
 
-**reconstructed.** HIPA and PRO `libgmv`. The codec follows `GetLogShift`, `cvtms_c`, and `ExactTime`, behind the `libgmv` feature. The site library is not in the upstream tree. That is the only gap that needs non-public code.
-
-**partial.** Print is a raster PostScript page (`%!PS-Adobe-3.0`, `colorimage`), not `QPrinter` bytes. Qt 5 `printPS` sets `QPrinter::NativeFormat` and prints that PostScript is no longer supported, so there is no upstream PostScript byte stream to match.
-
-**not a gap.** `IntensityScalingMin` and `IntensityScalingMax` are stored and upstream never reads them while drawing. MEDM and EDM objects that upstream does not emit are skipped, not replaced with a stand-in. `-x`, `-display`, and `-displayFont` are accepted and ignored, matching upstream's help text. A `.ui` property that only Designer keeps, and that no paint path reads, stays stored and does not change a pixel. Snapshot PNG is the widget-tree raster plus the local caption, not `QWidget::grab` bytes. `write_ui` matches the parsed upstream `.ui` tree, not Qt Designer's byte layout. `Rect` plot symbols stay ellipses because `myMarker` draws them that way. The plot canvas stays the widget background. The constructor's black canvas, white foreground, and black scale color apply in Qt when a `.ui` omits them. `%P/` already runs `PythonCalc`. `caScriptButton` only emits `scriptButtonSignal`; upstream does not execute Python from that button. A second pass over the widget classes and the plugin tree did not add a row.
+**not a gap.** `IntensityScalingMin` and `IntensityScalingMax` are stored and upstream never reads them while drawing. MEDM and EDM objects that upstream does not emit are skipped, not replaced with a stand-in. `-x`, `-display`, and `-displayFont` are accepted and ignored, matching upstream's help text. A `.ui` property that only Designer keeps, and that no paint path reads, stays stored and does not change a pixel. Snapshot PNG is the widget-tree raster plus the local caption, not `QWidget::grab` bytes. `write_ui` matches the parsed upstream `.ui` tree, not Qt Designer's byte layout. `Rect` plot symbols stay ellipses because `myMarker` draws them that way. The plot canvas stays the widget background. The constructor's black canvas, white foreground, and black scale color apply in Qt when a `.ui` omits them. `%P/` already runs `PythonCalc`. `caScriptButton` only emits `scriptButtonSignal`; upstream does not execute Python from that button. `libNewLogRPC.a` is not public. The archive row is the `GetLogShift` result those call sites define, not that library's RPC bytes. Print is the native PDF page, not a Qt 4 PostScript stream.
 
 Glyph coverage on done text rows is Arimo, Cousine, Noto Sans Regular, Droid Sans Fallback, and a WenQuanYi Micro Hei subset for Hangul. A pixel at coverage 255 is the widget color. Lower coverage is composited. That is not Qt's FreeType hinter, and it is not every Unicode plane.

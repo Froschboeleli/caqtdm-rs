@@ -185,14 +185,33 @@ fn paint_display(options: &Options) -> Result<String, String> {
         None
     };
     let image = caqtdm_paint::grab(&visuals, width, height, caption.as_deref());
+    if options.command == "print" {
+        let short = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("display");
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|dur| dur.as_secs() as i64)
+            .unwrap_or(0);
+        let bytes = image.to_print_pdf(&snapshot_caption(short, unix), &path.display().to_string());
+        let dest = options
+            .output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("caQtDM.ps"));
+        std::fs::write(&dest, bytes).map_err(|e| e.to_string())?;
+        let via = spool_pdf(&dest)?;
+        let note = via
+            .map(|program| format!(" via {program}"))
+            .unwrap_or_default();
+        return Ok(format!(
+            "wrote {} {}x{}{note}",
+            dest.display(),
+            image.width,
+            image.height
+        ));
+    }
     let (bytes, dest) = match options.command.as_str() {
-        "print" => (
-            image.to_postscript(),
-            options
-                .output
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("caQtDM.ps")),
-        ),
         "snapshot" => {
             let name =
                 std::env::var("CAQTDM_SCREENSHOT_NAME").unwrap_or_else(|_| "caQtDM".to_string());
@@ -746,6 +765,70 @@ fn config_text(options: &Options) -> String {
     text
 }
 
+/// Program and arguments for the native print path. Linux uses CUPS `lp`,
+/// macOS uses `lpr`, and Windows uses the shell print verb. `CAQTDM_PRINT_SPOOLER`
+/// replaces the program so a test can stand in for the spooler.
+pub fn spool_command(pdf: &std::path::Path) -> (String, Vec<String>) {
+    if let Ok(custom) = std::env::var("CAQTDM_PRINT_SPOOLER") {
+        if !custom.is_empty() {
+            return (custom, portrait_spool_args(pdf));
+        }
+    }
+    if cfg!(windows) {
+        (
+            "powershell.exe".into(),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                format!("Start-Process -FilePath '{}' -Verb Print", pdf.display()),
+            ],
+        )
+    } else if cfg!(target_os = "macos") {
+        ("lpr".into(), portrait_spool_args(pdf))
+    } else {
+        ("lp".into(), portrait_spool_args(pdf))
+    }
+}
+
+fn portrait_spool_args(pdf: &std::path::Path) -> Vec<String> {
+    vec![
+        "-o".into(),
+        "media=A4".into(),
+        "-o".into(),
+        "orientation-requested=3".into(),
+        pdf.display().to_string(),
+    ]
+}
+
+fn spool_pdf(pdf: &std::path::Path) -> Result<Option<String>, String> {
+    let (program, args) = spool_command(pdf);
+    let requested = std::env::var("CAQTDM_PRINT_SPOOLER")
+        .ok()
+        .is_some_and(|text| !text.is_empty());
+    if !requested && !program_on_path(&program) {
+        return Ok(None);
+    }
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .status()
+        .map_err(|err| format!("print spooler {program}: {err}"))?;
+    if !status.success() {
+        return Err(format!("print spooler {program} exited {status}"));
+    }
+    Ok(Some(program))
+}
+
+fn program_on_path(program: &str) -> bool {
+    let path = std::path::Path::new(program);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| dir.join(program).is_file())
+}
+
 /// `yyyy-MM-dd HH:MM:SS, file`, the stamp `save_graphics` paints on a snapshot.
 /// `QDate::currentDate` and `QTime::currentTime` are the process local time.
 pub fn snapshot_caption(file: &str, unix_secs: i64) -> String {
@@ -763,7 +846,7 @@ Commands:
   validate   parse a display and expand includes
   convert    list widgets and channels
   paint      write a PPM rendering
-  print      write a PostScript page (caQtDM.ps unless -o is set)
+  print      write a PDF page and hand it to lp, lpr, or the Windows print verb
   snapshot   write a PNG (caQtDM.png, or $CAQTDM_SCREENSHOT_NAME.png)
   widgets    list widget classes the runtime draws
   config     print the operator settings
@@ -805,7 +888,7 @@ Options:
   -web_allow_insecure_cashell_commands
   -novnc              RFB 3.8 server and the same bytes over a WebSocket
   -novnc_readonly     drop pointer and key events (requires -novnc)
-  -print              write PostScript and exit
+  -print              write a portrait A4 PDF and exit (caQtDM.ps unless -o is set)
 "
     .to_string()
 }

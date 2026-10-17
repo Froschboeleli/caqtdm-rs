@@ -91,9 +91,31 @@ fn config_print_attach_and_http() {
     ]))
     .unwrap();
     assert!(printed.contains("wrote"));
-    assert!(std::fs::read(&ppm)
-        .unwrap()
-        .starts_with(b"%!PS-Adobe-3.0\n"));
+    let page = std::fs::read(&ppm).unwrap();
+    assert!(page.starts_with(b"%PDF-1.4\n"));
+    let text = String::from_utf8_lossy(&page);
+    assert!(text.contains("/MediaBox [0 0 595.28 841.89]"));
+    let log = dir.join("spool.log");
+    let script = dir.join("spool.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAQTDM_SPOOL_LOG\"\n",
+    )
+    .unwrap();
+    let _ = std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&script)
+        .status();
+    std::env::set_var("CAQTDM_PRINT_SPOOLER", script.as_os_str());
+    std::env::set_var("CAQTDM_SPOOL_LOG", log.as_os_str());
+    let spooled = execute(&args(&["print", ui, "-o", ppm.to_str().unwrap()])).unwrap();
+    std::env::remove_var("CAQTDM_PRINT_SPOOLER");
+    std::env::remove_var("CAQTDM_SPOOL_LOG");
+    assert!(spooled.contains("via"));
+    let recorded = std::fs::read_to_string(&log).unwrap();
+    assert!(recorded.contains("media=A4"));
+    assert!(recorded.contains("orientation-requested=3"));
+    assert!(recorded.contains(ppm.to_str().unwrap()));
     let (year, month, day, hour, minute, second) = caqtdm_paint::local_civil(0);
     assert_eq!(
         caqtdm_app::snapshot_caption("panel.ui", 0),

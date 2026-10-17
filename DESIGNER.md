@@ -20,3 +20,17 @@ install_designer_plugin(DesignerPlugin {
 `designer_plugins()` returns the catalog. Unknown classes with no registration stay `VisualKind::Unknown` and are not given a stand-in widget.
 
 This is not a loader for `libqtcontrols_monitors_plugin.so`. The paint path for a registered class is covered by `designer_plugin_paints_as_the_registered_kind`.
+
+## Editing a display file
+
+`DisplayEditor` is the stand-in for saving a file. It is not Qt Designer, and Qt Designer is not in the upstream tree. The caQtDM viewer does not write `.ui` either.
+
+```rust
+use caqtdm_ui::DisplayEditor;
+
+let mut editor = DisplayEditor::from_bytes(&bytes).unwrap();
+assert_eq!(editor.save(), bytes);
+editor.set_ui_string("calabel", "text", "kept").unwrap();
+```
+
+An unedited `save` returns the input bytes. `set_ui_string` replaces the `<string>` of one property on one widget and leaves the bytes before and after that value. `set_adl_field` does the same for an ADL `field="..."` attribute. Upstream `caQtDM_Tests/test.ui` round-trips, and an inline MEDM file does too. A full Qt Designer resave is a different writer and is not reproduced.

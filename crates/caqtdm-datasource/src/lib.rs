@@ -33,12 +33,13 @@ pub use archive::{
     build_archive_url, fetch_archiver, parse_archive_request, parse_archiver_json, parse_fixture,
     samples_to_json, serve_archiver, ArchiveRequest, ArchiveSample, ArchiveSource,
 };
+#[cfg(feature = "libgmv")]
 pub use archive_sites::{
     apply_gmv, decode_gmv_reply, decode_gmv_request, encode_gmv_reply, encode_gmv_request,
-    exact_time, fetch_gmv, gmv_window, hipa_query, hours_from_now, pack_log_time,
-    parse_sf_response, post_sf, pro_query, serve_gmv, serve_sf, sf_query, unpack_log_time,
-    GmvQuery, GmvSample, SfSample, HIPA_HOST, PRO_HOST,
+    exact_time, fetch_gmv, gmv_window, hipa_query, hours_from_now, pack_log_time, pro_query,
+    serve_gmv, unpack_log_time, GmvQuery, GmvSample, HIPA_HOST, PRO_HOST,
 };
+pub use archive_sites::{parse_sf_response, post_sf, serve_sf, sf_query, SfSample};
 pub use bsread::{
     bsread_parts, decode_bsread, decode_bsread_parts, encode_bsread, fetch_bsread, serve_bsread,
     BsMessage, BsreadSource,

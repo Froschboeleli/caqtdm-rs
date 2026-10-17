@@ -2,19 +2,20 @@
 
 Upstream is [caQtDM](https://github.com/caqtdm/caqtdm) at commit `87607049b9a9630fad8bef55656293509803f007` (see `UPSTREAM_REV`). A local clone lives in `upstream/` and is gitignored.
 
-This checklist is the contract for the rewrite. A row is **done** when the Rust code covers the behavior a display author relies on and a test or sample exercises it. **partial** means a usable subset is implemented and the gaps are named. **not started** means there is no runtime behavior yet.
+This checklist is the contract for the rewrite. A row is **done** when the Rust code covers the behavior a display author relies on and a test or sample exercises it. **partial** means a usable subset is implemented and the gaps are named. **reconstructed** counts the same as partial: the behavior is implemented from public calls and comments, and it is not verified against code that is absent from the upstream tree. **not started** means there is no runtime behavior yet.
 
-Score: done counts 1, partial counts 0.5, not started counts 0. **excluded** rows are left out of the total. An exclusion is a behavior this rewrite will not grow: it is named in the row, with the reason.
+Score: done counts 1, partial and reconstructed count 0.5, not started counts 0. **excluded** rows are left out of the total. An exclusion is a behavior this rewrite will not grow: it is named in the row, with the reason.
 
 | | rows | weight |
 | --- | ---: | ---: |
-| done | 86 | 86 |
-| partial | 0 | 0 |
-| not started | 0 | 0 |
+| done | 84 | 84 |
+| partial | 5 | 2.5 |
+| reconstructed | 1 | 0.5 |
+| not started | 2 | 0 |
 | excluded | 0 | not scored |
-| total | 86 scored | 86 / 86 = **100%** |
+| total | 92 scored | 87 / 92 = **94.6%** |
 
-Fully finished rows are 86 / 86 (100%). A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees.
+Fully finished rows are 84 / 92. The weighted score is 87 / 92 (94.6%). A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees. Reconstructed counts as one half, same as partial, and is not called done.
 
 ## Widgets
 
@@ -50,14 +51,14 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caMultiLineString | Label text, including line breaks | done |
 | caThermo | Vertical fraction bar. Channel warning and alarm limits paint yellow and red bands. The bar pixel and a red band pixel are checked | done |
 | caMeter | Fraction drives a needle. A zero fraction points left, and that pixel is checked | done |
-| caCartesianPlot | Traces from `channel`, `channels`, and `channels_1`..`channels_6`. Zoom windows both axes. `YAxisType` log10 places the sample with log10. The second curve uses `YaxisLimits` pair 2 and a right-hand tick ruler (top, middle, bottom, and a label). Paint tests check the log pixel, the second-curve pixel, and a tick pixel | done |
+| caCartesianPlot | Traces from `channel`, `channels`, and `channels_1`..`channels_6`. Zoom windows both axes. `YAxisType` log10 places the sample with log10. The second curve uses `YaxisLimits` pair 2 and a right-hand tick ruler. `Style_N`, `grid`, `gridColor`, `XaxisEnabled`, `YaxisEnabled`, and `scaleColor` change the picture. User or Channel `XaxisLimits` place the sample index in data coordinates. `XaxisType` log10 does the same on a log axis. Omitted `color_N` uses the constructor palette (white, red, yellow, blue, green, magenta). Paint tests check the log pixel, the second curve, a tick, the grid, a user X limit, and log10 X | done |
 | caStripPlot | Same traces, log scale, and the right-hand second Y ruler. `timeSpan` keeps the last N samples, and a paint test shows only that window | done |
 | caByte | Read-only bit cells | done |
 | caTable | One column per channel (`channel`, `channels`, `channels_1`..`channels_6`). A two-channel scalar row is asserted | done |
 | caWaveTable | `numberOfRows` by `numberOfColumns`, row-major. A 2x2 grid with user precision 0 is asserted | done |
-| caCamera | `channelData` bytes as mono8, rgb888, mono16, or rgba, sized by width and height. rgb888 and mono16 are tested | done |
+| caCamera | `channelData` bytes as mono8, rgb888, mono16, or rgba, sized by width and height. rgb888 and mono16 are tested. A gray frame is recolored by `ColorMap`. An RGB frame is left alone | done |
 | caCalc | EPICS-style calc on channels A-L. `%P/` runs `PythonCalc(a, b, c, d)` when the `python` feature is on | done |
-| caWaterfallPlot | Last N waveforms (`NumberOfTraces`, capped at 64). Intensity min/max color the row from blue to red, and those pixels are checked | done |
+| caWaterfallPlot | Last N waveforms (`NumberOfTraces`, capped at 64). `ColorMap` is grey, wavelength, hot, heat, jet, or custom stops. Heat and grey pixels are checked. `IntensityScalingMin` / `IntensityScalingMax` are stored; upstream never reads them while drawing | done |
 | caScan2D | A waveform that matches `channelWidth` by `channelHeight` is a grayscale image. Otherwise a plot | done |
 | caLineDraw | History samples as a polyline scaled into the widget. `frameLineWidth` sets the pen, and alarm color mode uses the severity color. A width-3 red pixel is checked | done |
 | caAlarmTree | Groups are tree nodes. Channel rows show the live severity. `ToggleGroup` folds a group and hides its descendants | done |
@@ -101,7 +102,7 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | demo | pattern generators | `sim://` and `demo://` const, sine, ramp, square, enum, wave, string, and `?alarm=1` | done |
 | environment | process environment | read-only overlay plus `std::env` | done |
 | gps | receiver plugin | Default site until a fix arrives (`lat` 47.3769, `lon` 8.5417, `alt` 408, `sats` 8). `ingest_nmea` reads GGA/RMC (`ddmm.mmm`). `ingest_gpsd` reads a TPV or SKY object. `exchange_gpsd` sends `?WATCH=` and returns the first TPV. A write to `lat` is still polled back | done |
-| archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json`. HIPA and PRO send the `gmv()` argument block (`hipa-lgexp.psi.ch`, `proscan-lgexp.psi.ch`) and apply the `Valerr` hold-last rule. `pack_log_time` / `exact_time` follow the `cvtms_c` / `ExactTime` calls (seconds from the start of the year; milliseconds stay 0). SF posts the plugin JSON and reads `globalSeconds` / `value.mean`. The byte layout is reconstructed from those calls. `libgmv` itself is not in the upstream tree | done |
+| archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json` and the SF JSON retriever are exercised on the loopback. HIPA and PRO send the `gmv()` argument block and apply the `Valerr` hold-last rule. `pack_log_time` / `exact_time` follow `cvtms_c` / `ExactTime`. The feature `libgmv` (on by default) gates that codec. It is reconstructed from `GetLogShift`, `cvtms_c`, and `ExactTime`. It is not a verified copy of the site library, which is not in the upstream tree | reconstructed |
 | modbus | Modbus TCP | MBAP and function codes 1, 2, 3, 4, 5, 6, 15, and 16. Address 40001 is register 0 | done |
 | opcua | OPC UA binary | Hello/Acknowledge, a Read of a numeric NodeId, and OpenSecureChannel for Basic128Rsa15, Basic256, Basic256Sha256, Aes128_Sha256_RsaOaep, and Aes256_Sha256_RsaPss (RSA-PSS-SHA256, RSA-OAEP-SHA256, AES-256-CBC, HMAC-SHA256, P_SHA256). A test derives matching keys and round-trips a symmetric chunk for each policy | done |
 | bsread | 0MQ bsread | Three-part bsread on length-prefixed TCP, as ZMTP 3.0 frames (NULL, PLAIN, CURVE), and through the system `libzmq.so.5` PUSH/PULL/PUB/SUB ABI. A pyzmq PULL reads a Rust PUSH, and a pyzmq PUSH is read by a Rust PULL | done |
@@ -116,7 +117,7 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | --- | --- | --- | --- |
 | Desktop viewer | Qt `caQtDM_Viewer` | egui/eframe: paint, click, drag slider, tabs, menus, related files, macro reload. `action_for` is what the pointer handler calls. A test drives a slider drag, a plot click, a plot drag (both zoom axes), a tab, a menu row, and hit-testing | done |
 | Headless render | Qt grab / print | PPM rasterizer. Text uses fontdue. Arimo and Cousine are the selected faces. Noto Sans, Droid Sans Fallback, and a WenQuanYi Micro Hei subset supply Greek, Cyrillic, CJK, and Hangul when the selected face has no glyph. A fully covered pixel is the widget color. Partial coverage is composited onto the pixel already there. Plot zoom, log scale, and the upstream `graphics.edl` pixels are tested | done |
-| CLI | `-display`, `-macro`, and many server flags | The upstream flags, including `-x`, `-display`, and `-displayFont` (each accepted and ignored, matching upstream's help text), `-?`, `-slave_server`, `-novnc_readonly` (requires `-novnc`), `-host` (a non-address is ignored), and `-server_port` 65535 mapping the web port to 65534. The display file is the positional argument | done |
+| CLI | `-display`, `-macro`, and many server flags | The upstream flags, including `-x`, `-display`, and `-displayFont` (each accepted and ignored), `-?`, `-slave_server`, `-novnc_readonly` (requires `-novnc`), `-host` (a non-address is ignored), and `-server_port` 65535 mapping the web port to 65534. `-savetoimage` takes no filename and writes PNG. `-print` writes PostScript. `-o` sets the path. The display file is the positional argument | done |
 | Macro file | `-macrodefs` | one `KEY=VALUE` per line, then `-macro` overrides | done |
 | Shell policy | runs commands, web flag can allow them | dry-run unless `--execute-shell`. `caScriptButton` never runs | done |
 | HTTP / WebSocket | `-server`, web launcher | `GET /` and one RFC 6455 text frame on a local port. `-novnc` also speaks RFB 3.8 (raw encoding, security None) on TCP and the same bytes in WebSocket binary frames. `-novnc_readonly` drops pointer and key events. A test reads a red pixel off the RFB socket and checks the version string `RFB 003.008` | done |
@@ -128,8 +129,14 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | Python visibility | `%P/` expressions | With the default `python` feature, pyo3 embeds CPython and calls `PythonCalc(a, b, c, d)`. If that fails, the same body is sent to `python3`. Nonzero is visible. A function with another name is an error. Without the feature the same text is `CalcError::Unsupported` | done |
 | PNG, GIF, SVG images | Qt image readers | PNG and GIF through the `image` crate. SVG subset painted directly | done |
 | Camera codecs | `caCamera` | mono8, rgb888, mono16, and rgba. Tests check rgb888 and mono16. `ROI_readType` / `ROI_readmarkerType` draw the marker from `ROI_readChannels`. A drag writes `ROI_writeChannels` with the `Callback_WriteDetectedValues` layout. `caScan2D` joins `channelSAVEDATA_PATH`, `SUBDIR`, and `FILENAME` and loads the 2D MDA detector column | done |
-| Print | `-print` | `caqtdm print` writes the same PPM as `paint` | done |
+| Print | `-print` | `caqtdm print` writes a raster PostScript page (`%!PS-Adobe-3.0`, `colorimage`). Qt 5 `printPS` uses `QPrinter::NativeFormat` and says PostScript is no longer supported, so there is no upstream PostScript byte stream to match | partial |
 | Config dialog | `configDialog` | `caqtdm config` and `-config FILE` load and print control system, macros, CA, and PVA | done |
+| Snapshot | `-savetoimage` | Flag with no filename. Writes PNG (`CAQTDM_SCREENSHOT_NAME` or `caQtDM.png`) and stamps `yyyy-MM-dd HH:MM:SS, file` at the top. The stamp is UTC. The PNG is not `QWidget::grab` bytes | partial |
+| Designer edit | Qt Designer save | `DisplayEditor` reloads a `.ui` or `.adl` and writes the same bytes back. `set_ui_string` / `set_adl_field` replace one value and leave the surrounding bytes. Upstream `test.ui` round-trips. Qt Designer is not in the tree, and the viewer does not write `.ui`, so a Designer resave is not compared | partial |
+| Plot symbols | `QwtSymbol` | `symbol_N` draws a geometric mark. `Rect` is an ellipse, matching `myMarker`. Size is `max(2, round(height * symbolResizeFactor / 50))`. A cross, that ellipse, and the empty diagonal are checked. The mark is not Qwt's antialiased pixmap | partial |
+| Time axis | `XaxisType::time` | A UTC `hh:mm:ss` stamp is drawn under the axis and a pixel test sees it. Upstream uses Qt local time and `hh:mm:ss` plus `dd-MM-yy` | partial |
+| Plot channels | X and Y vectors, `plotMode`, count, trigger, erase | Scalar history is the Y sample and the index is X. Separate X and Y channels, `PlotNPointsAndStop`, `countNumOrChannel`, `triggerChannel`, and `eraseChannel` are not applied | not started |
+| Strip time base | `refreshRate`, `period`, `XaxisSyncGroup`, archive backfill | `timeSpan` keeps the last N samples. The strip does not poll on `refreshRate`, share an X group, or backfill from the archive | not started |
 
 ## Samples
 
@@ -145,12 +152,16 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | upstream `test.ui` | macro substitution painted in the label color |
 | upstream `prcshowcase.prc` | led, slider, thermo, text entry, menu, choice, toggle, comment color |
 
-## What is still narrower than upstream
+## Remaining differences
 
-These limits apply to rows marked done:
+The table above is the score. This list is the same set of open items, plus limits that sit on a row already marked done and are not scored a second time.
 
-- The HIPA/PRO byte layout is reconstructed from `GetLogShift`, `cvtms_c`, and `ExactTime`. The site `libgmv` library is not in the upstream tree, so the bytes are not a copy of that library. That is the gap that needs non-public code.
-- Glyph coverage is Arimo, Cousine, Noto Sans Regular, Droid Sans Fallback, and a WenQuanYi Micro Hei subset for Hangul (syllables, jamo, and compatibility jamo). A pixel at coverage 255 is the exact widget color. Lower coverage is composited. That is grayscale edges, not Qt's FreeType hinter, and it is not every Unicode plane.
-- `-x`, `-display`, and `-displayFont` match upstream: each flag is accepted, its argument is consumed when it has one, and the display does not change. The file to open is the positional path. `install_display_font` still selects a face for tests.
-- MEDM and EDM objects that upstream does not emit are skipped. They are not turned into a stand-in widget.
-- Qt `.ui` properties are stored. The ones that change the picture or a write in the tests include the widget-row properties, `trueColor` / `falseColor` / `undefinedColor`, `trueValue` / `falseValue`, `unitsEnabled`, `logarithmicScale`, `alignment`, `LegendEnabled`, `YAxisScaling`, `YaxisLimitsMin_N` / `YaxisLimitsMax_N`, `color_N`, `lineSize`, `lineColor`, `borderColor`, `frameColor`, `lineWidth`, the ROI read and write properties, and the scan save-path channels. A property upstream only keeps for Designer, and never consults while drawing, stays stored and does not change the picture.
+**reconstructed.** HIPA and PRO `libgmv`. The codec follows `GetLogShift`, `cvtms_c`, and `ExactTime`, behind the `libgmv` feature. The site library is not in the upstream tree. That is the only gap that needs non-public code.
+
+**partial.** Print is a raster PostScript page, not `QPrinter` bytes. Snapshot PNG is not `QWidget::grab`, and the caption is UTC. `DisplayEditor` preserves bytes around one edited property; it is not Qt Designer's writer. Plot symbols are geometric, and `Rect` follows `myMarker` by drawing an ellipse; they are not Qwt's antialiased marks. A time axis stamps UTC `hh:mm:ss` and does not draw Qt's local `dd-MM-yy` line. The cartesian grid is a 3-on, 2-off dash, not Qt's `DashLine` pixmap. The plot canvas stays the widget background. The constructor's black canvas, white foreground, and black scale color apply in Qt when a `.ui` omits them.
+
+**not started.** A cartesian trace does not yet take a separate X channel, `plotMode`, `countNumOrChannel`, `triggerChannel`, or `eraseChannel`. A strip plot does not honor `refreshRate`, `period`, `XaxisSyncGroup`, or an archive backfill. `timeSpan` does limit the window.
+
+**not a gap.** `IntensityScalingMin` and `IntensityScalingMax` are stored and upstream never reads them while drawing. MEDM and EDM objects that upstream does not emit are skipped, not replaced with a stand-in. `-x`, `-display`, and `-displayFont` are accepted and ignored, matching upstream's help text. A `.ui` property that only Designer keeps, and that no paint path reads, stays stored and does not change a pixel.
+
+Glyph coverage on done text rows is Arimo, Cousine, Noto Sans Regular, Droid Sans Fallback, and a WenQuanYi Micro Hei subset for Hangul. A pixel at coverage 255 is the widget color. Lower coverage is composited. That is not Qt's FreeType hinter, and it is not every Unicode plane.

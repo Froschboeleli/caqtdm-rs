@@ -764,6 +764,7 @@ dependencies = [
  "caqtdm-core",
  "caqtdm-widgets",
  "fontdue",
+ "image",
 ]
 
 [[package]]

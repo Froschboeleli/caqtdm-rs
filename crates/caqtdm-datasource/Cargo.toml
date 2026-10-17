@@ -7,6 +7,12 @@ authors.workspace = true
 rust-version.workspace = true
 description = "Control-system plugins for the caQtDM Rust rewrite"
 
+[features]
+default = ["libgmv"]
+# Reconstructed HIPA/PRO logger. The site libgmv library is not in the
+# upstream tree, so this codec is not a verified copy of that library.
+libgmv = []
+
 [dependencies]
 caqtdm-core.workspace = true
 aes = "0.8"

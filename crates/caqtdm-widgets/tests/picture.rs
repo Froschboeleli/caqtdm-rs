@@ -293,3 +293,248 @@ fn border_color_and_line_width_change_the_outline() {
         "interior stays the background"
     );
 }
+
+fn plot_with(style: &str, grid: bool, show_x: bool) -> caqtdm_paint::Image {
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(5.0));
+    let mut plot = WidgetNode::new("caCartesianPlot", "plot");
+    plot.rect = Rect::new(0, 0, 80, 60);
+    plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("Style_1", PropValue::Enum(style.into()));
+    plot.set_prop("grid", PropValue::Bool(grid));
+    plot.set_prop("XaxisEnabled", PropValue::Bool(show_x));
+    plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
+    plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let drawn = open(root, intern)
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap();
+    paint(&[drawn])
+}
+
+#[test]
+fn curve_style_grid_and_x_axis_change_the_plot() {
+    let lines = plot_with("Lines", true, true);
+    let dots = plot_with("Dots", true, true);
+    let none = plot_with("NoCurve", false, false);
+    assert!(
+        lines.pixel(40, 34).unwrap().r > 250,
+        "a line crosses mid-scale"
+    );
+    assert!(
+        dots.pixel(40, 34).unwrap().r > 35,
+        "dots leave the middle empty"
+    );
+    let on = lines.pixel(20, 22).unwrap();
+    let off = none.pixel(20, 22).unwrap();
+    assert!(
+        on.r > 100 && on.r < 180 && on.g > 100,
+        "grid is Qt gray, got {on:?}"
+    );
+    assert!(
+        off.r > 220 && off.g > 220,
+        "grid off leaves the widget background, got {off:?}"
+    );
+    assert_ne!(
+        lines.pixel(18, 47).unwrap(),
+        none.pixel(18, 47).unwrap(),
+        "hiding the x axis removes the tick"
+    );
+}
+
+#[test]
+fn symbols_x_limits_time_and_grid_color_change_pixels() {
+    let plain = styled_plot(|plot| {
+        plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
+    });
+    let cross = styled_plot(|plot| {
+        plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
+        plot.set_prop("symbol_1", PropValue::Enum("Cross".into()));
+        plot.set_prop("symbolResizeFactor", PropValue::Double(10.0));
+    });
+    let ellipse = styled_plot(|plot| {
+        plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
+        plot.set_prop("symbol_1", PropValue::Enum("Rect".into()));
+        plot.set_prop("symbolResizeFactor", PropValue::Double(10.0));
+    });
+    assert!(
+        plain.pixel(39, 28).unwrap().r > 35,
+        "no symbol leaves the arm empty"
+    );
+    assert!(
+        cross.pixel(39, 28).unwrap().r > 250,
+        "a cross paints the vertical arm"
+    );
+    assert!(
+        ellipse.pixel(42, 37).unwrap().r > 250,
+        "Rect is the ellipse myMarker draws"
+    );
+    assert!(
+        cross.pixel(42, 37).unwrap().r > 35,
+        "the cross does not fill the diagonal"
+    );
+
+    let wide = styled_plot(|_| {});
+    let limited = styled_plot(|plot| {
+        plot.set_prop("XaxisScaling", PropValue::Enum("User".into()));
+        plot.set_prop("XaxisLimits", PropValue::String("0;6".into()));
+    });
+    assert!(
+        wide.pixel(40, 34).unwrap().r > 250,
+        "index scale spans the plot"
+    );
+    assert!(
+        limited.pixel(40, 34).unwrap().r > 35,
+        "user limits 0;6 stop index 2 before mid-plot"
+    );
+    let linear = peaked(false);
+    let logged = peaked(true);
+    assert!(
+        linear.pixel(39, 25).unwrap().r > 250,
+        "the middle sample is the linear peak"
+    );
+    assert!(
+        logged.pixel(39, 25).unwrap().r > 35,
+        "log10 moves that peak toward the right"
+    );
+
+    let timed = styled_plot(|plot| {
+        plot.set_prop("XaxisType", PropValue::Enum("time".into()));
+    });
+    let mut clock = false;
+    let mut diffs = 0;
+    for y in 0..60 {
+        for x in 0..80 {
+            if timed.pixel(x, y).unwrap() != wide.pixel(x, y).unwrap() {
+                diffs += 1;
+                clock = true;
+            }
+        }
+    }
+    assert!(clock, "a time axis stamps hh:mm:ss ({diffs} pixels)");
+
+    let red = styled_plot(|plot| {
+        plot.set_prop("gridColor", PropValue::Color(Color::rgb(200, 0, 0)));
+    });
+    let grid = red.pixel(20, 22).unwrap();
+    assert!(grid.r > 180 && grid.g < 40, "gridColor replaces Qt gray");
+}
+
+fn peaked(log_x: bool) -> caqtdm_paint::Image {
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(0.0));
+    let mut plot = WidgetNode::new("caCartesianPlot", "plot");
+    plot.rect = Rect::new(0, 0, 80, 60);
+    plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
+    plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
+    plot.set_prop("grid", PropValue::Bool(false));
+    if log_x {
+        plot.set_prop("XaxisType", PropValue::Enum("log10".into()));
+    }
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern.clone()));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    for (step, value) in [0.0, 8.0, 0.0].into_iter().enumerate() {
+        intern.insert("A", ChannelData::scalar(value));
+        session.tick((step as u64 + 1) * 1_000);
+    }
+    let drawn = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap();
+    paint(&[drawn])
+}
+
+fn styled_plot(setup: impl Fn(&mut WidgetNode)) -> caqtdm_paint::Image {
+    let intern = InternSource::new();
+    intern.insert("A", ChannelData::scalar(5.0));
+    let mut plot = WidgetNode::new("caCartesianPlot", "plot");
+    plot.rect = Rect::new(0, 0, 80, 60);
+    plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
+    plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
+    setup(&mut plot);
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let mut session = Session::open(
+        root,
+        {
+            let mut hub = Hub::new("epics3");
+            hub.register(Box::new(intern));
+            hub
+        },
+        &caqtdm_core::MacroMap::new(),
+    );
+    session.tick(1_000);
+    session.tick(2_000);
+    session.tick(3_000);
+    let drawn = session
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap();
+    paint(&[drawn])
+}
+
+#[test]
+fn waterfall_colormap_and_camera_colormap_change_pixels() {
+    let heat = waterfall("spectrum_heat");
+    let grey = waterfall("grey");
+    let hot = heat.pixel(30, 2).unwrap();
+    assert!(hot.r > 200 && hot.b < 30, "heat high is red");
+    let gray = grey.pixel(30, 2).unwrap();
+    assert!(
+        gray.r > 240 && gray.g > 240 && gray.b > 240,
+        "grey high is white"
+    );
+
+    let intern = InternSource::new();
+    let mut bytes = ChannelData::scalar(0.0);
+    bytes.value = PvValue::Bytes(vec![0, 255]);
+    intern.insert("PIX", bytes);
+    let mut camera = WidgetNode::new("caCamera", "cam");
+    camera.rect = Rect::new(0, 0, 8, 8);
+    camera.set_prop("channelData", PropValue::String("intern://PIX".into()));
+    camera.set_prop("dataType", PropValue::String("mono8".into()));
+    camera.set_prop("channelWidth", PropValue::Double(2.0));
+    camera.set_prop("channelHeight", PropValue::Double(1.0));
+    camera.set_prop("ColorMap", PropValue::Enum("spectrum_heat".into()));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(camera);
+    let drawn = open(root, intern)
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "cam")
+        .unwrap();
+    let image = paint(&[drawn]);
+    assert!(image.pixel(2, 4).unwrap().b > 200, "heat low is blue");
+    assert!(image.pixel(6, 4).unwrap().r > 200, "heat high is red");
+}
+
+fn waterfall(map: &str) -> caqtdm_paint::Image {
+    let intern = InternSource::new();
+    let mut wave = ChannelData::scalar(0.0);
+    wave.value = PvValue::Doubles(vec![0.0, 100.0]);
+    intern.insert("WF", wave);
+    let mut plot = WidgetNode::new("caWaterfallPlot", "fall");
+    plot.rect = Rect::new(0, 0, 40, 20);
+    plot.set_prop("channel", PropValue::String("intern://WF".into()));
+    plot.set_prop("ColorMap", PropValue::Enum(map.into()));
+    plot.set_prop("IntensityMin", PropValue::Double(0.0));
+    plot.set_prop("IntensityMax", PropValue::Double(100.0));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let drawn = open(root, intern)
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "fall")
+        .unwrap();
+    paint(&[drawn])
+}

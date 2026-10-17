@@ -91,7 +91,17 @@ fn config_print_attach_and_http() {
     ]))
     .unwrap();
     assert!(printed.contains("wrote"));
-    assert!(std::fs::read(&ppm).unwrap().starts_with(b"P6\n"));
+    assert!(std::fs::read(&ppm)
+        .unwrap()
+        .starts_with(b"%!PS-Adobe-3.0\n"));
+    assert_eq!(
+        caqtdm_app::snapshot_caption("panel.ui", 0),
+        "1970-01-01 00:00:00, panel.ui"
+    );
+    let png = dir.join("vacuum.png");
+    let shot = execute(&args(&[ui, "-savetoimage", "-o", png.to_str().unwrap()])).unwrap();
+    assert!(shot.contains("wrote"));
+    assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG"));
 
     let stop = Arc::new(AtomicBool::new(false));
     let addr = caqtdm_app::serve_attach(Arc::clone(&stop)).unwrap();
@@ -250,8 +260,9 @@ fn stylefile_geometry_and_url_change_the_result() {
 
     let small = dir.join("small.ppm");
     let painted = execute(&args(&[
+        "paint",
         ui.to_str().unwrap(),
-        "-savetoimage",
+        "-o",
         small.to_str().unwrap(),
         "-displayGeometry",
         "30x16",

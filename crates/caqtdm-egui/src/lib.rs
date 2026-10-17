@@ -440,6 +440,17 @@ mod tests {
             legend: Vec::new(),
             colors: Vec::new(),
             axes: Vec::new(),
+            styles: Vec::new(),
+            grid: true,
+            show_x: true,
+            show_y: true,
+            symbols: Vec::new(),
+            symbol_px: 2,
+            x_limits: None,
+            log_x: false,
+            time_x: false,
+            grid_color: Color::rgb(160, 160, 160),
+            scale_color: None,
         });
         assert_eq!(
             action_for(&plot, 50.0, 20.0, false),

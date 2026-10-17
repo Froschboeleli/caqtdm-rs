@@ -12,7 +12,10 @@ use caqtdm_core::{
 use caqtdm_datasource::Hub;
 use caqtdm_ui::WidgetNode;
 
-use crate::visual::{Action, Effect, GridCell, ShapeForm, ThermoBand, TreeRow, Visual, VisualKind};
+use crate::visual::{
+    qt_global_color, Action, ColorMap, CurveStyle, CurveSymbol, Effect, GridCell, ShapeForm,
+    ThermoBand, TreeRow, Visual, VisualKind,
+};
 
 const HISTORY: usize = 240;
 
@@ -475,7 +478,12 @@ impl Session {
             "caWaterfallPlot" => {
                 let rows = self.waterfall_rows(node);
                 let (min, max) = waterfall_limits(node, &rows);
-                VisualKind::Waterfall { rows, min, max }
+                VisualKind::Waterfall {
+                    rows,
+                    min,
+                    max,
+                    map: color_map(node),
+                }
             }
             "caByte" | "caByteController" | "caBitnames" => VisualKind::Bits {
                 value: value as u32,
@@ -670,11 +678,26 @@ impl Session {
             log_y: node
                 .enum_tail("YAxisType")
                 .is_some_and(|mode| mode.eq_ignore_ascii_case("log10")),
-            x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
+            x_ticks: node.prop_f64("numberOfXticks").unwrap_or(5.0) as u32,
             cursors: self.cursors.get(&node.name).cloned().unwrap_or_default(),
             legend: plot_legend(node, &series_axes),
             colors: plot_colors(node, series_len),
             axes: series_axes,
+            styles: (0..series_len)
+                .map(|index| curve_style(node, index))
+                .collect(),
+            grid: node.prop_bool("grid").unwrap_or(true),
+            show_x: node.prop_bool("XaxisEnabled").unwrap_or(true),
+            show_y: node.prop_bool("YaxisEnabled").unwrap_or(true),
+            symbols: (0..series_len)
+                .map(|index| curve_symbol(node, index))
+                .collect(),
+            symbol_px: symbol_px(node),
+            x_limits: x_axis_limits(node),
+            log_x: axis_named(node, "XaxisType", "log10"),
+            time_x: axis_named(node, "XaxisType", "time"),
+            grid_color: prop_color(node, "gridColor").unwrap_or(Color::rgb(160, 160, 160)),
+            scale_color: prop_color(node, "scaleColor"),
         }
     }
 
@@ -928,8 +951,11 @@ impl Session {
             }
         }
         let mut kind = scan_waveform(node, data, width, height);
-        if let VisualKind::Image { roi, .. } = &mut kind {
+        if let VisualKind::Image { roi, rgba, .. } = &mut kind {
             *roi = self.roi_mark(node);
+            if let Some(map) = explicit_color_map(node) {
+                crate::colorize_rgba(rgba, &map);
+            }
         }
         kind
     }
@@ -942,8 +968,11 @@ impl Session {
         height: u32,
     ) -> VisualKind {
         let mut kind = image_waveform(node, data, width, height);
-        if let VisualKind::Image { roi, .. } = &mut kind {
+        if let VisualKind::Image { roi, rgba, .. } = &mut kind {
             *roi = self.roi_mark(node);
+            if let Some(map) = explicit_color_map(node) {
+                crate::colorize_rgba(rgba, &map);
+            }
         }
         kind
     }
@@ -1389,6 +1418,17 @@ fn scan_waveform(
         legend: Vec::new(),
         colors: Vec::new(),
         axes: Vec::new(),
+        styles: Vec::new(),
+        grid: node.prop_bool("grid").unwrap_or(true),
+        show_x: node.prop_bool("XaxisEnabled").unwrap_or(true),
+        show_y: node.prop_bool("YaxisEnabled").unwrap_or(true),
+        symbols: Vec::new(),
+        symbol_px: symbol_px(node),
+        x_limits: x_axis_limits(node),
+        log_x: axis_named(node, "XaxisType", "log10"),
+        time_x: axis_named(node, "XaxisType", "time"),
+        grid_color: prop_color(node, "gridColor").unwrap_or(Color::rgb(160, 160, 160)),
+        scale_color: prop_color(node, "scaleColor"),
     }
 }
 
@@ -1435,9 +1475,127 @@ fn image_visual(
     }
 }
 
+fn curve_symbol(node: &WidgetNode, index: usize) -> CurveSymbol {
+    match node.enum_tail(&format!("symbol_{}", index + 1)) {
+        Some(name) if name.eq_ignore_ascii_case("Ellipse") || name.eq_ignore_ascii_case("Rect") => {
+            CurveSymbol::Ellipse
+        }
+        Some(name) if name.eq_ignore_ascii_case("Diamond") => CurveSymbol::Diamond,
+        Some(name) if name.eq_ignore_ascii_case("Triangle") => CurveSymbol::Triangle,
+        Some(name) if name.eq_ignore_ascii_case("DTriangle") => CurveSymbol::DTriangle,
+        Some(name) if name.eq_ignore_ascii_case("UTriangle") => CurveSymbol::UTriangle,
+        Some(name) if name.eq_ignore_ascii_case("LTriangle") => CurveSymbol::LTriangle,
+        Some(name) if name.eq_ignore_ascii_case("RTriangle") => CurveSymbol::RTriangle,
+        Some(name) if name.eq_ignore_ascii_case("Cross") => CurveSymbol::Cross,
+        Some(name) if name.eq_ignore_ascii_case("XCross") => CurveSymbol::XCross,
+        Some(name) if name.eq_ignore_ascii_case("HLine") => CurveSymbol::HLine,
+        Some(name) if name.eq_ignore_ascii_case("VLine") => CurveSymbol::VLine,
+        Some(name) if name.eq_ignore_ascii_case("Star1") => CurveSymbol::Star1,
+        Some(name) if name.eq_ignore_ascii_case("Star2") => CurveSymbol::Star2,
+        Some(name) if name.eq_ignore_ascii_case("Hexagon") => CurveSymbol::Hexagon,
+        _ => CurveSymbol::NoSymbol,
+    }
+}
+
+fn symbol_px(node: &WidgetNode) -> i32 {
+    let factor = node.prop_f64("symbolResizeFactor").unwrap_or(1.0);
+    ((f64::from(node.rect.height.max(1)) * factor / 50.0).round() as i32).max(2)
+}
+
+fn axis_named(node: &WidgetNode, key: &str, name: &str) -> bool {
+    node.enum_tail(key)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case(name))
+}
+
+/// `setXaxisLimits` applies the pair only when scaling is not `Auto`.
+/// Equal ends become 0..10, matching `setScaleX`.
+fn x_axis_limits(node: &WidgetNode) -> Option<(f64, f64)> {
+    if node
+        .enum_tail("XaxisScaling")
+        .is_none_or(|mode| mode.eq_ignore_ascii_case("Auto"))
+    {
+        return None;
+    }
+    let text = node.prop_str("XaxisLimits").unwrap_or("0;1");
+    let mut parts = text
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let lo: f64 = parts.next()?.parse().ok()?;
+    let hi: f64 = parts.next()?.parse().ok()?;
+    if lo == hi {
+        Some((0.0, 10.0))
+    } else {
+        Some((lo, hi))
+    }
+}
+
+fn curve_style(node: &WidgetNode, index: usize) -> CurveStyle {
+    match node.enum_tail(&format!("Style_{}", index + 1)) {
+        Some(name) if name.eq_ignore_ascii_case("NoCurve") => CurveStyle::NoCurve,
+        Some(name) if name.eq_ignore_ascii_case("Sticks") => CurveStyle::Sticks,
+        Some(name) if name.eq_ignore_ascii_case("Steps") => CurveStyle::Steps,
+        Some(name) if name.eq_ignore_ascii_case("Dots") => CurveStyle::Dots,
+        Some(name) if name.eq_ignore_ascii_case("FillUnder") => CurveStyle::FillUnder,
+        Some(name) if name.eq_ignore_ascii_case("ThinLines") => CurveStyle::ThinLines,
+        Some(name) if name.eq_ignore_ascii_case("HorSticks") => CurveStyle::HorSticks,
+        Some(name) if name.eq_ignore_ascii_case("FatDots") => CurveStyle::FatDots,
+        _ => CurveStyle::Lines,
+    }
+}
+
+fn color_map(node: &WidgetNode) -> ColorMap {
+    explicit_color_map(node).unwrap_or(ColorMap::Wavelength)
+}
+
+fn explicit_color_map(node: &WidgetNode) -> Option<ColorMap> {
+    let name = node.enum_tail("ColorMap")?;
+    Some(match name {
+        name if name.eq_ignore_ascii_case("grey") => ColorMap::Grey,
+        name if name.eq_ignore_ascii_case("spectrum_hot") => ColorMap::Hot,
+        name if name.eq_ignore_ascii_case("spectrum_heat") => ColorMap::Heat,
+        name if name.eq_ignore_ascii_case("spectrum_jet") => ColorMap::Jet,
+        name if name.eq_ignore_ascii_case("spectrum_custom") => custom_color_map(node),
+        _ => ColorMap::Wavelength,
+    })
+}
+
+fn custom_color_map(node: &WidgetNode) -> ColorMap {
+    let stops: Vec<Color> = node
+        .prop_str("customColorMap")
+        .unwrap_or("")
+        .split([';', ',', ' '])
+        .filter_map(|part| part.trim().parse::<i32>().ok())
+        .map(qt_global_color)
+        .collect();
+    if stops.len() < 2 {
+        ColorMap::Wavelength
+    } else {
+        ColorMap::Custom(stops)
+    }
+}
+
 fn plot_colors(node: &WidgetNode, count: usize) -> Vec<Option<Color>> {
+    // `caCartesianPlot` constructor: white, red, yellow, blue, green, magenta.
+    const DEFAULTS: [Color; 6] = [
+        Color::rgb(255, 255, 255),
+        Color::rgb(255, 0, 0),
+        Color::rgb(255, 255, 0),
+        Color::rgb(0, 0, 255),
+        Color::rgb(0, 255, 0),
+        Color::rgb(255, 0, 255),
+    ];
     (1..=count)
-        .map(|index| prop_color(node, &format!("color_{index}")))
+        .map(|index| {
+            Some(
+                prop_color(node, &format!("color_{index}")).unwrap_or_else(|| {
+                    DEFAULTS
+                        .get(index - 1)
+                        .copied()
+                        .unwrap_or(Color::rgb(255, 255, 255))
+                }),
+            )
+        })
         .collect()
 }
 

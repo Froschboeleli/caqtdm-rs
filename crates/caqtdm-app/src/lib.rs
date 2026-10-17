@@ -99,7 +99,7 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             });
             Ok(lines.join("\n"))
         }
-        "paint" | "print" => paint_display(&options),
+        "paint" | "print" | "snapshot" => paint_display(&options),
         "config" => Ok(config_text(&options)),
         "serve" => serve_flags(&options),
         "run" => {
@@ -171,12 +171,52 @@ fn paint_display(options: &Options) -> Result<String, String> {
         search.find(note).and_then(|file| std::fs::read(file).ok())
     });
     let (width, height) = options.geometry.unwrap_or((0, 0));
-    let image = paint_in(&visuals, width, height);
-    let dest = options
-        .output
-        .clone()
-        .unwrap_or_else(|| path.with_extension("ppm"));
-    std::fs::write(&dest, image.to_ppm()).map_err(|e| e.to_string())?;
+    let mut image = paint_in(&visuals, width, height);
+    if options.command == "snapshot" {
+        let short = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("display");
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|dur| dur.as_secs() as i64)
+            .unwrap_or(0);
+        image.text(
+            0,
+            0,
+            &snapshot_caption(short, unix),
+            caqtdm_core::Color::rgb(255, 255, 255),
+            8,
+        );
+    }
+    let (bytes, dest) = match options.command.as_str() {
+        "print" => (
+            image.to_postscript(),
+            options
+                .output
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("caQtDM.ps")),
+        ),
+        "snapshot" => {
+            let name =
+                std::env::var("CAQTDM_SCREENSHOT_NAME").unwrap_or_else(|_| "caQtDM".to_string());
+            (
+                image.to_png(),
+                options
+                    .output
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(format!("{name}.png"))),
+            )
+        }
+        _ => (
+            image.to_ppm(),
+            options
+                .output
+                .clone()
+                .unwrap_or_else(|| path.with_extension("ppm")),
+        ),
+    };
+    std::fs::write(&dest, bytes).map_err(|e| e.to_string())?;
     Ok(format!(
         "wrote {} {}x{}",
         dest.display(),
@@ -295,6 +335,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "--execute-shell" => options.execute_shell = true,
             "-noMsg" => options.no_msg = true,
             "-noResize" => options.no_resize = true,
+            "-savetoimage" => options.command = "snapshot".into(),
             "-x" => options.execute_only = true,
             "-httpconfig" => options.http_config = true,
             "-emptycache" => options.empty_cache = true,
@@ -329,8 +370,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             | "-web_timeout"
             | "-web_instance_limit"
             | "-host"
-            | "-web_launcher_root_file"
-            | "-savetoimage" => {
+            | "-web_launcher_root_file" => {
                 let value = args
                     .get(i + 1)
                     .ok_or_else(|| format!("{arg} needs a value"))?
@@ -339,12 +379,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     "-macro" | "--macro" => options.macros = value,
                     "-macrodefs" => options.macro_file = Some(PathBuf::from(value)),
                     "-cs" | "--cs" => options.control_system = value,
-                    "-o" | "--output" | "-savetoimage" => {
-                        options.output = Some(PathBuf::from(&value));
-                        if arg == "-savetoimage" && options.command.is_empty() {
-                            options.command = "paint".into();
-                        }
-                    }
+                    "-o" | "--output" => options.output = Some(PathBuf::from(&value)),
                     "-display" | "-displayFont" => {
                         let _ = value;
                     }
@@ -715,6 +750,34 @@ fn config_text(options: &Options) -> String {
     text
 }
 
+/// `yyyy-MM-dd HH:MM:SS, file`, the stamp `save_graphics` paints on a snapshot.
+pub fn snapshot_caption(file: &str, unix_secs: i64) -> String {
+    let (year, month, day, hour, minute, second) = civil_utc(unix_secs);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}, {file}")
+}
+
+fn civil_utc(unix_secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let secs = unix_secs.rem_euclid(86_400) as u32;
+    let z = unix_secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let year = (if month <= 2 { y + 1 } else { y }) as i32;
+    (
+        year,
+        month,
+        day,
+        secs / 3_600,
+        (secs % 3_600) / 60,
+        secs % 60,
+    )
+}
+
 fn help_text() -> String {
     "\
 caqtdm [command] [file] [options]
@@ -725,7 +788,8 @@ Commands:
   validate   parse a display and expand includes
   convert    list widgets and channels
   paint      write a PPM rendering
-  print      same as paint
+  print      write a PostScript page (caQtDM.ps unless -o is set)
+  snapshot   write a PNG (caQtDM.png, or $CAQTDM_SCREENSHOT_NAME.png)
   widgets    list widget classes the runtime draws
   config     print the operator settings
   serve      status page and the attach port
@@ -740,8 +804,8 @@ Options:
   --ca HOST:PORT      Channel Access server
   --pva HOST:PORT     PV Access server (scalar subset)
   -attach HOST:PORT   send the display path to a running instance
-  -o FILE             PPM output for paint and print
-  -savetoimage FILE   same as -o, and selects paint when no command is given
+  -o FILE             output path for paint, print, and snapshot
+  -savetoimage        write a PNG and exit, matching upstream (no filename argument)
   --execute-shell     run caShellCommand instead of recording it
   -x                  accepted and ignored, matching upstream (MEDM execute-only has no effect)
   -noMsg              quiet the status page
@@ -766,7 +830,7 @@ Options:
   -web_allow_insecure_cashell_commands
   -novnc              RFB 3.8 server and the same bytes over a WebSocket
   -novnc_readonly     drop pointer and key events (requires -novnc)
-  -print              same as the print command
+  -print              write PostScript and exit
 "
     .to_string()
 }

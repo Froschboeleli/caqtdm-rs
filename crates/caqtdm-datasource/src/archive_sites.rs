@@ -5,12 +5,13 @@
 //! `sfRetrieval.cpp` walks.
 //!
 //! HIPA and PRO call the site `gmv()` logger. That library is not in the
-//! caQtDM tree, so the bytes on the wire are the arguments `GetLogShift`
-//! passes: host, 40-byte device, log id `"U"`, year offset, retrieval time,
-//! and the float/int/short sample buffers `gmv` fills. The host comes from
-//! the plugin (`hipa-lgexp.psi.ch`, `proscan-lgexp.psi.ch`). Sample cleanup
-//! matches the loop in `hipaRetrieval.c`: fewer than five points is empty,
-//! and a negative `Valerr` repeats the last good value.
+//! caQtDM tree. The bytes below are reconstructed from the arguments
+//! `GetLogShift` passes and from `cvtms_c` / `ExactTime`. They are not a
+//! verified copy of `libgmv`. The `libgmv` feature (on by default) exposes
+//! them. Sample cleanup matches the loop in `hipaRetrieval.c`: fewer than
+//! five points is empty, and a negative `Valerr` repeats the last good value.
+
+#![cfg_attr(not(feature = "libgmv"), allow(dead_code))]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

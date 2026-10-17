@@ -2,7 +2,9 @@
 //! checked without a GPU. The egui viewer draws the same [`Visual`] list.
 
 use caqtdm_core::{Color, Point, Rect};
-use caqtdm_widgets::{cell_rect, ShapeForm, Visual, VisualKind};
+use caqtdm_widgets::{
+    cell_rect, sample_color, CurveStyle, CurveSymbol, ShapeForm, Visual, VisualKind,
+};
 
 mod font;
 
@@ -154,6 +156,48 @@ impl Image {
         for px in self.rgba.chunks(4) {
             out.extend_from_slice(&px[..3]);
         }
+        out
+    }
+
+    /// PNG snapshot. Upstream's `-savetoimage` writes this format.
+    pub fn to_png(&self) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
+        for px in self.rgba.chunks(4) {
+            rgb.extend_from_slice(&px[..3]);
+        }
+        let Some(image) = image::RgbImage::from_raw(self.width, self.height, rgb) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let _ = image.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png);
+        out
+    }
+
+    /// Raster PostScript. Qt 5 prints with `QPrinter::NativeFormat` and says
+    /// PostScript is no longer supported; this is a page that shows the same
+    /// pixels, not those printer bytes.
+    pub fn to_postscript(&self) -> Vec<u8> {
+        let w = self.width;
+        let h = self.height;
+        let mut out = format!(
+            "%!PS-Adobe-3.0\n%%BoundingBox: 0 0 {w} {h}\n%%Title: caQtDM\ngsave\n{w} {h} scale\n{w} {h} 8 [{w} 0 0 {h} neg 0 {h}]\n{{currentfile 3 string readhexstring pop}} false 3 colorimage\n"
+        )
+        .into_bytes();
+        let mut column = 0;
+        for px in self.rgba.chunks(4) {
+            for byte in &px[..3] {
+                out.extend_from_slice(format!("{byte:02X}").as_bytes());
+                column += 2;
+                if column >= 72 {
+                    out.push(b'\n');
+                    column = 0;
+                }
+            }
+        }
+        if column != 0 {
+            out.push(b'\n');
+        }
+        out.extend_from_slice(b"grestore\nshowpage\n%%EOF\n");
         out
     }
 }
@@ -323,6 +367,17 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             legend,
             colors,
             axes,
+            styles,
+            grid,
+            show_x,
+            show_y,
+            symbols,
+            symbol_px,
+            x_limits,
+            log_x,
+            time_x,
+            grid_color,
+            scale_color,
         } => {
             paint_plot(
                 image,
@@ -345,11 +400,27 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                     legend,
                     colors,
                     axes,
+                    styles,
+                    grid: *grid,
+                    show_x: *show_x,
+                    show_y: *show_y,
+                    symbols,
+                    symbol_px: *symbol_px,
+                    x_limits: *x_limits,
+                    log_x: *log_x,
+                    time_x: *time_x,
+                    grid_color: *grid_color,
+                    scale_color: *scale_color,
                 },
             );
         }
-        VisualKind::Waterfall { rows, min, max } => {
-            paint_waterfall(image, rect, rows, *min, *max);
+        VisualKind::Waterfall {
+            rows,
+            min,
+            max,
+            map,
+        } => {
+            paint_waterfall(image, rect, rows, *min, *max, map);
         }
         VisualKind::Choice {
             items,
@@ -490,6 +561,17 @@ struct PlotPaint<'a> {
     legend: &'a [String],
     colors: &'a [Option<Color>],
     axes: &'a [(f64, f64)],
+    styles: &'a [CurveStyle],
+    grid: bool,
+    show_x: bool,
+    show_y: bool,
+    symbols: &'a [CurveSymbol],
+    symbol_px: i32,
+    x_limits: Option<(f64, f64)>,
+    log_x: bool,
+    time_x: bool,
+    grid_color: Color,
+    scale_color: Option<Color>,
 }
 
 fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotPaint<'_>) {
@@ -531,6 +613,33 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         rect.height.saturating_sub(28).max(1),
     );
     image.stroke_rect(plot, visual.foreground);
+    let scale = plot_paint.scale_color.unwrap_or(visual.foreground);
+    if plot_paint.grid {
+        for frac in [0.15_f64, 0.85] {
+            let y = plot.y + (frac * f64::from(plot.height - 1)) as i32;
+            dash_hline(
+                image,
+                plot.x + 1,
+                plot.x + plot.width - 2,
+                y,
+                plot_paint.grid_color,
+            );
+            let x = plot.x + (frac * f64::from(plot.width - 1)) as i32;
+            dash_vline(
+                image,
+                x,
+                plot.y + 1,
+                plot.y + plot.height - 2,
+                plot_paint.grid_color,
+            );
+        }
+    }
+    if plot_paint.show_y {
+        for frac in [0.0_f64, 0.5, 1.0] {
+            let y = plot.y + plot.height - 1 - (frac * f64::from((plot.height - 1).max(1))) as i32;
+            image.line(plot.x - 4, y, plot.x - 1, y, scale);
+        }
+    }
     if y2 {
         paint_y2_axis(
             image,
@@ -538,20 +647,22 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             plot_paint.y2_min,
             plot_paint.y2_max,
             plot_paint.log_y,
-            visual.foreground,
+            scale,
             visual.font_px,
         );
     }
-    let ticks = plot_paint.x_ticks.clamp(1, 12);
-    for tick in 0..ticks {
-        let x = plot.x + (plot.width * tick as i32) / ticks as i32;
-        image.line(
-            x,
-            plot.y + plot.height - 1,
-            x,
-            plot.y + plot.height - 4,
-            visual.foreground,
-        );
+    if plot_paint.show_x {
+        let ticks = plot_paint.x_ticks.clamp(1, 12);
+        for tick in 0..ticks {
+            let x = plot.x + (plot.width * tick as i32) / ticks as i32;
+            image.line(
+                x,
+                plot.y + plot.height - 1,
+                x,
+                plot.y + plot.height - 4,
+                scale,
+            );
+        }
     }
     for (index, samples) in plot_paint.series.iter().enumerate() {
         let (lo, hi) = series_window(index, plot_paint);
@@ -560,13 +671,53 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             .get(index)
             .and_then(|color| *color)
             .unwrap_or_else(|| series_color(index, visual.foreground));
+        let style = plot_paint
+            .styles
+            .get(index)
+            .copied()
+            .unwrap_or(CurveStyle::Lines);
+        let symbol = plot_paint
+            .symbols
+            .get(index)
+            .copied()
+            .unwrap_or(CurveSymbol::NoSymbol);
         paint_series_scaled(
             image,
             plot,
             samples,
-            color,
-            (plot_paint.x_min, plot_paint.x_max, lo, hi),
-            plot_paint.log_y,
+            &SeriesDraw {
+                color,
+                x_min: plot_paint.x_min,
+                x_max: plot_paint.x_max,
+                y_min: lo,
+                y_max: hi,
+                log_y: plot_paint.log_y,
+                log_x: plot_paint.log_x,
+                style,
+                symbol,
+                symbol_px: plot_paint.symbol_px,
+                x_limits: plot_paint.x_limits,
+            },
+        );
+    }
+    if plot_paint.time_x && plot_paint.title_x.is_empty() {
+        let (lo, hi) = plot_paint.x_limits.unwrap_or((0.0, 1.0));
+        let px = visual.font_px.clamp(6, 8);
+        image.text(
+            rect.x + 2,
+            rect.y + rect.height - px,
+            &clock_hms(lo),
+            scale,
+            px,
+        );
+        let right = clock_hms(hi);
+        let width = font::advance_current(&right, px);
+        image.text(
+            rect.x + rect.width - width - 2,
+            rect.y + rect.height - px,
+            &right,
+            scale,
+            px,
         );
     }
     paint_legend(image, rect, visual, plot_paint);
@@ -965,7 +1116,14 @@ fn paint_buttons(
     }
 }
 
-fn paint_waterfall(image: &mut Image, rect: Rect, rows: &[Vec<f64>], min: f64, max: f64) {
+fn paint_waterfall(
+    image: &mut Image,
+    rect: Rect,
+    rows: &[Vec<f64>],
+    min: f64,
+    max: f64,
+    map: &caqtdm_widgets::ColorMap,
+) {
     if rows.is_empty() || rect.width < 2 || rect.height < 2 {
         return;
     }
@@ -979,36 +1137,56 @@ fn paint_waterfall(image: &mut Image, rect: Rect, rows: &[Vec<f64>], min: f64, m
         let col_w = (rect.width / row.len() as i32).max(1);
         for (col, sample) in row.iter().enumerate() {
             let t = ((sample - min) / span).clamp(0.0, 1.0);
-            let color = Color::rgb((255.0 * t) as u8, 0, (255.0 * (1.0 - t)) as u8);
+            let color = sample_color(map, t);
             let x0 = rect.x + col as i32 * col_w;
             image.fill_rect(Rect::new(x0, y0, col_w, row_h), color);
         }
     }
 }
 
-fn paint_series_scaled(
-    image: &mut Image,
-    rect: Rect,
-    samples: &[f64],
+struct SeriesDraw {
     color: Color,
-    window: (f64, f64, f64, f64),
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
     log_y: bool,
-) {
-    if samples.len() < 2 || rect.width < 2 || rect.height < 2 {
+    log_x: bool,
+    style: CurveStyle,
+    symbol: CurveSymbol,
+    symbol_px: i32,
+    x_limits: Option<(f64, f64)>,
+}
+
+fn paint_series_scaled(image: &mut Image, rect: Rect, samples: &[f64], draw: &SeriesDraw) {
+    let bare = draw.style == CurveStyle::NoCurve && draw.symbol == CurveSymbol::NoSymbol;
+    if bare || samples.is_empty() || rect.width < 2 || rect.height < 2 {
         return;
     }
-    let (x_min, x_max, y_min, y_max) = window;
-    let last = samples.len() - 1;
-    let mut start = (x_min.clamp(0.0, 1.0) * last as f64).round() as usize;
-    let mut end = (x_max.clamp(0.0, 1.0) * last as f64).round() as usize;
-    if end <= start {
-        start = 0;
-        end = last;
+    if samples.len() < 2
+        && draw.symbol == CurveSymbol::NoSymbol
+        && !matches!(
+            draw.style,
+            CurveStyle::Dots | CurveStyle::FatDots | CurveStyle::Sticks | CurveStyle::HorSticks
+        )
+    {
+        return;
     }
-    end = end.min(last);
+    let last = samples.len() - 1;
+    let (start, end) = if draw.x_limits.is_some() || draw.log_x {
+        (0, last)
+    } else {
+        let mut start = (draw.x_min.clamp(0.0, 1.0) * last as f64).round() as usize;
+        let mut end = (draw.x_max.clamp(0.0, 1.0) * last as f64).round() as usize;
+        if end <= start {
+            start = 0;
+            end = last;
+        }
+        (start, end.min(last))
+    };
     let window = &samples[start..=end];
-    let (min, max) = if y_max > y_min {
-        (y_min, y_max)
+    let (min, max) = if draw.y_max > draw.y_min {
+        (draw.y_min, draw.y_max)
     } else {
         (
             window.iter().copied().fold(f64::INFINITY, f64::min),
@@ -1016,28 +1194,210 @@ fn paint_series_scaled(
         )
     };
     let span = if max > min { max - min } else { 1.0 };
-    let log_min = if log_y && min <= 0.0 { 1e-6 } else { min };
-    let log_max = if log_y && max <= log_min {
+    let log_min = if draw.log_y && min <= 0.0 { 1e-6 } else { min };
+    let log_max = if draw.log_y && max <= log_min {
         log_min * 10.0
     } else {
         max
     };
-    let mut prev = None;
+    let (axis_lo, axis_hi) = data_axis(draw, last);
+    let mut prev: Option<(i32, i32)> = None;
     let denom = (window.len() - 1).max(1) as f64;
+    let bottom = rect.y + rect.height - 1;
     for (i, sample) in window.iter().enumerate() {
-        let x = rect.x + ((i as f64) / denom * f64::from(rect.width - 1)) as i32;
-        let frac = if log_y {
+        let x = if draw.x_limits.is_some() || draw.log_x {
+            let value = (start + i) as f64;
+            let frac = if draw.log_x {
+                log_frac(value, axis_lo, axis_hi)
+            } else {
+                (value - axis_lo) / (axis_hi - axis_lo)
+            };
+            rect.x + (frac.clamp(0.0, 1.0) * f64::from(rect.width - 1)) as i32
+        } else {
+            rect.x + ((i as f64) / denom * f64::from(rect.width - 1)) as i32
+        };
+        let frac = if draw.log_y {
             let sample = if *sample <= 0.0 { log_min } else { *sample };
             (sample.log10() - log_min.log10()) / (log_max.log10() - log_min.log10())
         } else {
             (sample - min) / span
         };
-        let y =
-            rect.y + rect.height - 1 - (frac.clamp(0.0, 1.0) * f64::from(rect.height - 1)) as i32;
-        if let Some((px, py)) = prev {
-            image.line(px, py, x, y, color);
+        let y = bottom - (frac.clamp(0.0, 1.0) * f64::from(rect.height - 1)) as i32;
+        match draw.style {
+            CurveStyle::NoCurve => {}
+            CurveStyle::Dots => image.put(x, y, draw.color),
+            CurveStyle::FatDots => {
+                image.fill_rect(Rect::new(x - 1, y - 1, 3, 3), draw.color);
+            }
+            CurveStyle::Sticks => image.line(x, bottom, x, y, draw.color),
+            CurveStyle::HorSticks => image.line(rect.x, y, x, y, draw.color),
+            CurveStyle::Steps => {
+                if let Some((px, py)) = prev {
+                    image.line(px, py, x, py, draw.color);
+                    image.line(x, py, x, y, draw.color);
+                }
+            }
+            CurveStyle::FillUnder => {
+                if let Some((px, py)) = prev {
+                    fill_under(image, px, py, x, y, bottom, draw.color);
+                }
+            }
+            CurveStyle::ThinLines => {
+                if let Some((px, py)) = prev {
+                    image.line(px, py, x, y, draw.color);
+                }
+            }
+            CurveStyle::Lines => {
+                if let Some((px, py)) = prev {
+                    image.line_width(px, py, x, y, 3, draw.color);
+                }
+            }
         }
+        paint_symbol(image, x, y, draw.symbol, draw.symbol_px, draw.color);
         prev = Some((x, y));
+    }
+}
+
+fn data_axis(draw: &SeriesDraw, last: usize) -> (f64, f64) {
+    let (lo, hi) = draw.x_limits.unwrap_or((0.0, last as f64));
+    let (lo, hi) = if hi > lo { (lo, hi) } else { (0.0, 10.0) };
+    let span = hi - lo;
+    let zoom_lo = lo + draw.x_min.clamp(0.0, 1.0) * span;
+    let zoom_hi = lo + draw.x_max.clamp(0.0, 1.0) * span;
+    if zoom_hi > zoom_lo {
+        (zoom_lo, zoom_hi)
+    } else {
+        (lo, hi)
+    }
+}
+
+fn log_frac(value: f64, lo: f64, hi: f64) -> f64 {
+    let lo = if lo <= 0.0 { 1e-6 } else { lo };
+    let hi = if hi <= lo { lo * 10.0 } else { hi };
+    let value = if value <= 0.0 { lo } else { value };
+    (value.log10() - lo.log10()) / (hi.log10() - lo.log10())
+}
+
+/// UTC clock. Upstream's date scale uses Qt local time; this rasterizer does not.
+fn clock_hms(ms: f64) -> String {
+    let secs = (ms / 1000.0).floor() as i64;
+    let secs = secs.rem_euclid(86_400);
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+fn dash_hline(image: &mut Image, x0: i32, x1: i32, y: i32, color: Color) {
+    let (left, right) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+    for x in left..=right {
+        if (x - left).rem_euclid(5) < 3 {
+            image.put(x, y, color);
+        }
+    }
+}
+
+fn dash_vline(image: &mut Image, x: i32, y0: i32, y1: i32, color: Color) {
+    let (top, bot) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+    for y in top..=bot {
+        if (y - top).rem_euclid(5) < 3 {
+            image.put(x, y, color);
+        }
+    }
+}
+
+fn paint_symbol(image: &mut Image, x: i32, y: i32, symbol: CurveSymbol, px: i32, color: Color) {
+    if symbol == CurveSymbol::NoSymbol {
+        return;
+    }
+    let r = (px / 2).max(1);
+    match symbol {
+        CurveSymbol::NoSymbol => {}
+        CurveSymbol::Ellipse => disk(image, x, y, r, color),
+        CurveSymbol::Diamond => {
+            for dy in -r..=r {
+                let reach = r - dy.abs();
+                image.line(x - reach, y + dy, x + reach, y + dy, color);
+            }
+        }
+        CurveSymbol::Triangle | CurveSymbol::UTriangle => triangle(image, x, y, r, 0, -1, color),
+        CurveSymbol::DTriangle => triangle(image, x, y, r, 0, 1, color),
+        CurveSymbol::LTriangle => triangle(image, x, y, r, -1, 0, color),
+        CurveSymbol::RTriangle => triangle(image, x, y, r, 1, 0, color),
+        CurveSymbol::Cross | CurveSymbol::Star1 => {
+            image.line(x - r, y, x + r, y, color);
+            image.line(x, y - r, x, y + r, color);
+            if symbol == CurveSymbol::Star1 {
+                image.line(x - r, y - r, x + r, y + r, color);
+                image.line(x - r, y + r, x + r, y - r, color);
+            }
+        }
+        CurveSymbol::XCross | CurveSymbol::Star2 => {
+            image.line(x - r, y - r, x + r, y + r, color);
+            image.line(x - r, y + r, x + r, y - r, color);
+            if symbol == CurveSymbol::Star2 {
+                image.line(x - r, y, x + r, y, color);
+            }
+        }
+        CurveSymbol::HLine => image.line(x - r, y, x + r, y, color),
+        CurveSymbol::VLine => image.line(x, y - r, x, y + r, color),
+        CurveSymbol::Hexagon => {
+            for dy in -r..=r {
+                let reach = if dy.abs() * 2 <= r {
+                    r
+                } else {
+                    r - (dy.abs() - r / 2)
+                };
+                image.line(x - reach.max(0), y + dy, x + reach.max(0), y + dy, color);
+            }
+        }
+    }
+}
+
+fn disk(image: &mut Image, x: i32, y: i32, r: i32, color: Color) {
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                image.put(x + dx, y + dy, color);
+            }
+        }
+    }
+}
+
+fn triangle(image: &mut Image, x: i32, y: i32, r: i32, dx: i32, dy: i32, color: Color) {
+    if dy != 0 {
+        for step in 0..=r {
+            let row = y + dy * (step - r / 2);
+            let reach = (r - step).max(0);
+            image.line(x - reach, row, x + reach, row, color);
+        }
+    } else {
+        for step in 0..=r {
+            let col = x + dx * (step - r / 2);
+            let reach = (r - step).max(0);
+            image.line(col, y - reach, col, y + reach, color);
+        }
+    }
+}
+
+fn fill_under(image: &mut Image, x0: i32, y0: i32, x1: i32, y1: i32, bottom: i32, color: Color) {
+    let (left, right, y_left, y_right) = if x0 <= x1 {
+        (x0, x1, y0, y1)
+    } else {
+        (x1, x0, y1, y0)
+    };
+    let span = (right - left).max(1);
+    for x in left..=right {
+        let t = f64::from(x - left) / f64::from(span);
+        let y = y_left + ((f64::from(y_right - y_left)) * t) as i32;
+        let (top, bot) = if y <= bottom {
+            (y, bottom)
+        } else {
+            (bottom, y)
+        };
+        image.line(x, top, x, bot, color);
     }
 }
 
@@ -1192,6 +1552,17 @@ mod tests {
                 legend: Vec::new(),
                 colors: Vec::new(),
                 axes: Vec::new(),
+                styles: Vec::new(),
+                grid: true,
+                show_x: true,
+                show_y: true,
+                symbols: Vec::new(),
+                symbol_px: 2,
+                x_limits: None,
+                log_x: false,
+                time_x: false,
+                grid_color: Color::rgb(160, 160, 160),
+                scale_color: None,
             },
             "",
             Color::rgb(0, 180, 0),
@@ -1237,6 +1608,17 @@ mod tests {
                 legend: Vec::new(),
                 colors: Vec::new(),
                 axes: Vec::new(),
+                styles: Vec::new(),
+                grid: true,
+                show_x: true,
+                show_y: true,
+                symbols: Vec::new(),
+                symbol_px: 2,
+                x_limits: None,
+                log_x: false,
+                time_x: false,
+                grid_color: Color::rgb(160, 160, 160),
+                scale_color: None,
             },
             "",
             Color::rgb(0, 180, 220),
@@ -1300,6 +1682,17 @@ mod tests {
                 legend: Vec::new(),
                 colors: Vec::new(),
                 axes: Vec::new(),
+                styles: Vec::new(),
+                grid: true,
+                show_x: true,
+                show_y: true,
+                symbols: Vec::new(),
+                symbol_px: 2,
+                x_limits: None,
+                log_x: false,
+                time_x: false,
+                grid_color: Color::rgb(160, 160, 160),
+                scale_color: None,
             },
             "caCartesianPlot",
         )
@@ -1491,6 +1884,7 @@ mod tests {
                 rows: vec![vec![0.0, 100.0]],
                 min: 0.0,
                 max: 100.0,
+                map: caqtdm_widgets::ColorMap::Heat,
             },
             "",
             fg,

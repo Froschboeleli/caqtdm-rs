@@ -18,6 +18,6 @@ pub use image::{decode_image, decode_ppm, load_image_notes};
 pub use mda::write_rank2;
 pub use runtime::{supported_classes, toggled_bit_value, Session};
 pub use visual::{
-    cell_at, cell_rect, Action, Effect, GridCell, RoiMark, ShapeForm, ThermoBand, TreeRow, Visual,
-    VisualKind,
+    cell_at, cell_rect, colorize_rgba, qt_global_color, sample_color, Action, ColorMap, CurveStyle,
+    CurveSymbol, Effect, GridCell, RoiMark, ShapeForm, ThermoBand, TreeRow, Visual, VisualKind,
 };

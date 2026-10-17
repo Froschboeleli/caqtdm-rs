@@ -4,6 +4,7 @@
 
 mod adl;
 mod alh;
+mod edit;
 mod edl;
 mod error;
 mod expand;
@@ -12,6 +13,7 @@ mod prc;
 mod search;
 mod ui_xml;
 
+pub use edit::DisplayEditor;
 pub use error::UiError;
 pub use expand::expand_includes;
 pub use model::{

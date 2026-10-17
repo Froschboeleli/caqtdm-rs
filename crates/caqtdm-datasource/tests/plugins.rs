@@ -423,11 +423,11 @@ fn basic256sha256_chunk_and_zmtp_bsread() {
     stop.store(true, Ordering::Relaxed);
 }
 
-#[test]
-fn hipa_pro_and_sf_retrievers_round_trip() {
+#[cfg(feature = "libgmv")]
+fn gmv_round_trip() {
     use caqtdm_datasource::{
-        apply_gmv, encode_gmv_reply, fetch_gmv, gmv_window, hipa_query, post_sf, pro_query,
-        serve_gmv, serve_sf, sf_query, HIPA_HOST, PRO_HOST,
+        apply_gmv, encode_gmv_reply, fetch_gmv, gmv_window, hipa_query, pro_query, serve_gmv,
+        HIPA_HOST, PRO_HOST,
     };
 
     let (day, maxval) = gmv_window(3_600, 2);
@@ -468,6 +468,14 @@ fn hipa_pro_and_sf_retrievers_round_trip() {
     assert_eq!(seen.host, PRO_HOST);
     assert_eq!(seen.device, "MHP1");
     stop.store(true, Ordering::Relaxed);
+}
+
+#[test]
+fn hipa_pro_and_sf_retrievers_round_trip() {
+    use caqtdm_datasource::{post_sf, serve_sf, sf_query};
+
+    #[cfg(feature = "libgmv")]
+    gmv_round_trip();
 
     let query = sf_query("SF:VAC", 1_700_000_000.0, 1_700_000_100.0, None, Some(2));
     assert!(query.contains("\"format\":\"json\""));

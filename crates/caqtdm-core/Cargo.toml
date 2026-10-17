@@ -6,5 +6,9 @@ license.workspace = true
 description = "Shared types for the caQtDM Rust display manager: colors, channels, macros, calc, and value formatting."
 rust-version.workspace = true
 
+[features]
+default = ["python"]
+python = []
+
 [dependencies]
 regex.workspace = true

@@ -1,8 +1,9 @@
 //! Symmetric OPC UA chunk for the signed-and-encrypted policies.
 //!
-//! Basic128Rsa15 and Basic256 sign with HMAC-SHA1. Basic256Sha256 and
-//! Aes128_Sha256_RsaOaep sign with HMAC-SHA256. The body is AES-CBC with
-//! PKCS7 and the IV prepended. SecurityPolicy#None stays in `opcua_bin`.
+//! Basic128Rsa15 and Basic256 sign with HMAC-SHA1. Basic256Sha256,
+//! Aes128_Sha256_RsaOaep, and Aes256_Sha256_RsaPss sign with HMAC-SHA256.
+//! The body is AES-CBC with PKCS7 and the IV prepended. SecurityPolicy#None
+//! stays in `opcua_bin`.
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
@@ -17,6 +18,8 @@ pub const POLICY_BASIC256: &str = "http://opcfoundation.org/UA/SecurityPolicy#Ba
 pub const POLICY_BASIC256SHA256: &str = "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256";
 pub const POLICY_AES128_SHA256_RSAOAEP: &str =
     "http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep";
+pub const POLICY_AES256_SHA256_RSAPSS: &str =
+    "http://opcfoundation.org/UA/SecurityPolicy#Aes256_Sha256_RsaPss";
 
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -31,6 +34,7 @@ pub enum SecurityPolicy {
     Basic256,
     Basic256Sha256,
     Aes128Sha256RsaOaep,
+    Aes256Sha256RsaPss,
 }
 
 impl SecurityPolicy {
@@ -40,6 +44,7 @@ impl SecurityPolicy {
             POLICY_BASIC256 => Some(Self::Basic256),
             POLICY_BASIC256SHA256 => Some(Self::Basic256Sha256),
             POLICY_AES128_SHA256_RSAOAEP => Some(Self::Aes128Sha256RsaOaep),
+            POLICY_AES256_SHA256_RSAPSS => Some(Self::Aes256Sha256RsaPss),
             _ => None,
         }
     }
@@ -50,17 +55,31 @@ impl SecurityPolicy {
             Self::Basic256 => POLICY_BASIC256,
             Self::Basic256Sha256 => POLICY_BASIC256SHA256,
             Self::Aes128Sha256RsaOaep => POLICY_AES128_SHA256_RSAOAEP,
+            Self::Aes256Sha256RsaPss => POLICY_AES256_SHA256_RSAPSS,
         }
     }
 
-    /// RSA-OAEP-SHA1 when true, RSA PKCS#1 v1.5 when false.
+    /// RSA-OAEP when true, RSA PKCS#1 v1.5 when false.
     pub fn oaep(self) -> bool {
         !matches!(self, Self::Basic128Rsa15)
     }
 
-    /// RSA-SHA256 when true, RSA-SHA1 when false.
+    /// RSA-OAEP-SHA256. The older OAEP policies hash with SHA-1.
+    pub fn oaep_sha256(self) -> bool {
+        matches!(self, Self::Aes256Sha256RsaPss)
+    }
+
+    /// RSASSA-PSS with SHA-256. The other policies use PKCS#1 v1.5.
+    pub fn pss(self) -> bool {
+        matches!(self, Self::Aes256Sha256RsaPss)
+    }
+
+    /// RSA-SHA256 when true, RSA-SHA1 when false. PSS still hashes with SHA-256.
     pub fn asym_sha256(self) -> bool {
-        matches!(self, Self::Basic256Sha256 | Self::Aes128Sha256RsaOaep)
+        matches!(
+            self,
+            Self::Basic256Sha256 | Self::Aes128Sha256RsaOaep | Self::Aes256Sha256RsaPss
+        )
     }
 
     pub fn sym_sha256(self) -> bool {
@@ -71,14 +90,14 @@ impl SecurityPolicy {
         match self {
             Self::Basic128Rsa15 => 16,
             Self::Basic256 => 24,
-            Self::Basic256Sha256 | Self::Aes128Sha256RsaOaep => 32,
+            Self::Basic256Sha256 | Self::Aes128Sha256RsaOaep | Self::Aes256Sha256RsaPss => 32,
         }
     }
 
     pub fn enc_key_len(self) -> usize {
         match self {
             Self::Basic128Rsa15 | Self::Aes128Sha256RsaOaep => 16,
-            Self::Basic256 | Self::Basic256Sha256 => 32,
+            Self::Basic256 | Self::Basic256Sha256 | Self::Aes256Sha256RsaPss => 32,
         }
     }
 
@@ -109,7 +128,9 @@ impl SecurityPolicy {
 
     /// Extra bytes an RSA block spends on padding.
     pub fn rsa_overhead(self) -> usize {
-        if self.oaep() {
+        if self.oaep_sha256() {
+            66
+        } else if self.oaep() {
             42
         } else {
             11

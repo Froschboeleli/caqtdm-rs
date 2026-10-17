@@ -8,13 +8,13 @@ Score: done counts 1, partial counts 0.5, not started counts 0. **excluded** row
 
 | | rows | weight |
 | --- | ---: | ---: |
-| done | 84 | 84 |
+| done | 86 | 86 |
 | partial | 0 | 0 |
 | not started | 0 | 0 |
-| excluded | 2 | not scored |
-| total | 84 scored | 84 / 84 = **100%** |
+| excluded | 0 | not scored |
+| total | 86 scored | 86 / 86 = **100%** |
 
-Fully finished rows are 84 / 84 (100%). Two rows are excluded and are not in that total. A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees.
+Fully finished rows are 86 / 86 (100%). A done row is behavior a display author relies on, exercised by a test or a sample. A single assertion that the value is stored is not enough when the painted or written result is what the author sees.
 
 ## Widgets
 
@@ -56,7 +56,7 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caTable | One column per channel (`channel`, `channels`, `channels_1`..`channels_6`). A two-channel scalar row is asserted | done |
 | caWaveTable | `numberOfRows` by `numberOfColumns`, row-major. A 2x2 grid with user precision 0 is asserted | done |
 | caCamera | `channelData` bytes as mono8, rgb888, mono16, or rgba, sized by width and height. rgb888 and mono16 are tested | done |
-| caCalc | EPICS-style calc on channels A-L. `%P/` Python is refused | done |
+| caCalc | EPICS-style calc on channels A-L. `%P/` runs `PythonCalc(a, b, c, d)` when the `python` feature is on | done |
 | caWaterfallPlot | Last N waveforms (`NumberOfTraces`, capped at 64). Intensity min/max color the row from blue to red, and those pixels are checked | done |
 | caScan2D | A waveform that matches `channelWidth` by `channelHeight` is a grayscale image. Otherwise a plot | done |
 | caLineDraw | History samples as a polyline scaled into the widget. `frameLineWidth` sets the pen, and alarm color mode uses the severity color. A width-3 red pixel is checked | done |
@@ -100,11 +100,11 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | internal | soft PVs | `InternSource` shared map, read and write | done |
 | demo | pattern generators | `sim://` and `demo://` const, sine, ramp, square, enum, wave, string, and `?alarm=1` | done |
 | environment | process environment | read-only overlay plus `std::env` | done |
-| gps | receiver plugin | Simulated `utc`, `lat` 47.3769, `lon` 8.5417, `alt` 408, `sats` 8. A write to `lat` is polled back. No receiver hardware | done |
-| archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json`. HIPA and PRO send the `gmv()` argument block (`hipa-lgexp.psi.ch`, `proscan-lgexp.psi.ch`) and apply the `Valerr` hold-last rule. SF posts the plugin JSON and reads `globalSeconds` / `value.mean`. The unpublished `libgmv` codec is not in the upstream tree | done |
+| gps | receiver plugin | Default site until a fix arrives (`lat` 47.3769, `lon` 8.5417, `alt` 408, `sats` 8). `ingest_nmea` reads GGA/RMC (`ddmm.mmm`). `ingest_gpsd` reads a TPV or SKY object. `exchange_gpsd` sends `?WATCH=` and returns the first TPV. A write to `lat` is still polled back | done |
+| archive | CA, HTTP, HIPA, PRO, SF retrievers | Archiver Appliance `getData.json`. HIPA and PRO send the `gmv()` argument block (`hipa-lgexp.psi.ch`, `proscan-lgexp.psi.ch`) and apply the `Valerr` hold-last rule. `pack_log_time` / `exact_time` follow the `cvtms_c` / `ExactTime` calls (seconds from the start of the year; milliseconds stay 0). SF posts the plugin JSON and reads `globalSeconds` / `value.mean`. The byte layout is reconstructed from those calls. `libgmv` itself is not in the upstream tree | done |
 | modbus | Modbus TCP | MBAP and function codes 1, 2, 3, 4, 5, 6, 15, and 16. Address 40001 is register 0 | done |
-| opcua | OPC UA binary | Hello/Acknowledge, a Read of a numeric NodeId, and OpenSecureChannel for Basic128Rsa15 (RSA PKCS#1 v1.5, RSA-SHA1, AES-128-CBC, HMAC-SHA1, P_SHA1), Basic256 (RSA-OAEP-SHA1, RSA-SHA1, AES-256-CBC, HMAC-SHA1, P_SHA1), Basic256Sha256 (RSA-OAEP-SHA1, RSA-SHA256, AES-256-CBC, HMAC-SHA256, P_SHA256), and Aes128_Sha256_RsaOaep (RSA-OAEP-SHA1, RSA-SHA256, AES-128-CBC, HMAC-SHA256, P_SHA256). A test derives matching keys and round-trips a symmetric chunk for each | done |
-| bsread | 0MQ bsread | Three-part bsread on length-prefixed TCP, and as ZMTP 3.0 frames with NULL, PLAIN, and CURVE. CURVE is the CurveZMQ HELLO/WELCOME/INITIATE/READY/MESSAGE exchange. Not a link to libzmq | done |
+| opcua | OPC UA binary | Hello/Acknowledge, a Read of a numeric NodeId, and OpenSecureChannel for Basic128Rsa15, Basic256, Basic256Sha256, Aes128_Sha256_RsaOaep, and Aes256_Sha256_RsaPss (RSA-PSS-SHA256, RSA-OAEP-SHA256, AES-256-CBC, HMAC-SHA256, P_SHA256). A test derives matching keys and round-trips a symmetric chunk for each policy | done |
+| bsread | 0MQ bsread | Three-part bsread on length-prefixed TCP, as ZMTP 3.0 frames (NULL, PLAIN, CURVE), and through the system `libzmq.so.5` PUSH/PULL/PUB/SUB ABI. A pyzmq PULL reads a Rust PUSH, and a pyzmq PUSH is read by a Rust PULL | done |
 | epics3 | Channel Access | DBR types 0..34 round-trip. The soft IOC serves string, short, float, enum, char, long, and double on create, read, write, and monitor, including waveforms | done |
 | epics4 | PV Access / pvxs | Search, scalar get/put/monitor, and `get_nt` / `put_nt` carrying `epics:nt/NTScalar:1.0` on the wire | done |
 
@@ -115,17 +115,17 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | Feature | Upstream | Rust | Status |
 | --- | --- | --- | --- |
 | Desktop viewer | Qt `caQtDM_Viewer` | egui/eframe: paint, click, drag slider, tabs, menus, related files, macro reload. `action_for` is what the pointer handler calls. A test drives a slider drag, a plot click, a plot drag (both zoom axes), a tab, a menu row, and hit-testing | done |
-| Headless render | Qt grab / print | PPM rasterizer. Text uses fontdue with Arimo (proportional) and Cousine (monospace). A test checks advances, a descender, and that the next painted glyph follows that advance. Coverage above half is the exact widget color. Plot zoom, log scale, and the upstream `graphics.edl` pixels are tested | done |
-| CLI | `-display`, `-macro`, and many server flags | `dump`, `validate`, `convert`, `paint`, `print`, `widgets`, `config`, `run`, `serve`, `-macro`, `-cs`, `--ca`, `--pva`, `-config`, `-attach`. Also `-noMsg`, `-noResize`, `-x`, `-style`, `-stylefile`, `-displayFont`, `-dg`, `-url`, `-option`, `-httpconfig`, `-emptycache`, `-server`, `-host`, `-server_port`, `-web_server_port`, `-web_timeout`, `-web_instance_limit`, `-web_interaction_timeout`, `-web_launcher_root_file`, `-web_allow_insecure_cashell_commands`, `-savetoimage`, `-print`, `-novnc`, `-novnc_readonly`. `-displayFont` selects Arimo, Cousine, or a `.ttf` path, and an unknown name is an error | done |
+| Headless render | Qt grab / print | PPM rasterizer. Text uses fontdue. Arimo and Cousine are the selected faces. Noto Sans and Droid Sans Fallback supply Greek, Cyrillic, and CJK when the selected face has no glyph. A fully covered pixel is the widget color. Partial coverage is composited onto the pixel already there. Plot zoom, log scale, and the upstream `graphics.edl` pixels are tested | done |
+| CLI | `-display`, `-macro`, and many server flags | The upstream flags, including `-x` (accepted, display unchanged), `-?`, `-slave_server`, `-novnc_readonly` (requires `-novnc`), `-host` (a non-address is ignored), and `-server_port` 65535 mapping the web port to 65534. `-display` opens that file. `-displayFont` selects Arimo, Cousine, Noto, or a `.ttf` path | done |
 | Macro file | `-macrodefs` | one `KEY=VALUE` per line, then `-macro` overrides | done |
 | Shell policy | runs commands, web flag can allow them | dry-run unless `--execute-shell`. `caScriptButton` never runs | done |
 | HTTP / WebSocket | `-server`, web launcher | `GET /` and one RFC 6455 text frame on a local port. `-novnc` also speaks RFB 3.8 (raw encoding, security None) on TCP and the same bytes in WebSocket binary frames. `-novnc_readonly` drops pointer and key events. A test reads a red pixel off the RFB socket and checks the version string `RFB 003.008` | done |
 | Stylesheets | `-style`, `-stylefile` | `color`, `background-color`, and `font-size` on a widget `styleSheet` | done |
 | Single instance | `-attach` | TCP handshake. `run -attach HOST:PORT` sends the display path and does not open a second window | done |
-| Qt Designer plugins | `caQtDM_QtControls/plugins` | excluded. The runtime reads `.ui` files. It does not host Qt Designer | excluded |
+| Qt Designer plugins | `caQtDM_QtControls/plugins` | Qt `.so` plugins are not loaded. `install_designer_plugin` registers a custom class and paints it as a label, LED, frame, or gauge. See `DESIGNER.md`. A registered lamp is painted and the center pixel is checked | done |
 | Calc plugin ABI | Qt plugin loader plus Python | C ABI `caqtdm_plugin_abi` / `caqtdm_plugin_eval`, example cdylib adds one | done |
 | Font scaling | `fontscalingwidget` | `fontScaleMode` Height, Width, and HeightAndWidth, plus stylesheet `font-size` | done |
-| Python visibility | `%P/` expressions | excluded. `%P/` is refused with `CalcError::Unsupported`. EPICS calc and `%/pattern/` stay | excluded |
+| Python visibility | `%P/` expressions | With the default `python` feature, `python3` executes the body and calls `PythonCalc(a, b, c, d)`. Nonzero is visible. A function with another name is an error. Without the feature the same text is `CalcError::Unsupported` | done |
 | PNG, GIF, SVG images | Qt image readers | PNG and GIF through the `image` crate. SVG subset painted directly | done |
 | Camera codecs | `caCamera` | mono8, rgb888, mono16, and rgba. Tests check rgb888 and mono16 | done |
 | Print | `-print` | `caqtdm print` writes the same PPM as `paint` | done |
@@ -149,11 +149,8 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 
 These limits apply to rows marked done:
 
-- Qt Designer plugin binaries and Python `%P/` execution stay excluded.
-- HIPA and PRO speak the `gmv()` argument block. The site `libgmv` library is not in the upstream tree, so that codec is not reproduced.
-- OPC UA implements None plus Basic128Rsa15, Basic256, Basic256Sha256, and Aes128_Sha256_RsaOaep. Aes256_Sha256_RsaPss, which `opcua_core.cpp` ranks first, is not implemented.
-- bsread ZeroMQ is a ZMTP 3.0 peer (NULL, PLAIN, CURVE), not a link to libzmq.
-- GPS publishes a fixed site (latitude, longitude, altitude, satellite count) and accepts a write. It is not a receiver.
-- Headless glyphs are thresholded: coverage above 127 paints the exact widget color. That is not Qt's subpixel hinter.
-- `-x` is execute-only. This runtime has no edit mode. `-displayFont` selects Arimo, Cousine, or a TrueType file. Upstream ignores that flag.
+- The HIPA/PRO byte layout is reconstructed from `GetLogShift`, `cvtms_c`, and `ExactTime`. The site `libgmv` library is not in the upstream tree, so the bytes are not a copy of that library.
+- Glyph coverage is Arimo, Cousine, Noto Sans Regular, and Droid Sans Fallback. A pixel at coverage 255 is the exact widget color. Lower coverage is composited. That is grayscale edges, not Qt's FreeType hinter, and it is not every Unicode plane (Hangul is absent from these faces).
+- `-x` matches upstream: the flag is accepted and the display does not change. `-display` opens the named file. Upstream's help text says `-display` is ignored. `-displayFont` selects a face. Upstream consumes that flag and does not use it.
 - MEDM and EDM objects that upstream does not emit are skipped. They are not turned into a stand-in widget.
+- Qt `.ui` properties are stored. The runtime interprets the ones the widget rows describe, plus `trueColor` / `falseColor` / `undefinedColor`, `trueValue` / `falseValue`, `unitsEnabled`, `logarithmicScale`, and `alignment`. Plot legend, ROI, and extra axis-limit properties, camera save paths, and editor-only flags stay on the widget and do not change the picture.

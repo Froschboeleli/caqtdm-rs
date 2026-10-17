@@ -168,6 +168,31 @@ fn server_flags_are_reported_and_clamped() {
     assert!(limited.contains("root=root.ui"));
     assert!(limited.contains("interaction=true"));
     assert!(limited.contains("host=127.0.0.1"));
+    assert!(limited.contains("slave_server=false"));
+
+    let slave = execute(&args(&[
+        "config",
+        "-slave_server",
+        "-host",
+        "not-an-address",
+        "-server_port",
+        "65535",
+        "-?",
+    ]))
+    .unwrap();
+    assert!(slave.contains("-slave_server"));
+    assert!(slave.contains("slave_server=true") || slave.starts_with("caqtdm"));
+    let kept = execute(&args(&[
+        "config",
+        "-host",
+        "not-an-address",
+        "-slave_server",
+    ]))
+    .unwrap();
+    assert!(kept.contains("host=127.0.0.1"));
+    assert!(kept.contains("slave_server=true"));
+    let edge = execute(&args(&["config", "-server_port", "65535"])).unwrap();
+    assert!(edge.contains("web_port=65534"));
 
     let disabled = execute(&args(&["config", "-web_timeout", "30"])).unwrap();
     assert!(disabled.contains("web_timeout=0"));

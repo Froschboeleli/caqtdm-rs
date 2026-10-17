@@ -6,11 +6,13 @@
 //! through the data-source hub. Shell commands stay dry-run unless
 //! [`Session::allow_shell`] is set.
 
+mod designer;
 mod image;
 mod runtime;
 mod style;
 mod visual;
 
+pub use designer::{designer_plugins, install_designer_plugin, DesignerKind, DesignerPlugin};
 pub use image::{decode_image, decode_ppm, load_image_notes};
 pub use runtime::{supported_classes, toggled_bit_value, Session};
 pub use visual::{

@@ -177,6 +177,19 @@ pub fn paint_in(visuals: &[Visual], width: u32, height: u32) -> Image {
     image
 }
 
+fn text_origin_x(visual: &Visual, rect: caqtdm_core::Rect, text: &str) -> i32 {
+    if visual.align == 0 {
+        return rect.x + 2;
+    }
+    let advance = font::advance_current(text, visual.font_px);
+    let room = rect.width - advance;
+    if visual.align == 2 {
+        rect.x + room.max(2) - 2
+    } else {
+        rect.x + room.max(0) / 2
+    }
+}
+
 fn bounds(visuals: &[Visual]) -> (u32, u32) {
     let mut w = 320;
     let mut h = 200;
@@ -241,7 +254,7 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             image.line(cx, cy, x1, y1, visual.foreground);
         }
         VisualKind::Led { on } => {
-            let color = if *on {
+            let color = if *on || visual.class_name == "caLed" {
                 visual.foreground
             } else {
                 Color::rgb(70, 70, 70)
@@ -418,7 +431,7 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             }
         } else {
             image.text(
-                rect.x + 2,
+                text_origin_x(visual, rect, &visual.text),
                 rect.y + 2,
                 &visual.text,
                 visual.foreground,
@@ -974,6 +987,7 @@ mod tests {
             severity: Severity::NoAlarm,
             font_px: 10,
             rotation: 0,
+            align: 0,
         }
     }
 
@@ -995,6 +1009,7 @@ mod tests {
                 severity: Severity::NoAlarm,
                 font_px: 10,
                 rotation: 0,
+                align: 0,
             },
         ]);
         let mut ink = false;
@@ -1421,6 +1436,32 @@ mod tests {
             (cousine_i - cousine_w).abs() <= 1,
             "Cousine paints the next glyph at the same advance ({cousine_i} vs {cousine_w})"
         );
+        install_display_font("Arimo").unwrap();
+    }
+
+    #[test]
+    fn unicode_fallback_and_gray_edges() {
+        let (advance, _) = glyph_metrics("Arimo", 18.0, '你').unwrap();
+        assert!(advance > 1.0, "CJK falls back to a face that has the glyph");
+        let mut label = visual(VisualKind::Label, "你H", Color::rgb(0, 0, 0));
+        label.font_px = 20;
+        label.rect = Rect::new(2, 2, 160, 36);
+        label.background = Color::rgb(255, 255, 255);
+        let image = paint(&[label]);
+        let mut solid = 0;
+        let mut blended = 0;
+        for y in 3..37 {
+            for x in 3..150 {
+                let pixel = image.pixel(x, y).unwrap();
+                if pixel.r == 0 && pixel.g == 0 && pixel.b == 0 {
+                    solid += 1;
+                } else if pixel.r > 8 && pixel.r < 247 && pixel.g == pixel.r && pixel.b == pixel.r {
+                    blended += 1;
+                }
+            }
+        }
+        assert!(solid > 8, "stem pixels stay the widget color");
+        assert!(blended > 4, "partial coverage is composited, not dropped");
         install_display_font("Arimo").unwrap();
     }
 

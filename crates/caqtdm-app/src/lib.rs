@@ -63,6 +63,7 @@ struct Options {
     launcher_root: String,
     novnc: bool,
     novnc_readonly: bool,
+    slave_server: bool,
     options: Vec<(String, String)>,
 }
 
@@ -279,6 +280,7 @@ fn default_options() -> Options {
         launcher_root: String::new(),
         novnc: false,
         novnc_readonly: false,
+        slave_server: false,
         options: Vec::new(),
     }
 }
@@ -289,7 +291,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     while i < args.len() {
         let arg = args[i].as_str();
         match arg {
-            "-h" | "--help" | "-help" => options.command = "help".into(),
+            "-h" | "--help" | "-help" | "-?" => options.command = "help".into(),
             "--execute-shell" => options.execute_shell = true,
             "-noMsg" => options.no_msg = true,
             "-noResize" => options.no_resize = true,
@@ -300,6 +302,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "-web_allow_insecure_cashell_commands" => options.allow_insecure_shell = true,
             "-novnc" => options.novnc = true,
             "-novnc_readonly" => options.novnc_readonly = true,
+            "-slave_server" => options.slave_server = true,
             "-server" => options.server = true,
             "-print" => options.command = "print".into(),
             "-macro"
@@ -360,7 +363,11 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     }
                     "-web_timeout" => options.web_timeout = parse_timeout(&value)?,
                     "-web_instance_limit" => options.web_limit = parse_limit(&value)?,
-                    "-host" => options.host = value,
+                    "-host" => {
+                        if value.parse::<std::net::IpAddr>().is_ok() {
+                            options.host = value;
+                        }
+                    }
                     "-web_launcher_root_file" => options.launcher_root = value,
                     _ => {}
                 }
@@ -569,7 +576,9 @@ fn framebuffer(options: &Options) -> Result<RfbFrame, String> {
 fn effective_web_port(options: &Options) -> u16 {
     if options.web_port_set {
         options.web_port
-    } else if options.server_port > 0 && options.server_port < u16::MAX {
+    } else if options.server_port == u16::MAX {
+        options.server_port - 1
+    } else if options.server_port > 0 {
         options.server_port.saturating_add(1)
     } else {
         0
@@ -670,7 +679,7 @@ fn config_text(options: &Options) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     text.push_str(&format!(
-        "style={}\nstylefile={}\nfont={}\ngeometry={}\nurl={}\nhost={}\nserver_port={}\nweb_port={}\nweb_timeout={}\nweb_limit={}\nnoMsg={}\nnoResize={}\nexecute_only={}\nhttpconfig={}\ninteraction={}\nroot={}\n",
+        "style={}\nstylefile={}\nfont={}\ngeometry={}\nurl={}\nhost={}\nserver_port={}\nweb_port={}\nweb_timeout={}\nweb_limit={}\nnoMsg={}\nnoResize={}\nexecute_only={}\nhttpconfig={}\ninteraction={}\nroot={}\nslave_server={}\n",
         options.style,
         style_file,
         options.display_font,
@@ -687,6 +696,7 @@ fn config_text(options: &Options) -> String {
         options.http_config,
         options.web_interaction,
         options.launcher_root,
+        options.slave_server,
     ));
     if let Some((_, count)) = options
         .options
@@ -732,7 +742,7 @@ Options:
   -o FILE             PPM output for paint and print
   -savetoimage FILE   same as -o, and selects paint when no command is given
   --execute-shell     run caShellCommand instead of recording it
-  -x                  execute-only (accepted, there is no edit mode)
+  -x                  accepted and ignored, matching upstream (MEDM execute-only has no effect)
   -noMsg              quiet the status page
   -noResize           report that the window should not be resized
   -style NAME         style name reported on the status page
@@ -744,7 +754,8 @@ Options:
   -httpconfig         print the operator settings
   -emptycache         delete files in the display cache
   -server             status page and attach port
-  -host ADDR          bind address (default 127.0.0.1)
+  -host ADDR          bind address (default 127.0.0.1). A non-address is ignored
+  -slave_server       mark this process as a web child, matching upstream
   -server_port N      attach port (0 picks a free port)
   -web_server_port N  status-page port (default is the attach port plus one)
   -web_timeout SECS   ignored when under 76

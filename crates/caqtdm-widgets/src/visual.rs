@@ -17,6 +17,8 @@ pub struct Visual {
     pub font_px: i32,
     /// Degrees clockwise. `caLabelVertical` uses 90.
     pub rotation: i32,
+    /// 0 left, 1 center, 2 right. From the widget `alignment` property.
+    pub align: i8,
 }
 
 #[derive(Debug, Clone, PartialEq)]

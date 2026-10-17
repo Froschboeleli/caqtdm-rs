@@ -6,9 +6,8 @@
 //! EPICS Channel Access and PV Access live in `caqtdm-epics-ca` and
 //! `caqtdm-epics-pva`. They implement [`DataSource`] and are registered on
 //! the hub by the application. The plugins in this crate cover the rest of
-//! the upstream set: simulated data, soft PVs, the environment, a GPS time
-//! base, an archive fixture, Modbus TCP registers, and partial OPC UA and
-//! bsread stand-ins.
+//! the upstream set: simulated data, soft PVs, the environment, a GPS receiver
+//! path, archive retrievers, Modbus TCP registers, OPC UA, and bsread.
 
 mod archive;
 mod archive_sites;
@@ -18,6 +17,8 @@ mod error;
 mod gps;
 mod hub;
 mod intern;
+#[cfg(has_libzmq)]
+mod libzmq_bsread;
 mod modbus;
 mod opcua;
 mod opcua_bin;
@@ -34,8 +35,9 @@ pub use archive::{
 };
 pub use archive_sites::{
     apply_gmv, decode_gmv_reply, decode_gmv_request, encode_gmv_reply, encode_gmv_request,
-    fetch_gmv, gmv_window, hipa_query, parse_sf_response, post_sf, pro_query, serve_gmv, serve_sf,
-    sf_query, GmvQuery, GmvSample, SfSample, HIPA_HOST, PRO_HOST,
+    exact_time, fetch_gmv, gmv_window, hipa_query, hours_from_now, pack_log_time,
+    parse_sf_response, post_sf, pro_query, serve_gmv, serve_sf, sf_query, unpack_log_time,
+    GmvQuery, GmvSample, SfSample, HIPA_HOST, PRO_HOST,
 };
 pub use bsread::{
     bsread_parts, decode_bsread, decode_bsread_parts, encode_bsread, fetch_bsread, serve_bsread,
@@ -43,9 +45,14 @@ pub use bsread::{
 };
 pub use env::EnvSource;
 pub use error::DsError;
-pub use gps::GpsSource;
+pub use gps::{exchange_gpsd, gpsd_watch_request, parse_gpsd, parse_nmea, GpsFix, GpsSource};
 pub use hub::Hub;
 pub use intern::InternSource;
+#[cfg(has_libzmq)]
+pub use libzmq_bsread::{
+    bind_pub, bind_pull, bind_push, connect_pull, connect_sub, recv_bsread_libzmq,
+    send_bsread_libzmq, serve_bsread_pull, take_bsread, Socket as ZmqSocket,
+};
 pub use modbus::{
     decode_response, encode_request, exchange, serve_loopback, Mbap, ModbusSource, Pdu,
     RegisterMap, FN_READ_COILS, FN_READ_DISCRETE, FN_READ_HOLDING, FN_READ_INPUT, FN_WRITE_COIL,
@@ -63,8 +70,8 @@ pub use opcua_handshake::{
 };
 pub use opcua_sec::{
     open as open_secure_chunk, seal as seal_secure_chunk, SecurityPolicy, SymKeys,
-    POLICY_AES128_SHA256_RSAOAEP, POLICY_BASIC128RSA15, POLICY_BASIC256, POLICY_BASIC256SHA256,
-    POLICY_NONE,
+    POLICY_AES128_SHA256_RSAOAEP, POLICY_AES256_SHA256_RSAPSS, POLICY_BASIC128RSA15,
+    POLICY_BASIC256, POLICY_BASIC256SHA256, POLICY_NONE,
 };
 pub use sim::SimSource;
 pub use source::{DataSource, Update};

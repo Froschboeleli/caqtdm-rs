@@ -99,6 +99,31 @@ fn env_overlay_and_gps_clock() {
     assert_eq!(value("lon").as_f64(), Some(8.5417));
     assert_eq!(value("alt").as_f64(), Some(408.0));
     assert_eq!(value("sats").as_f64(), Some(8.0));
+    let sentence = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
+    let fix = caqtdm_datasource::parse_nmea(sentence).unwrap();
+    assert!((fix.lat - 48.1173).abs() < 1e-3);
+    assert!((fix.lon - 11.516666).abs() < 1e-3);
+    assert_eq!(fix.sats, 8);
+    assert!((fix.alt - 545.4).abs() < 1e-6);
+    gps.ingest_nmea(sentence);
+    gps.ingest_gpsd(r#"{"class":"SKY","uSat":11}"#);
+    gps.ingest_gpsd(
+        r#"{"class":"TPV","lat":46.5,"lon":7.25,"alt":1200.0,"time":"2024-01-02T03:04:05.000Z"}"#,
+    );
+    let received = gps.poll(1_700_000_000_000);
+    let received = |name: &str| {
+        received
+            .iter()
+            .find(|update| update.data.description.ends_with(name))
+            .unwrap()
+            .data
+            .value
+            .clone()
+    };
+    assert!((received("lat").as_f64().unwrap() - 46.5).abs() < 1e-9);
+    assert!((received("lon").as_f64().unwrap() - 7.25).abs() < 1e-9);
+    assert!((received("alt").as_f64().unwrap() - 1200.0).abs() < 1e-9);
+    assert_eq!(received("sats").as_f64(), Some(11.0));
     let lat = caqtdm_core::parse_channel("lat", "gps");
     gps.set_value(&lat, &PutValue::Double(1.25)).unwrap();
     let moved = gps.poll(1_700_000_000_000);
@@ -107,6 +132,28 @@ fn env_overlay_and_gps_clock() {
         .find(|update| update.data.description.ends_with("lat"))
         .unwrap();
     assert_eq!(lat.data.value.as_f64(), Some(1.25));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 256];
+        let n = std::io::Read::read(&mut sock, &mut buf).unwrap();
+        let text = String::from_utf8_lossy(&buf[..n]);
+        assert!(text.contains("?WATCH="), "{text}");
+        use std::io::Write;
+        sock.write_all(b"{\"class\":\"VERSION\",\"release\":\"3.25\"}\n")
+            .unwrap();
+        sock.write_all(
+            b"{\"class\":\"TPV\",\"lat\":47.1,\"lon\":8.2,\"alt\":400.0,\"time\":\"2024-06-01T00:00:00.000Z\"}\n",
+        )
+        .unwrap();
+    });
+    let fix = caqtdm_datasource::exchange_gpsd(addr).unwrap();
+    assert!((fix.lat - 47.1).abs() < 1e-9);
+    assert!((fix.lon - 8.2).abs() < 1e-9);
+    assert!((fix.alt - 400.0).abs() < 1e-9);
+    server.join().unwrap();
 }
 
 #[test]
@@ -392,6 +439,11 @@ fn hipa_pro_and_sf_retrievers_round_trip() {
     assert_eq!(hipa.logid, "U");
     assert_eq!(hipa.tau, -99);
     assert_ne!(hipa.host, pro.host);
+    let packed = caqtdm_datasource::pack_log_time(10, 0, 0, 1);
+    assert_eq!(caqtdm_datasource::unpack_log_time(packed), (10, 0, 0, 1, 0));
+    let now = caqtdm_datasource::exact_time(caqtdm_datasource::pack_log_time(10, 12, 0, 0));
+    let earlier = caqtdm_datasource::pack_log_time(10, 11, 0, 0);
+    assert!((caqtdm_datasource::hours_from_now(earlier, now) + 1.0).abs() < 1e-6);
 
     let mut values = vec![1.5f32, 2.5, 3.5, 9.0, 4.5, 5.5];
     let times = vec![10, 20, 30, 40, 50, 8];
@@ -449,6 +501,7 @@ fn opcua_open_secure_channel_derives_matching_keys() {
         SecurityPolicy::Basic256,
         SecurityPolicy::Basic256Sha256,
         SecurityPolicy::Aes128Sha256RsaOaep,
+        SecurityPolicy::Aes256Sha256RsaPss,
     ] {
         let nonce = vec![0x11u8; policy.nonce_len()];
         let server_nonce = vec![0x22u8; policy.nonce_len()];

@@ -39,6 +39,43 @@ pub struct GmvSample {
     pub value: f32,
 }
 
+/// Pack a log timestamp the way `cvtms_c` is used.
+///
+/// `GetLogShift` calls `cvtms_c(yearday, 0, 0, 1, 0, &retr_time)`. The sample
+/// path calls `cnvms_c` and then `ExactTime`. A day-of-year plus milliseconds
+/// does not fit in the 32-bit `Timef` those functions share, and the retrieval
+/// call passes milliseconds 0, so this packing is seconds from the start of
+/// the year. `unpack_log_time` is the inverse `cnvms_c` shape `(day, hour,
+/// minute, second, millis)`.
+pub fn pack_log_time(day: i32, hour: i32, minute: i32, second: i32) -> i32 {
+    day * 86_400 + hour * 3_600 + minute * 60 + second
+}
+
+/// Inverse of [`pack_log_time`]. Milliseconds stay 0.
+pub fn unpack_log_time(timef: i32) -> (i32, i32, i32, i32, i32) {
+    let day = timef.div_euclid(86_400);
+    let rest = timef.rem_euclid(86_400);
+    let hour = rest / 3_600;
+    let minute = (rest % 3_600) / 60;
+    let second = rest % 60;
+    (day, hour, minute, second, 0)
+}
+
+/// `ExactTime` in `hipaRetrieval.c`: day plus the fraction of the day.
+pub fn exact_time(timef: i32) -> f64 {
+    let (day, hour, minute, second, millis) = unpack_log_time(timef);
+    let daytime = f64::from(hour)
+        + f64::from(minute) / 60.0
+        + f64::from(second) / 3600.0
+        + f64::from(millis) / 3_600_000.0;
+    f64::from(day) + daytime / 24.0
+}
+
+/// Hours relative to `now_day`, matching the loop that rewrites `Timer`.
+pub fn hours_from_now(timef: i32, now_day: f64) -> f64 {
+    (exact_time(timef) - now_day) * 24.0
+}
+
 /// Day offset and buffer length from `GetLogShift`.
 pub fn gmv_window(start_seconds: i32, hour: i32) -> (i32, i32) {
     let start_hours = start_seconds / 3600;

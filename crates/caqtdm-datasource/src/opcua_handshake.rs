@@ -4,12 +4,17 @@
 //! thumbprint (SHA-1). Basic128Rsa15 signs with RSA-SHA1 and encrypts with
 //! RSA PKCS#1 v1.5. Basic256 signs with RSA-SHA1 and encrypts with RSA-OAEP.
 //! Basic256Sha256 and Aes128_Sha256_RsaOaep sign with RSA-SHA256 and encrypt
-//! with RSA-OAEP. Both sides then run P_SHA1 or P_SHA256 over the nonces.
+//! with RSA-OAEP-SHA1. Aes256_Sha256_RsaPss signs with RSA-PSS-SHA256 and
+//! encrypts with RSA-OAEP-SHA256. Both sides then run P_SHA1 or P_SHA256
+//! over the nonces.
 
 use rand::rngs::OsRng;
 use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
 use rsa::pkcs8::EncodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer, Verifier};
+use rsa::pss::{
+    Signature as PssSignature, SigningKey as PssSigningKey, VerifyingKey as PssVerifyingKey,
+};
+use rsa::signature::{RandomizedSigner, SignatureEncoding, Signer, Verifier};
 use rsa::traits::PublicKeyParts;
 use rsa::{Oaep, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use sha1::{Digest, Sha1};
@@ -420,7 +425,10 @@ fn verify_and_unpad(
 }
 
 fn sign_rsa(policy: SecurityPolicy, key: &RsaPrivateKey, data: &[u8]) -> Result<Vec<u8>, DsError> {
-    if policy.asym_sha256() {
+    if policy.pss() {
+        let signing = PssSigningKey::<Sha256>::new(key.clone());
+        Ok(signing.sign_with_rng(&mut OsRng, data).to_bytes().to_vec())
+    } else if policy.asym_sha256() {
         let signing = SigningKey::<Sha256>::new(key.clone());
         Ok(signing.sign(data).to_bytes().to_vec())
     } else {
@@ -435,6 +443,13 @@ fn verify_rsa(
     data: &[u8],
     sig: &[u8],
 ) -> Result<(), DsError> {
+    if policy.pss() {
+        let signature =
+            PssSignature::try_from(sig).map_err(|_| DsError::new("OPN signature length"))?;
+        return PssVerifyingKey::<Sha256>::new(public.clone())
+            .verify(data, &signature)
+            .map_err(|_| DsError::new("OPN signature mismatch"));
+    }
     let signature = Signature::try_from(sig).map_err(|_| DsError::new("OPN signature length"))?;
     if policy.asym_sha256() {
         VerifyingKey::<Sha256>::new(public.clone())
@@ -455,7 +470,11 @@ fn rsa_encrypt(
     let plain_block = modulus_len(public) - policy.rsa_overhead();
     let mut out = Vec::new();
     for chunk in data.chunks(plain_block) {
-        let block = if policy.oaep() {
+        let block = if policy.oaep_sha256() {
+            public
+                .encrypt(&mut OsRng, Oaep::new::<Sha256>(), chunk)
+                .map_err(|_| DsError::new("OPN RSA-OAEP-SHA256 encrypt"))?
+        } else if policy.oaep() {
             public
                 .encrypt(&mut OsRng, Oaep::new::<Sha1>(), chunk)
                 .map_err(|_| DsError::new("OPN RSA-OAEP encrypt"))?
@@ -480,7 +499,10 @@ fn rsa_decrypt(
     }
     let mut out = Vec::new();
     for chunk in data.chunks(modulus) {
-        let block = if policy.oaep() {
+        let block = if policy.oaep_sha256() {
+            key.decrypt(Oaep::new::<Sha256>(), chunk)
+                .map_err(|_| DsError::new("OPN RSA-OAEP-SHA256 decrypt"))?
+        } else if policy.oaep() {
             key.decrypt(Oaep::new::<Sha1>(), chunk)
                 .map_err(|_| DsError::new("OPN RSA-OAEP decrypt"))?
         } else {

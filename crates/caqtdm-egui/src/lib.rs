@@ -240,17 +240,29 @@ fn draw(
         }
     }
     if let VisualKind::Led { on } = &visual.kind {
-        let fill = if *on { fg } else { egui::Color32::DARK_GRAY };
+        let fill = if *on || visual.class_name == "caLed" {
+            fg
+        } else {
+            egui::Color32::DARK_GRAY
+        };
         painter.circle_filled(rect.center(), rect.width().min(rect.height()) * 0.4, fill);
     }
     if !visual.text.is_empty() {
-        painter.text(
-            rect.left_top() + egui::vec2(3.0, 2.0),
-            egui::Align2::LEFT_TOP,
-            &visual.text,
-            egui::FontId::monospace(13.0),
-            fg,
-        );
+        let (pos, align) = match visual.align {
+            1 => (
+                rect.center_top() + egui::vec2(0.0, 2.0),
+                egui::Align2::CENTER_TOP,
+            ),
+            2 => (
+                rect.right_top() + egui::vec2(-3.0, 2.0),
+                egui::Align2::RIGHT_TOP,
+            ),
+            _ => (
+                rect.left_top() + egui::vec2(3.0, 2.0),
+                egui::Align2::LEFT_TOP,
+            ),
+        };
+        painter.text(pos, align, &visual.text, egui::FontId::monospace(13.0), fg);
     }
 }
 
@@ -380,6 +392,7 @@ mod tests {
             severity: Severity::NoAlarm,
             font_px: 10,
             rotation: 0,
+            align: 0,
         }
     }
 

@@ -275,3 +275,92 @@ fn analog_clock_reads_the_tick() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn designer_plugin_paints_as_the_registered_kind() {
+    use caqtdm_widgets::{install_designer_plugin, DesignerKind, DesignerPlugin};
+
+    install_designer_plugin(DesignerPlugin {
+        class_name: "psiDemoLamp".into(),
+        group: "PSI".into(),
+        properties: vec!["channel".into(), "foreground".into()],
+        kind: DesignerKind::Led,
+    });
+    let mut lamp = leaf("psiDemoLamp", "lamp", "");
+    lamp.set_prop(
+        "foreground",
+        PropValue::Color(caqtdm_core::Color::rgb(0, 180, 0)),
+    );
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(lamp);
+    let session = session(root, InternSource::new());
+    let visuals = session.visuals();
+    let visual = visuals.iter().find(|v| v.name == "lamp").unwrap();
+    assert!(matches!(visual.kind, VisualKind::Led { on: true }));
+    let image = caqtdm_paint::paint(std::slice::from_ref(visual));
+    let pixel = image
+        .pixel(
+            visual.rect.x + visual.rect.width / 2,
+            visual.rect.y + visual.rect.height / 2,
+        )
+        .unwrap();
+    assert!(pixel.g > 100, "registered lamp paints a lit pixel");
+}
+
+#[test]
+fn led_units_alignment_and_log_scale_follow_the_properties() {
+    use caqtdm_core::ChannelData;
+
+    let mut led = leaf("caLed", "lamp", "intern://LAMP");
+    led.set_prop(
+        "trueColor",
+        PropValue::Color(caqtdm_core::Color::rgb(0, 200, 0)),
+    );
+    led.set_prop(
+        "falseColor",
+        PropValue::Color(caqtdm_core::Color::rgb(180, 0, 0)),
+    );
+    led.set_prop("trueValue", PropValue::String("2".into()));
+    let mut entry = leaf("caLineEdit", "readout", "intern://EGU");
+    entry.set_prop("unitsEnabled", PropValue::Bool(true));
+    let mut label = leaf("caLabel", "title", "");
+    label.set_prop("text", PropValue::String("Hi".into()));
+    label.set_prop("alignment", PropValue::Set("Qt::AlignRight".into()));
+    label.rect.width = 80;
+    let mut gauge = leaf("caLinearGauge", "bar", "intern://LOG");
+    gauge.set_prop("minValue", PropValue::Double(1.0));
+    gauge.set_prop("maxValue", PropValue::Double(100.0));
+    gauge.set_prop("limitsMode", PropValue::Enum("User".into()));
+    gauge.set_prop("logarithmicScale", PropValue::Bool(true));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.extend([led, entry, label, gauge]);
+    let mut hub = Hub::new("epics3");
+    let intern = InternSource::new();
+    intern.insert("LAMP", ChannelData::scalar(2.0));
+    let mut egu = ChannelData::scalar(3.5);
+    egu.units = "mA".into();
+    intern.insert("EGU", egu);
+    intern.insert("LOG", ChannelData::scalar(10.0));
+    hub.register(Box::new(intern));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    session.tick(0);
+    let visuals = session.visuals();
+    let lamp = visuals.iter().find(|v| v.name == "lamp").unwrap();
+    assert!(matches!(lamp.kind, VisualKind::Led { on: true }));
+    assert_eq!(lamp.foreground, caqtdm_core::Color::rgb(0, 200, 0));
+    let readout = visuals.iter().find(|v| v.name == "readout").unwrap();
+    assert!(readout.text.ends_with(" mA"), "{}", readout.text);
+    let title = visuals.iter().find(|v| v.name == "title").unwrap();
+    assert_eq!(title.align, 2);
+    let bar = visuals.iter().find(|v| v.name == "bar").unwrap();
+    match &bar.kind {
+        VisualKind::Gauge {
+            fraction,
+            circular: false,
+        } => {
+            let expected = (10.0f64.log10() - 1.0f64.log10()) / (100.0f64.log10() - 1.0f64.log10());
+            assert!((fraction - expected).abs() < 1e-9, "{fraction}");
+        }
+        other => panic!("{other:?}"),
+    }
+}

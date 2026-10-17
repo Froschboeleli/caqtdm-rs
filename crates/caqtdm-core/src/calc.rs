@@ -106,9 +106,7 @@ pub fn eval_calc(expr: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
         return Err(CalcError::Empty);
     }
     if trimmed.starts_with("%P/") || trimmed.starts_with("%p/") {
-        return Err(CalcError::Unsupported(
-            "Python visibility expressions are not executed".to_string(),
-        ));
+        return eval_python(trimmed, inputs);
     }
     let tokens = tokenize(trimmed)?;
     let mut parser = Parser {
@@ -134,6 +132,77 @@ pub fn eval_visibility(expr: &str, inputs: &CalcInputs) -> Result<bool, CalcErro
     }
     Ok(eval_calc(trimmed, inputs)? != 0.0)
 }
+
+fn eval_python(expr: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
+    #[cfg(not(feature = "python"))]
+    {
+        let _ = (expr, inputs);
+        Err(CalcError::Unsupported(
+            "Python visibility expressions need the python feature".to_string(),
+        ))
+    }
+    #[cfg(feature = "python")]
+    {
+        let body = python_body(expr)?;
+        let mut child = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(PYTHON_RUNNER)
+            .args(inputs.vars.iter().take(4).map(|v| v.to_string()))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| CalcError::Unsupported(format!("python3: {err}")))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin
+                .write_all(body.as_bytes())
+                .map_err(|err| CalcError::Unsupported(format!("python3 stdin: {err}")))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|err| CalcError::Unsupported(format!("python3: {err}")))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err(CalcError::Unsupported(format!(
+                "PythonCalc failed: {}",
+                err.trim()
+            )));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.trim()
+            .parse::<f64>()
+            .map_err(|_| CalcError::Unsupported(format!("PythonCalc returned {text:?}")))
+    }
+}
+
+#[cfg(feature = "python")]
+fn python_body(expr: &str) -> Result<&str, CalcError> {
+    let rest = expr
+        .get(3..)
+        .ok_or_else(|| CalcError::Syntax("python form".into()))?;
+    let body = rest.strip_suffix('/').unwrap_or(rest).trim();
+    if !body.contains("PythonCalc") {
+        return Err(CalcError::Unsupported(
+            "python function not found, must be called PythonCalc".into(),
+        ));
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "python")]
+const PYTHON_RUNNER: &str = r#"
+import sys
+source = sys.stdin.read()
+namespace = {"__builtins__": __builtins__}
+exec(source, namespace)
+fn = namespace.get("PythonCalc")
+if not callable(fn):
+    sys.stderr.write("PythonCalc missing\n")
+    sys.exit(2)
+args = [float(item) for item in sys.argv[1:5]]
+print(float(fn(*args)))
+"#;
 
 fn regex_body(expr: &str) -> Option<&str> {
     let rest = expr.strip_prefix("%/")?;
@@ -665,5 +734,22 @@ mod tests {
         assert!(eval_visibility("A", &inputs).unwrap());
         inputs.set(0, 0.0);
         assert!(!eval_visibility("A", &inputs).unwrap());
+    }
+
+    #[cfg(feature = "python")]
+    #[test]
+    fn python_calc_is_visible_when_the_function_is_nonzero() {
+        let expr = "%P/def PythonCalc(a, b, c, d):\n    return a * b + c\n/";
+        let mut inputs = CalcInputs::default();
+        inputs.set(0, 2.0);
+        inputs.set(1, 3.0);
+        inputs.set(2, 1.0);
+        assert_eq!(eval_calc(expr, &inputs).unwrap(), 7.0);
+        assert!(eval_visibility(expr, &inputs).unwrap());
+        inputs.set(0, 0.0);
+        inputs.set(1, 0.0);
+        inputs.set(2, 0.0);
+        assert!(!eval_visibility(expr, &inputs).unwrap());
+        assert!(eval_calc("%P/def Other(a, b, c, d):\n    return 1\n/", &inputs).is_err());
     }
 }

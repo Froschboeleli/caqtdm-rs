@@ -329,7 +329,10 @@ impl Session {
 
     fn visual(&self, id: u32, node: &WidgetNode) -> Visual {
         let data = self.primary(node);
-        let (foreground, background) = colors(node, data);
+        let (mut foreground, background) = colors(node, data);
+        if node.class_name == "caLed" {
+            foreground = led_lamp(node, data, foreground);
+        }
         let visible = self.is_visible(node);
         let text = self.caption(node, data);
         let kind = self.kind(node, data);
@@ -346,13 +349,14 @@ impl Session {
             severity: data.map(|d| d.severity).unwrap_or(Severity::NotConnected),
             font_px: font_px_of(node),
             rotation: rotation_of(node),
+            align: align_of(node),
         }
     }
 
     fn kind(&self, node: &WidgetNode, data: Option<&ChannelData>) -> VisualKind {
         let value = data.and_then(|d| d.value.as_f64()).unwrap_or(0.0);
         let (min, max) = limits_of(node, data);
-        let fraction = fraction(value, min, max);
+        let fraction = scaled_fraction(node, value, min, max);
         match node.class_name.as_str() {
             "caLabel" | "caLabelVertical" | "QLabel" | "caMultiLineString" | "QTextEdit"
             | "QPlainTextEdit" => VisualKind::Label,
@@ -401,7 +405,13 @@ impl Session {
             },
             "caMeter" => VisualKind::Meter { fraction },
             "caLed" => VisualKind::Led {
-                on: led_on(node, value),
+                on: led_on(
+                    node,
+                    value,
+                    data.map(|item| item.value.as_text())
+                        .as_deref()
+                        .unwrap_or(""),
+                ),
             },
             "caGraphics" => VisualKind::Shape {
                 form: shape_form(node),
@@ -501,7 +511,7 @@ impl Session {
                 closed: false,
                 width: node.prop_f64("frameLineWidth").unwrap_or(1.0).max(1.0) as i32,
             },
-            _ => VisualKind::Unknown,
+            other => crate::designer::designer_kind(other).unwrap_or(VisualKind::Unknown),
         }
     }
 
@@ -530,7 +540,11 @@ impl Session {
                     return data.value.as_text();
                 }
                 if let Some(value) = data.value.as_f64() {
-                    return format_number(value, format, precision_of(node, Some(data)));
+                    return with_units(
+                        node,
+                        data,
+                        format_number(value, format, precision_of(node, Some(data))),
+                    );
                 }
                 return data.value.as_text();
             }
@@ -997,13 +1011,91 @@ fn precision_of(node: &WidgetNode, data: Option<&ChannelData>) -> i32 {
     }
 }
 
-fn led_on(node: &WidgetNode, value: f64) -> bool {
+fn led_on(node: &WidgetNode, value: f64, text: &str) -> bool {
+    if let Some(token) = node.prop_str("trueValue").filter(|text| !text.is_empty()) {
+        if let Ok(number) = token.parse::<f64>() {
+            return (value - number).abs() < 1e-9;
+        }
+        return text == token;
+    }
+    if let Some(token) = node.prop_str("falseValue").filter(|text| !text.is_empty()) {
+        if let Ok(number) = token.parse::<f64>() {
+            if (value - number).abs() < 1e-9 {
+                return false;
+            }
+        } else if text == token {
+            return false;
+        }
+    }
     let bit = node.prop_f64("bitNr").unwrap_or(-1.0);
     if bit >= 0.0 {
         let mask = 1u32 << (bit as u32);
         (value as u32) & mask != 0
     } else {
         value != 0.0
+    }
+}
+
+/// Lamp color for `caLed`. On uses `trueColor`, off uses `falseColor`, and a
+/// disconnected channel uses `undefinedColor` when that property is set.
+fn led_lamp(node: &WidgetNode, data: Option<&ChannelData>, fallback: Color) -> Color {
+    let value = data.and_then(|item| item.value.as_f64()).unwrap_or(0.0);
+    let text = data.map(|item| item.value.as_text()).unwrap_or_default();
+    if data.is_some_and(|item| !item.connected) {
+        if let Some(color) = prop_color(node, "undefinedColor") {
+            return color;
+        }
+    }
+    if led_on(node, value, &text) {
+        prop_color(node, "trueColor").unwrap_or(fallback)
+    } else {
+        prop_color(node, "falseColor").unwrap_or(Color::rgb(70, 70, 70))
+    }
+}
+
+fn prop_color(node: &WidgetNode, key: &str) -> Option<Color> {
+    node.prop(key).and_then(PropValue::as_color)
+}
+
+fn with_units(node: &WidgetNode, data: &ChannelData, text: String) -> String {
+    if node.prop("unitsEnabled").and_then(PropValue::as_bool) != Some(true) {
+        return text;
+    }
+    let units = node
+        .prop_str("units")
+        .filter(|item| !item.is_empty())
+        .unwrap_or(data.units.as_str());
+    if units.is_empty() {
+        text
+    } else {
+        format!("{text} {units}")
+    }
+}
+
+fn scaled_fraction(node: &WidgetNode, value: f64, min: f64, max: f64) -> f64 {
+    let log = node
+        .prop("logarithmicScale")
+        .and_then(PropValue::as_bool)
+        .unwrap_or(false);
+    if log && min > 0.0 && max > min && value > 0.0 {
+        let start = min.log10();
+        let end = max.log10();
+        return fraction(value.log10(), start, end);
+    }
+    fraction(value, min, max)
+}
+
+fn align_of(node: &WidgetNode) -> i8 {
+    let raw = node
+        .enum_tail("alignment")
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if raw.contains("right") {
+        2
+    } else if raw.contains("center") {
+        1
+    } else {
+        0
     }
 }
 

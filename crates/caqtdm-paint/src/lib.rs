@@ -177,6 +177,21 @@ pub fn paint_in(visuals: &[Visual], width: u32, height: u32) -> Image {
     image
 }
 
+fn stroke_border(image: &mut Image, rect: Rect, color: Color, width: i32) {
+    let width = width.max(1);
+    for inset in 0..width {
+        let band = Rect::new(
+            rect.x + inset,
+            rect.y + inset,
+            rect.width - 2 * inset,
+            rect.height - 2 * inset,
+        );
+        if band.width > 0 && band.height > 0 {
+            image.stroke_rect(band, color);
+        }
+    }
+}
+
 fn text_origin_x(visual: &Visual, rect: caqtdm_core::Rect, text: &str) -> i32 {
     if visual.align == 0 {
         return rect.x + 2;
@@ -203,7 +218,12 @@ fn bounds(visuals: &[Visual]) -> (u32, u32) {
 fn paint_one(image: &mut Image, visual: &Visual) {
     let rect = visual.rect;
     image.fill_rect(rect, visual.background);
-    image.stroke_rect(rect, visual.foreground);
+    stroke_border(
+        image,
+        rect,
+        visual.border.unwrap_or(visual.foreground),
+        visual.border_px,
+    );
     match &visual.kind {
         VisualKind::Slider { fraction, .. } => {
             let filled = Rect::new(
@@ -300,6 +320,9 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             log_y,
             x_ticks,
             cursors,
+            legend,
+            colors,
+            axes,
         } => {
             paint_plot(
                 image,
@@ -319,6 +342,9 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                     log_y: *log_y,
                     x_ticks: *x_ticks,
                     cursors,
+                    legend,
+                    colors,
+                    axes,
                 },
             );
         }
@@ -394,8 +420,14 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             rgba,
             width,
             height,
+            roi,
             ..
-        } => blit_rgba(image, rect, rgba, *width, *height),
+        } => {
+            blit_rgba(image, rect, rgba, *width, *height);
+            if let Some(mark) = roi {
+                paint_roi(image, rect, mark, *width, *height);
+            }
+        }
         VisualKind::Frame => {}
         _ => {}
     }
@@ -455,6 +487,9 @@ struct PlotPaint<'a> {
     log_y: bool,
     x_ticks: u32,
     cursors: &'a [f64],
+    legend: &'a [String],
+    colors: &'a [Option<Color>],
+    axes: &'a [(f64, f64)],
 }
 
 fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotPaint<'_>) {
@@ -519,20 +554,22 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         );
     }
     for (index, samples) in plot_paint.series.iter().enumerate() {
-        let (lo, hi) = if index > 0 && plot_paint.y2_max > plot_paint.y2_min {
-            (plot_paint.y2_min, plot_paint.y2_max)
-        } else {
-            (plot_paint.y_min, plot_paint.y_max)
-        };
+        let (lo, hi) = series_window(index, plot_paint);
+        let color = plot_paint
+            .colors
+            .get(index)
+            .and_then(|color| *color)
+            .unwrap_or_else(|| series_color(index, visual.foreground));
         paint_series_scaled(
             image,
             plot,
             samples,
-            series_color(index, visual.foreground),
+            color,
             (plot_paint.x_min, plot_paint.x_max, lo, hi),
             plot_paint.log_y,
         );
     }
+    paint_legend(image, rect, visual, plot_paint);
     for cursor in plot_paint.cursors {
         let x = plot.x + (cursor.clamp(0.0, 1.0) * f64::from(plot.width - 1)) as i32;
         image.line(
@@ -543,6 +580,92 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             Color::rgb(220, 40, 40),
         );
     }
+}
+
+fn series_window(index: usize, plot_paint: &PlotPaint<'_>) -> (f64, f64) {
+    if index > 0 {
+        if let Some((lo, hi)) = plot_paint.axes.get(index) {
+            if hi > lo && lo.is_finite() && hi.is_finite() {
+                return (*lo, *hi);
+            }
+        }
+    }
+    if index > 0 && plot_paint.y2_max > plot_paint.y2_min {
+        (plot_paint.y2_min, plot_paint.y2_max)
+    } else {
+        (plot_paint.y_min, plot_paint.y_max)
+    }
+}
+
+fn paint_legend(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotPaint<'_>) {
+    let px = visual.font_px.clamp(6, 10);
+    let mut y = rect.y + 1;
+    for (index, label) in plot_paint.legend.iter().enumerate() {
+        if label.is_empty() || y + px > rect.y + 16 {
+            break;
+        }
+        let color = plot_paint
+            .colors
+            .get(index)
+            .and_then(|color| *color)
+            .unwrap_or(visual.foreground);
+        let shown: String = label.chars().take(8).collect();
+        let width = font::advance_current(&shown, px);
+        let x = rect.x + rect.width - width - 2;
+        image.text(x, y, &shown, color, px);
+        y += px;
+    }
+}
+
+fn paint_roi(
+    image: &mut Image,
+    rect: Rect,
+    mark: &caqtdm_widgets::RoiMark,
+    width: u32,
+    height: u32,
+) {
+    if width == 0 || height == 0 || rect.width <= 0 || rect.height <= 0 {
+        return;
+    }
+    let mapx = |value: f64| rect.x + (value / f64::from(width) * f64::from(rect.width)) as i32;
+    let mapy = |value: f64| rect.y + (value / f64::from(height) * f64::from(rect.height)) as i32;
+    let color = Color::rgb(220, 20, 20);
+    if mark.kind == 1 {
+        let x = mapx(mark.x0);
+        let y = mapy(mark.y0);
+        image.line(x, rect.y, x, rect.y + rect.height - 1, color);
+        image.line(rect.x, y, rect.x + rect.width - 1, y, color);
+        return;
+    }
+    let x0 = mapx(mark.x0);
+    let y0 = mapy(mark.y0);
+    let x1 = mapx(mark.x1);
+    let y1 = mapy(mark.y1);
+    match mark.marker {
+        2 => image.line(x0, y0, x1, y1, color),
+        3 => {
+            image.line(x0, y0, x1, y1, color);
+            image.line(x1, y1, x1 - 4, y1 - 3, color);
+            image.line(x1, y1, x1 - 4, y1 + 3, color);
+        }
+        1 => {
+            let cx = (x0 + x1) / 2;
+            let cy = (y0 + y1) / 2;
+            image.line(cx, rect.y, cx, rect.y + rect.height - 1, color);
+            image.line(rect.x, cy, rect.x + rect.width - 1, cy, color);
+            stroke_box(image, x0, y0, x1, y1, color);
+        }
+        _ => stroke_box(image, x0, y0, x1, y1, color),
+    }
+}
+
+fn stroke_box(image: &mut Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+    let (left, right) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+    let (top, bottom) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+    image.line(left, top, right, top, color);
+    image.line(right, top, right, bottom, color);
+    image.line(right, bottom, left, bottom, color);
+    image.line(left, bottom, left, top, color);
 }
 
 fn paint_tabs(image: &mut Image, rect: Rect, visual: &Visual, labels: &[String], current: usize) {
@@ -988,6 +1111,8 @@ mod tests {
             font_px: 10,
             rotation: 0,
             align: 0,
+            border: None,
+            border_px: 1,
         }
     }
 
@@ -1010,6 +1135,8 @@ mod tests {
                 font_px: 10,
                 rotation: 0,
                 align: 0,
+                border: None,
+                border_px: 1,
             },
         ]);
         let mut ink = false;
@@ -1033,6 +1160,7 @@ mod tests {
                 width: 2,
                 height: 1,
                 rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+                roi: None,
             },
             "",
             Color::rgb(0, 0, 0),
@@ -1061,6 +1189,9 @@ mod tests {
                 log_y: false,
                 x_ticks: 2,
                 cursors: vec![0.0],
+                legend: Vec::new(),
+                colors: Vec::new(),
+                axes: Vec::new(),
             },
             "",
             Color::rgb(0, 180, 0),
@@ -1103,6 +1234,9 @@ mod tests {
                 log_y: false,
                 x_ticks: 1,
                 cursors: Vec::new(),
+                legend: Vec::new(),
+                colors: Vec::new(),
+                axes: Vec::new(),
             },
             "",
             Color::rgb(0, 180, 220),
@@ -1163,6 +1297,9 @@ mod tests {
                 log_y,
                 x_ticks: 1,
                 cursors: Vec::new(),
+                legend: Vec::new(),
+                colors: Vec::new(),
+                axes: Vec::new(),
             },
             "caCartesianPlot",
         )
@@ -1443,6 +1580,10 @@ mod tests {
     fn unicode_fallback_and_gray_edges() {
         let (advance, _) = glyph_metrics("Arimo", 18.0, '你').unwrap();
         assert!(advance > 1.0, "CJK falls back to a face that has the glyph");
+        let (hangul, _) = glyph_metrics("Arimo", 18.0, '한').unwrap();
+        assert!(hangul > 1.0, "Hangul falls back to WenQuanYi");
+        let (jamo, _) = glyph_metrics("Arimo", 18.0, '\u{1100}').unwrap();
+        assert!(jamo > 1.0, "Hangul jamo is in the fallback face");
         let mut label = visual(VisualKind::Label, "你H", Color::rgb(0, 0, 0));
         label.font_px = 20;
         label.rect = Rect::new(2, 2, 160, 36);

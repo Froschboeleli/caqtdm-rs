@@ -345,14 +345,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                             options.command = "paint".into();
                         }
                     }
-                    "-display" => options.file = Some(PathBuf::from(value)),
+                    "-display" | "-displayFont" => {
+                        let _ = value;
+                    }
                     "--ca" => options.ca = Some(parse_addr(&value)?),
                     "--pva" => options.pva = Some(parse_addr(&value)?),
                     "-config" => apply_config(&mut options, Path::new(&value))?,
                     "-attach" => options.attach = Some(parse_addr(&value)?),
                     "-style" => options.style = value,
                     "-stylefile" => options.style_file = Some(PathBuf::from(value)),
-                    "-displayFont" => options.display_font = value,
                     "-dg" | "-displayGeometry" => options.geometry = Some(parse_geometry(&value)?),
                     "-url" => options.url = value,
                     "-option" => options.options = parse_option_list(&value)?,
@@ -731,7 +732,7 @@ Commands:
   help
 
 Options:
-  -display FILE
+  -display FILE       accepted and ignored, matching upstream
   -macro KEY=VALUE,KEY2=VALUE2
   -macrodefs FILE     one KEY=VALUE per line, then -macro overrides
   -config FILE        operator settings (control system, macros, CA, PVA)
@@ -747,7 +748,7 @@ Options:
   -noResize           report that the window should not be resized
   -style NAME         style name reported on the status page
   -stylefile FILE     color, background-color, and font-size for widgets
-  -displayFont NAME   Arimo, Cousine, or a .ttf path for headless text
+  -displayFont NAME   accepted and ignored, matching upstream
   -dg WxH             paint canvas size (also -displayGeometry, +X+Y ignored)
   -url DIR            extra directory for included displays
   -option k=v,k2=v2   plugin options (bsmodulo, bsoffset)

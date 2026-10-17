@@ -203,10 +203,11 @@ fn draw(
     let fg = color(visual.foreground);
     let bg = color(visual.background);
     painter.rect_filled(rect, 2.0, bg);
+    let edge = visual.border.map(color).unwrap_or(fg);
     painter.rect_stroke(
         rect,
         2.0,
-        egui::Stroke::new(1.0_f32, fg),
+        egui::Stroke::new(visual.border_px.max(1) as f32, edge),
         egui::StrokeKind::Inside,
     );
     if let VisualKind::Slider { fraction, .. } | VisualKind::Thermo { fraction, .. } = &visual.kind
@@ -350,7 +351,19 @@ pub fn action_for(visual: &Visual, x: f32, y: f32, dragged: bool) -> Action {
             id: visual.id,
             index: row_index(y, visual.rect.y, 16.0, rows.len()),
         },
-        _ => Action::Press { id: visual.id },
+        _ => {
+            if dragged && (visual.class_name == "caCamera" || visual.class_name == "caScan2D") {
+                Action::Roi {
+                    id: visual.id,
+                    x0: f64::from(visual.rect.x),
+                    y0: f64::from(visual.rect.y),
+                    x1: f64::from(x as i32),
+                    y1: f64::from(y as i32),
+                }
+            } else {
+                Action::Press { id: visual.id }
+            }
+        }
     }
 }
 
@@ -393,6 +406,8 @@ mod tests {
             font_px: 10,
             rotation: 0,
             align: 0,
+            border: None,
+            border_px: 1,
         }
     }
 
@@ -422,6 +437,9 @@ mod tests {
             log_y: false,
             x_ticks: 2,
             cursors: Vec::new(),
+            legend: Vec::new(),
+            colors: Vec::new(),
+            axes: Vec::new(),
         });
         assert_eq!(
             action_for(&plot, 50.0, 20.0, false),
@@ -467,6 +485,26 @@ mod tests {
         let mut front = visual(VisualKind::Button);
         front.rect = Rect::new(10, 10, 20, 20);
         front.id = 2;
+        let mut camera = visual(VisualKind::Image {
+            note: String::new(),
+            width: 4,
+            height: 4,
+            rgba: vec![0; 64],
+            roi: None,
+        });
+        camera.class_name = "caCamera".into();
+        camera.rect = Rect::new(2, 3, 20, 20);
+        assert_eq!(
+            action_for(&camera, 12.0, 14.0, true),
+            Action::Roi {
+                id: 7,
+                x0: 2.0,
+                y0: 3.0,
+                x1: 12.0,
+                y1: 14.0,
+            }
+        );
+
         let hit = hit_visual(&[back, front], 15.0, 15.0).unwrap();
         assert_eq!(hit.id, 2);
         assert!(hit_visual(&[hit], 0.0, 0.0).is_none());

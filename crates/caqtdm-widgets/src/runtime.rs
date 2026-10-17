@@ -128,7 +128,8 @@ impl Session {
             | Action::Choose { id, .. }
             | Action::Zoom { id, .. }
             | Action::PlaceCursor { id, .. }
-            | Action::ToggleGroup { id, .. } => *id,
+            | Action::ToggleGroup { id, .. }
+            | Action::Roi { id, .. } => *id,
         };
         let Some(node) = self.nodes.get(id as usize).cloned() else {
             return Vec::new();
@@ -172,6 +173,10 @@ impl Session {
             }
             Action::ToggleGroup { index, .. } => {
                 self.toggle_group(&node, index);
+                Vec::new()
+            }
+            Action::Roi { x0, y0, x1, y1, .. } => {
+                self.write_roi(&node, x0, y0, x1, y1);
                 Vec::new()
             }
         }
@@ -327,11 +332,36 @@ impl Session {
         }
     }
 
+    fn write_roi(&mut self, node: &WidgetNode, x0: f64, y0: f64, x1: f64, y1: f64) {
+        let Some(values) = roi_write_values(roi_code(node, "ROI_writeType"), x0, y0, x1, y1) else {
+            return;
+        };
+        let channels = split_prop(node, "ROI_writeChannels");
+        if channels.len() != values.len() {
+            self.log.push(format!("roi {} channel count", node.name));
+            return;
+        }
+        for (raw, value) in channels.iter().zip(values) {
+            if raw.is_empty() {
+                continue;
+            }
+            match self.hub.put(raw, &PutValue::Double(value)) {
+                Ok(()) => self.log.push(format!("put {raw} = {value}")),
+                Err(err) => self.log.push(err.to_string()),
+            }
+        }
+    }
+
     fn visual(&self, id: u32, node: &WidgetNode) -> Visual {
         let data = self.primary(node);
         let (mut foreground, background) = colors(node, data);
         if node.class_name == "caLed" {
             foreground = led_lamp(node, data, foreground);
+        }
+        if node.class_name == "caPolyLine" {
+            if let Some(color) = prop_color(node, "lineColor") {
+                foreground = color;
+            }
         }
         let visible = self.is_visible(node);
         let text = self.caption(node, data);
@@ -350,6 +380,13 @@ impl Session {
             font_px: font_px_of(node),
             rotation: rotation_of(node),
             align: align_of(node),
+            border: prop_color(node, "borderColor").or_else(|| prop_color(node, "frameColor")),
+            border_px: node
+                .prop_f64("lineWidth")
+                .or_else(|| node.prop_f64("borderWidth"))
+                .or_else(|| node.prop_f64("frameLineWidth"))
+                .unwrap_or(1.0)
+                .max(1.0) as i32,
         }
     }
 
@@ -426,10 +463,10 @@ impl Session {
                 closed: node
                     .enum_tail("polystyle")
                     .is_some_and(|s| s.eq_ignore_ascii_case("Polygon")),
-                width: 1,
+                width: node.prop_f64("lineSize").unwrap_or(1.0).max(1.0) as i32,
             },
             "caCartesianPlot" | "caStripPlot" => self.plot_kind(node),
-            "caScan2D" => scan_kind(
+            "caScan2D" => self.scan_kind(
                 node,
                 data,
                 self.axis_count(node, "channelWidth"),
@@ -488,7 +525,7 @@ impl Session {
             "caFrame" | "QFrame" | "QGroupBox" | "QWidget" | "QMainWindow" | "QDialog" => {
                 VisualKind::Frame
             }
-            "caImage" | "caCamera" => image_kind(
+            "caImage" | "caCamera" => self.image_kind(
                 node,
                 data,
                 self.axis_count(node, "channelWidth"),
@@ -607,15 +644,20 @@ impl Session {
     }
 
     fn plot_kind(&self, node: &WidgetNode) -> VisualKind {
-        let (axis_min, axis_max) = axis_pair(node, 0);
-        let (y2_min, y2_max) = axis_pair(node, 1);
+        let series = self.plot_series(node);
+        let series_len = series.len().clamp(1, 7);
+        let series_axes: Vec<(f64, f64)> = (0..series_len)
+            .map(|index| axis_pair(node, index as u32))
+            .collect();
+        let (axis_min, axis_max) = series_axes.first().copied().unwrap_or((f64::NAN, f64::NAN));
+        let (y2_min, y2_max) = series_axes.get(1).copied().unwrap_or((f64::NAN, f64::NAN));
         let (x_min, x_max, y_min, y_max) = self
             .zooms
             .get(&node.name)
             .copied()
             .unwrap_or((0.0, 1.0, axis_min, axis_max));
         VisualKind::Plot {
-            series: self.plot_series(node),
+            series,
             title: node.prop_str("Title").unwrap_or("").to_string(),
             title_x: node.prop_str("TitleX").unwrap_or("").to_string(),
             title_y: node.prop_str("TitleY").unwrap_or("").to_string(),
@@ -630,6 +672,9 @@ impl Session {
                 .is_some_and(|mode| mode.eq_ignore_ascii_case("log10")),
             x_ticks: node.prop_f64("numberOfXticks").unwrap_or(4.0) as u32,
             cursors: self.cursors.get(&node.name).cloned().unwrap_or_default(),
+            legend: plot_legend(node, &series_axes),
+            colors: plot_colors(node, series_len),
+            axes: series_axes,
         }
     }
 
@@ -863,6 +908,101 @@ impl Session {
             data.value.as_text(),
         ]]
     }
+
+    fn scan_kind(
+        &self,
+        node: &WidgetNode,
+        data: Option<&ChannelData>,
+        width: u32,
+        height: u32,
+    ) -> VisualKind {
+        if width > 0 && height > 0 {
+            if let Some(samples) = self.savedata_samples(node, width, height) {
+                return image_visual(
+                    "mda".into(),
+                    width,
+                    height,
+                    samples_to_rgba(&samples, width, height),
+                    self.roi_mark(node),
+                );
+            }
+        }
+        let mut kind = scan_waveform(node, data, width, height);
+        if let VisualKind::Image { roi, .. } = &mut kind {
+            *roi = self.roi_mark(node);
+        }
+        kind
+    }
+
+    fn image_kind(
+        &self,
+        node: &WidgetNode,
+        data: Option<&ChannelData>,
+        width: u32,
+        height: u32,
+    ) -> VisualKind {
+        let mut kind = image_waveform(node, data, width, height);
+        if let VisualKind::Image { roi, .. } = &mut kind {
+            *roi = self.roi_mark(node);
+        }
+        kind
+    }
+
+    fn savedata_samples(&self, node: &WidgetNode, width: u32, height: u32) -> Option<Vec<f64>> {
+        let path = self.savedata_text(node, "channelSAVEDATA_PATH")?;
+        let sub = self.savedata_text(node, "channelSAVEDATA_SUBDIR")?;
+        let file = self.savedata_text(node, "channelSAVEDATA_FILENAME")?;
+        let joined = format!("{path}/{sub}/{file}");
+        let filename = crate::mda::mda_filename(&joined);
+        let bytes = std::fs::read(&filename).ok()?;
+        let pv = node.prop_str("channelData").unwrap_or("");
+        let image = crate::mda::detector_image(&bytes, pv, width as usize, height as usize).ok()?;
+        Some(image.into_iter().map(f64::from).collect())
+    }
+
+    fn savedata_text(&self, node: &WidgetNode, key: &str) -> Option<String> {
+        let name = node.prop_str(key)?.trim().to_string();
+        if name.is_empty() {
+            return None;
+        }
+        self.cache.get(&name).and_then(|data| match &data.value {
+            PvValue::String(text) if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    fn roi_mark(&self, node: &WidgetNode) -> Option<crate::RoiMark> {
+        let kind = roi_code(node, "ROI_readType");
+        if kind == 0 {
+            return None;
+        }
+        let channels = split_prop(node, "ROI_readChannels");
+        let values: Vec<f64> = channels
+            .iter()
+            .filter_map(|name| self.cache.get(name).and_then(|data| data.value.as_f64()))
+            .collect();
+        let need = if kind == 1 { 2 } else { 4 };
+        if values.len() < need {
+            return None;
+        }
+        let marker = roi_marker(node);
+        let (x0, y0, x1, y1) = match kind {
+            1 => (values[0], values[1], values[0], values[1]),
+            4 => {
+                let (cx, cy, w, h) = (values[0], values[1], values[2], values[3]);
+                (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+            }
+            _ => (values[0], values[1], values[2], values[3]),
+        };
+        Some(crate::RoiMark {
+            x0,
+            y0,
+            x1,
+            y1,
+            kind,
+            marker,
+        })
+    }
 }
 
 fn collect(node: &WidgetNode, out: &mut Vec<WidgetNode>) {
@@ -930,6 +1070,15 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
         "channels_4",
         "channels_5",
         "channels_6",
+        "ROI_readChannels",
+        "ROI_writeChannels",
+        "channelSAVEDATA_PATH",
+        "channelSAVEDATA_SUBDIR",
+        "channelSAVEDATA_FILENAME",
+        "channelXCPT",
+        "channelYCPT",
+        "channelXNEWDATA",
+        "channelYNEWDATA",
     ] {
         if let Some(prop) = node.prop(key) {
             if key == "channels" || key.starts_with("channels_") {
@@ -939,8 +1088,11 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
                     }
                 }
             } else if let Some(text) = prop.as_str() {
-                if !text.is_empty() {
-                    out.push(text.to_string());
+                for item in text.split(';') {
+                    let item = item.trim();
+                    if !item.is_empty() && !out.contains(&item.to_string()) {
+                        out.push(item.to_string());
+                    }
                 }
             }
         }
@@ -1200,17 +1352,23 @@ fn tab_labels(node: &WidgetNode) -> Vec<String> {
     labels
 }
 
-fn scan_kind(node: &WidgetNode, data: Option<&ChannelData>, width: u32, height: u32) -> VisualKind {
+fn scan_waveform(
+    node: &WidgetNode,
+    data: Option<&ChannelData>,
+    width: u32,
+    height: u32,
+) -> VisualKind {
     if let Some(data) = data {
         if width > 0 && height > 0 {
             let samples = data.value.as_f64_slice();
             if samples.len() >= (width * height) as usize {
-                return VisualKind::Image {
-                    note: "scan2d".into(),
+                return image_visual(
+                    "scan2d".into(),
                     width,
                     height,
-                    rgba: samples_to_rgba(&samples, width, height),
-                };
+                    samples_to_rgba(&samples, width, height),
+                    None,
+                );
             }
         }
     }
@@ -1228,10 +1386,13 @@ fn scan_kind(node: &WidgetNode, data: Option<&ChannelData>, width: u32, height: 
         log_y: false,
         x_ticks: 2,
         cursors: Vec::new(),
+        legend: Vec::new(),
+        colors: Vec::new(),
+        axes: Vec::new(),
     }
 }
 
-fn image_kind(
+fn image_waveform(
     node: &WidgetNode,
     data: Option<&ChannelData>,
     width: u32,
@@ -1251,20 +1412,126 @@ fn image_kind(
                 .unwrap_or("");
             let rgba = camera_rgba(bytes, width, height, pack);
             if !rgba.is_empty() {
-                return VisualKind::Image {
-                    note,
-                    width,
-                    height,
-                    rgba,
-                };
+                return image_visual(note, width, height, rgba, None);
             }
         }
     }
+    image_visual(note, 0, 0, Vec::new(), None)
+}
+
+fn image_visual(
+    note: String,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    roi: Option<crate::RoiMark>,
+) -> VisualKind {
     VisualKind::Image {
         note,
-        width: 0,
-        height: 0,
-        rgba: Vec::new(),
+        width,
+        height,
+        rgba,
+        roi,
+    }
+}
+
+fn plot_colors(node: &WidgetNode, count: usize) -> Vec<Option<Color>> {
+    (1..=count)
+        .map(|index| prop_color(node, &format!("color_{index}")))
+        .collect()
+}
+
+fn plot_legend(node: &WidgetNode, axes: &[(f64, f64)]) -> Vec<String> {
+    if node.prop("LegendEnabled").and_then(PropValue::as_bool) == Some(false) {
+        return Vec::new();
+    }
+    let fixed = node
+        .enum_tail("YAxisScaling")
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("fixedScale"));
+    node_channels(node)
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            if fixed {
+                if let Some((lo, hi)) = axes.get(index) {
+                    if lo.is_finite() && hi.is_finite() {
+                        return format!("{name} [{},{}]", axis_token(*lo), axis_token(*hi));
+                    }
+                }
+            }
+            name
+        })
+        .collect()
+}
+
+fn axis_token(value: f64) -> String {
+    format!("{value:.1}").trim_end_matches('0').to_string()
+}
+
+fn split_prop(node: &WidgetNode, key: &str) -> Vec<String> {
+    node.prop_str(key)
+        .unwrap_or("")
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn roi_code(node: &WidgetNode, key: &str) -> u8 {
+    match node.enum_tail(key).unwrap_or("") {
+        "xy_only" => 1,
+        "xy1_xy2" => 2,
+        "xyUpleft_xyLowright" => 3,
+        "xycenter_width_height" => 4,
+        _ => 0,
+    }
+}
+
+fn roi_marker(node: &WidgetNode) -> u8 {
+    match node.enum_tail("ROI_readmarkerType").unwrap_or("") {
+        "box_crosshairs" => 1,
+        "line" => 2,
+        "arrow" => 3,
+        _ => 0,
+    }
+}
+
+/// Two or four values, matching `Callback_WriteDetectedValues`.
+fn roi_write_values(kind: u8, x0: f64, y0: f64, x1: f64, y1: f64) -> Option<Vec<f64>> {
+    let deltax = -(x0 - x1);
+    let deltay = -(y0 - y1);
+    match kind {
+        1 => Some(vec![x0, y0]),
+        2 => Some(vec![x0, y0, x1, y1]),
+        3 => {
+            let values = if deltax < 0.0 && deltay > 0.0 {
+                [x1, y0, x0, y1]
+            } else if deltax < 0.0 && deltay < 0.0 {
+                [x1, y1, x0, y0]
+            } else if deltax > 0.0 && deltay < 0.0 {
+                [x0, y1, x1, y0]
+            } else {
+                [x0, y0, x1, y1]
+            };
+            Some(values.to_vec())
+        }
+        4 => {
+            let mut x = x0;
+            let mut y = y0;
+            let mut w = x1 - x0;
+            let mut h = y1 - y0;
+            if w < 0.0 {
+                x += w;
+                w = -w;
+            }
+            if h < 0.0 {
+                y += h;
+                h = -h;
+            }
+            Some(vec![x + w / 2.0, y + h / 2.0, w, h])
+        }
+        _ => None,
     }
 }
 

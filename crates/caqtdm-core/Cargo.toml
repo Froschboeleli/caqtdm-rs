@@ -8,7 +8,8 @@ rust-version.workspace = true
 
 [features]
 default = ["python"]
-python = []
+python = ["dep:pyo3"]
 
 [dependencies]
 regex.workspace = true
+pyo3 = { version = "0.23", optional = true, features = ["auto-initialize"] }

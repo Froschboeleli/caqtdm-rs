@@ -73,6 +73,7 @@ pub fn load_image_notes(
             width,
             height,
             rgba,
+            ..
         } = &mut visual.kind
         {
             if !rgba.is_empty() || note.is_empty() {

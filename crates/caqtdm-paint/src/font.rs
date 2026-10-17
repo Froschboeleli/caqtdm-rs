@@ -1,16 +1,18 @@
 //! TrueType text for the headless rasterizer.
 //!
 //! Arimo and Cousine are the Chrome metric-compatible faces (SIL Open Font
-//! License, see `fonts/OFL.txt`). Noto Sans (same license) and Droid Sans
-//! Fallback (Apache-2.0, see `fonts/Apache-2.0.txt`) fill glyphs the selected
-//! face does not have, including Greek, Cyrillic, and CJK.
+//! License, see `fonts/OFL.txt`). Noto Sans (same license), Droid Sans
+//! Fallback, and a WenQuanYi Micro Hei subset (both Apache-2.0, see
+//! `fonts/Apache-2.0.txt`) fill glyphs the selected face does not have,
+//! including Greek, Cyrillic, CJK, and Hangul.
 //!
 //! fontdue supplies the advance, bearings, and a grayscale bitmap. A fully
 //! covered pixel is the widget color. Partial coverage is composited onto the
 //! pixel already there, which is the grayscale edge Qt paints instead of a
 //! hard 50% cutoff.
 //!
-//! `-displayFont` selects Arimo, Cousine, Noto, or a `.ttf` path.
+//! `install_display_font` selects Arimo, Cousine, Noto, or a `.ttf` path.
+//! The viewer flag `-displayFont` is accepted and ignored, matching upstream.
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -24,6 +26,7 @@ const ARIMO: &[u8] = include_bytes!("../fonts/Arimo-Regular.ttf");
 const COUSINE: &[u8] = include_bytes!("../fonts/Cousine-Regular.ttf");
 const NOTO: &[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
 const DROID: &[u8] = include_bytes!("../fonts/DroidSansFallbackFull.ttf");
+const HANGUL: &[u8] = include_bytes!("../fonts/WenQuanYiHangul.ttf");
 
 thread_local! {
     static FACE: RefCell<Font> = RefCell::new(load_bytes(ARIMO).expect("Arimo"));
@@ -146,6 +149,7 @@ fn fallbacks() -> &'static [Font] {
             vec![
                 load_bytes(NOTO).expect("Noto Sans"),
                 load_bytes(DROID).expect("Droid Sans Fallback"),
+                load_bytes(HANGUL).expect("WenQuanYi Hangul"),
             ]
         })
         .as_slice()

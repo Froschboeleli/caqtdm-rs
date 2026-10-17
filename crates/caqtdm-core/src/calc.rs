@@ -144,36 +144,83 @@ fn eval_python(expr: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
     #[cfg(feature = "python")]
     {
         let body = python_body(expr)?;
-        let mut child = std::process::Command::new("python3")
-            .arg("-c")
-            .arg(PYTHON_RUNNER)
-            .args(inputs.vars.iter().take(4).map(|v| v.to_string()))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|err| CalcError::Unsupported(format!("python3: {err}")))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin
-                .write_all(body.as_bytes())
-                .map_err(|err| CalcError::Unsupported(format!("python3 stdin: {err}")))?;
+        match eval_python_embedded(body, inputs) {
+            Ok(value) => Ok(value),
+            Err(_) => eval_python_shell(body, inputs),
         }
-        let output = child
-            .wait_with_output()
-            .map_err(|err| CalcError::Unsupported(format!("python3: {err}")))?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(CalcError::Unsupported(format!(
-                "PythonCalc failed: {}",
-                err.trim()
-            )));
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        text.trim()
-            .parse::<f64>()
-            .map_err(|_| CalcError::Unsupported(format!("PythonCalc returned {text:?}")))
     }
+}
+
+#[cfg(feature = "python")]
+fn eval_python_embedded(body: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
+    let embedded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pyo3::Python::with_gil(|py| embedded_call(py, body, inputs))
+    }));
+    match embedded {
+        Ok(value) => value,
+        Err(_) => Err(CalcError::Unsupported("embedded python failed".into())),
+    }
+}
+
+#[cfg(feature = "python")]
+fn embedded_call(py: pyo3::Python<'_>, body: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
+    use pyo3::prelude::*;
+    use pyo3::types::PyDict;
+    let code = std::ffi::CString::new(body)
+        .map_err(|_| CalcError::Unsupported("python source contains a nul".into()))?;
+    let text = std::ffi::CStr::from_bytes_with_nul(code.as_bytes_with_nul())
+        .map_err(|err| CalcError::Unsupported(err.to_string()))?;
+    let locals = PyDict::new(py);
+    py.run(text, None, Some(&locals))
+        .map_err(|err| CalcError::Unsupported(err.to_string()))?;
+    let func = locals
+        .get_item("PythonCalc")
+        .map_err(|err| CalcError::Unsupported(err.to_string()))?
+        .ok_or_else(|| CalcError::Unsupported("PythonCalc missing".into()))?;
+    let value = func
+        .call1((
+            inputs.vars[0],
+            inputs.vars[1],
+            inputs.vars[2],
+            inputs.vars[3],
+        ))
+        .map_err(|err| CalcError::Unsupported(err.to_string()))?;
+    value
+        .extract()
+        .map_err(|err| CalcError::Unsupported(err.to_string()))
+}
+
+#[cfg(feature = "python")]
+fn eval_python_shell(body: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
+    let mut child = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(PYTHON_RUNNER)
+        .args(inputs.vars.iter().take(4).map(|v| v.to_string()))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| CalcError::Unsupported(format!("python3: {err}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(body.as_bytes())
+            .map_err(|err| CalcError::Unsupported(format!("python3 stdin: {err}")))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| CalcError::Unsupported(format!("python3: {err}")))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(CalcError::Unsupported(format!(
+            "PythonCalc failed: {}",
+            err.trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse::<f64>()
+        .map_err(|_| CalcError::Unsupported(format!("PythonCalc returned {text:?}")))
 }
 
 #[cfg(feature = "python")]
@@ -751,5 +798,11 @@ mod tests {
         inputs.set(2, 0.0);
         assert!(!eval_visibility(expr, &inputs).unwrap());
         assert!(eval_calc("%P/def Other(a, b, c, d):\n    return 1\n/", &inputs).is_err());
+        inputs.set(0, 2.0);
+        inputs.set(1, 3.0);
+        inputs.set(2, 1.0);
+        let body = python_body(expr).unwrap();
+        assert_eq!(eval_python_embedded(body, &inputs).unwrap(), 7.0);
+        assert_eq!(eval_python_shell(body, &inputs).unwrap(), 7.0);
     }
 }

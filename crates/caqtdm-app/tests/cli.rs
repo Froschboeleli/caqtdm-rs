@@ -157,7 +157,8 @@ fn server_flags_are_reported_and_clamped() {
     assert!(limited.contains("web_limit=5000"));
     assert!(limited.contains("web_timeout=80"));
     assert!(limited.contains("web_port=14001"));
-    assert!(limited.contains("font=Helvetica"));
+    assert!(limited.contains("font="));
+    assert!(!limited.contains("font=Helvetica"));
     assert!(limited.contains("execute_only=true"));
     assert!(limited.contains("style=fusion"));
     assert!(limited.contains("noMsg=true"));
@@ -407,16 +408,19 @@ fn novnc_serves_the_framebuffer_and_readonly_drops_input() {
     .unwrap();
     let css = dir.join("red.qss");
     std::fs::write(&css, "color: #ff0000;\n").unwrap();
-    let missing = execute(&args(&[
+    let ignored = execute(&args(&[
         "paint",
-        ui.to_str().unwrap(),
+        "-display",
+        "not-opened.ui",
         "-displayFont",
         "no-such-face",
+        ui.to_str().unwrap(),
         "-o",
-        dir.join("bad.ppm").to_str().unwrap(),
+        dir.join("kept.ppm").to_str().unwrap(),
     ]))
-    .unwrap_err();
-    assert!(missing.contains("display font"));
+    .unwrap();
+    assert!(ignored.is_empty() || !ignored.contains("not-opened"));
+    assert!(dir.join("kept.ppm").is_file());
 
     let text = execute(&args(&[
         "-server",

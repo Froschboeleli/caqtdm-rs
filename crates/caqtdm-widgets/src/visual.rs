@@ -19,6 +19,10 @@ pub struct Visual {
     pub rotation: i32,
     /// 0 left, 1 center, 2 right. From the widget `alignment` property.
     pub align: i8,
+    /// `borderColor` or `frameColor`. Absent keeps the foreground outline.
+    pub border: Option<Color>,
+    /// `lineWidth`, `borderWidth`, or `frameLineWidth`. 1 is a single pixel.
+    pub border_px: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +85,14 @@ pub enum VisualKind {
         x_ticks: u32,
         /// Horizontal cursor positions as fractions of the plot width, 0 to 1.
         cursors: Vec<f64>,
+        /// One label per series. Empty draws no legend. A fixed scale appends
+        /// `[min,max]` the way `caStripPlot::legendText` does.
+        legend: Vec<String>,
+        /// `color_1` .. `color_7`. `None` keeps the default series color.
+        colors: Vec<Option<Color>>,
+        /// Per-series `(min, max)` from `YaxisLimitsMin_N` / `YaxisLimitsMax_N`.
+        /// A non-finite pair leaves that series on the primary or second window.
+        axes: Vec<(f64, f64)>,
     },
     Waterfall {
         rows: Vec<Vec<f64>>,
@@ -140,6 +152,8 @@ pub enum VisualKind {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+        /// Read-back marker from `ROI_readChannels`. Coordinates are image pixels.
+        roi: Option<RoiMark>,
     },
     Unknown,
 }
@@ -158,6 +172,21 @@ pub struct GridCell {
     pub label: String,
     pub file: String,
     pub args: String,
+}
+
+/// Marker drawn on a camera or scan image.
+///
+/// `kind` is `imagewidget.h`'s `ROI_type`: 1 `xy_only`, 2 `xy1_xy2`,
+/// 3 `xyUpleft_xyLowright`, 4 `xycenter_width_height`. `marker` is
+/// `ROI_markertype`: 0 box, 1 box with crosshairs, 2 line, 3 arrow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoiMark {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    pub kind: u8,
+    pub marker: u8,
 }
 
 /// One row of an alarm tree.
@@ -234,6 +263,15 @@ pub enum Action {
     ToggleGroup {
         id: u32,
         index: usize,
+    },
+    /// Rubber-band on `caCamera` / `caScan2D`. The corners are the two points
+    /// `Callback_WriteDetectedValues` turns into 2 or 4 channel writes.
+    Roi {
+        id: u32,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
     },
 }
 

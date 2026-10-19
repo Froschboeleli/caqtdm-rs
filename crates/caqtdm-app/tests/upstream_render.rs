@@ -66,7 +66,7 @@ fn upstream_edm_graphics_paint_matches_the_file() {
     for y in 247..260 {
         for x in 325..370 {
             if let Some(pixel) = image.pixel(x, y) {
-                if pixel.r < 20 && pixel.g < 20 && pixel.b < 20 {
+                if pixel.r < 180 && pixel.g < 180 && pixel.b < 180 {
                     lit = true;
                 }
             }

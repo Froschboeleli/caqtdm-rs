@@ -9,7 +9,8 @@ use caqtdm_core::{parse_macro_list, MacroMap};
 use caqtdm_datasource::Hub;
 use caqtdm_ui::{expand_includes, load_path, SearchPath};
 use caqtdm_widgets::{
-    cell_at, load_image_notes, toggled_bit_value, Action, Effect, Session, Visual, VisualKind,
+    cell_at, load_image_notes, tab_at, tab_rects, toggled_bit_value, Action, Effect, Session,
+    Visual, VisualKind,
 };
 use eframe::egui;
 
@@ -149,11 +150,18 @@ impl Viewer {
         let Ok(mut display) = load_path(&path) else {
             return;
         };
-        if let Err(err) = expand_includes(&mut display.root, &self.search, &self.macros) {
-            if let Some(page) = self.stack.last_mut() {
-                page.session.log.push(err.to_string());
+        match expand_includes(&mut display.root, &self.search, &self.macros) {
+            Ok(warnings) => {
+                if let Some(page) = self.stack.last_mut() {
+                    page.session.log.extend(warnings);
+                }
             }
-            return;
+            Err(err) => {
+                if let Some(page) = self.stack.last_mut() {
+                    page.session.log.push(err.to_string());
+                }
+                return;
+            }
         }
         let session = Session::open(display.root, (self.hub_factory)(), &self.macros);
         if let Some(page) = self.stack.last_mut() {
@@ -162,22 +170,34 @@ impl Viewer {
     }
 
     fn open_related(&mut self, file: &str, extra: &str) {
-        let Some(path) = self.search.find(file) else {
+        let Some(path) = self.search.resolve_include(file) else {
             if let Some(page) = self.stack.last_mut() {
                 page.session.log.push(format!("missing display {file}"));
             }
             return;
         };
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                self.search.origin = Some(parent.to_path_buf());
+            }
+        }
         let Ok(mut display) = load_path(&path) else {
             return;
         };
         let mut macros = self.macros.clone();
         macros.extend_from(&parse_macro_list(extra));
-        if let Err(err) = expand_includes(&mut display.root, &self.search, &macros) {
-            if let Some(page) = self.stack.last_mut() {
-                page.session.log.push(err.to_string());
+        match expand_includes(&mut display.root, &self.search, &macros) {
+            Ok(warnings) => {
+                if let Some(page) = self.stack.last_mut() {
+                    page.session.log.extend(warnings);
+                }
             }
-            return;
+            Err(err) => {
+                if let Some(page) = self.stack.last_mut() {
+                    page.session.log.push(err.to_string());
+                }
+                return;
+            }
         }
         let session = Session::open(display.root, (self.hub_factory)(), &macros);
         self.stack.push(Page { session, path });
@@ -202,14 +222,18 @@ fn draw(
     );
     let fg = color(visual.foreground);
     let bg = color(visual.background);
-    painter.rect_filled(rect, 2.0, bg);
-    let edge = visual.border.map(color).unwrap_or(fg);
-    painter.rect_stroke(
-        rect,
-        2.0,
-        egui::Stroke::new(visual.border_px.max(1) as f32, edge),
-        egui::StrokeKind::Inside,
-    );
+    if visual.background.a > 0 {
+        painter.rect_filled(rect, 2.0, bg);
+    }
+    if visual.border_px > 0 {
+        let edge = visual.border.map(color).unwrap_or(fg);
+        painter.rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(visual.border_px as f32, edge),
+            egui::StrokeKind::Inside,
+        );
+    }
     if let VisualKind::Slider { fraction, .. } | VisualKind::Thermo { fraction, .. } = &visual.kind
     {
         let mut bar = rect;
@@ -238,6 +262,41 @@ fn draw(
                 egui::Color32::WHITE,
             );
             textures.push(texture);
+        }
+    }
+    if let VisualKind::Tabs { labels, current } = &visual.kind {
+        let bar_h = 28.0_f32.min(rect.height());
+        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_h));
+        painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(225, 225, 225));
+        let ink = egui::Color32::from_rgb(20, 20, 20);
+        for (index, (label, tab)) in labels
+            .iter()
+            .zip(tab_rects(visual.rect, labels, *current, visual.font_px))
+            .enumerate()
+        {
+            let chip = egui::Rect::from_min_size(
+                egui::pos2(tab.x as f32, tab.y as f32),
+                egui::vec2(tab.width as f32, tab.height as f32),
+            );
+            let fill = if index == *current {
+                egui::Color32::from_rgb(250, 250, 250)
+            } else {
+                egui::Color32::from_rgb(216, 216, 216)
+            };
+            painter.rect_filled(chip, 0.0, fill);
+            painter.rect_stroke(
+                chip,
+                0.0,
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(196, 196, 195)),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                chip.left_top() + egui::vec2(6.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                label,
+                egui::FontId::monospace(visual.font_px.clamp(8, 14) as f32),
+                ink,
+            );
         }
     }
     if let VisualKind::Led { on } = &visual.kind {
@@ -322,9 +381,9 @@ pub fn action_for(visual: &Visual, x: f32, y: f32, dragged: bool) -> Action {
                 value: min + (max - min) * f64::from(fraction),
             }
         }
-        VisualKind::Tabs { labels, .. } if !labels.is_empty() => Action::Choose {
+        VisualKind::Tabs { labels, current } if !labels.is_empty() => Action::Choose {
             id: visual.id,
-            index: row_index(x, visual.rect.x, 48.0, labels.len()),
+            index: tab_at(visual.rect, labels, *current, visual.font_px, x, y),
         },
         VisualKind::Menu { items, .. } if !items.is_empty() => Action::Choose {
             id: visual.id,

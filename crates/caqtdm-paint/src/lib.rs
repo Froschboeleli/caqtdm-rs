@@ -3,7 +3,7 @@
 
 use caqtdm_core::{Color, Point, Rect};
 use caqtdm_widgets::{
-    cell_rect, sample_color, CurveStyle, CurveSymbol, ShapeForm, Visual, VisualKind,
+    cell_rect, sample_color, tab_rects, CurveStyle, CurveSymbol, ShapeForm, Visual, VisualKind,
 };
 
 mod font;
@@ -251,6 +251,9 @@ pub fn paint_in(visuals: &[Visual], width: u32, height: u32) -> Image {
 }
 
 fn stroke_border(image: &mut Image, rect: Rect, color: Color, width: i32) {
+    if width <= 0 {
+        return;
+    }
     let width = width.max(1);
     for inset in 0..width {
         let band = Rect::new(
@@ -281,7 +284,8 @@ fn text_origin_x(visual: &Visual, rect: caqtdm_core::Rect, text: &str) -> i32 {
 fn bounds(visuals: &[Visual]) -> (u32, u32) {
     let mut w = 320;
     let mut h = 200;
-    for visual in visuals {
+    // Hidden tab pages keep their rectangles, but they are not on screen.
+    for visual in visuals.iter().filter(|visual| visual.visible) {
         w = w.max(visual.rect.x + visual.rect.width);
         h = h.max(visual.rect.y + visual.rect.height);
     }
@@ -888,18 +892,44 @@ fn stroke_box(image: &mut Image, x0: i32, y0: i32, x1: i32, y1: i32, color: Colo
 }
 
 fn paint_tabs(image: &mut Image, rect: Rect, visual: &Visual, labels: &[String], current: usize) {
-    let mut x = rect.x + 2;
-    for (index, label) in labels.iter().enumerate() {
-        let width = (font::advance_current(label, visual.font_px) + 8).max(16);
-        let tab = Rect::new(x, rect.y + 1, width, 14);
-        if index == current {
-            image.fill_rect(tab, visual.foreground);
-            image.text(x + 2, rect.y + 4, label, visual.background, visual.font_px);
+    let bar_h = 28.min(rect.height.max(0));
+    if bar_h > 0 {
+        image.fill_rect(
+            Rect::new(rect.x, rect.y, rect.width, bar_h),
+            Color::rgb(225, 225, 225),
+        );
+    }
+    let font_px = visual.font_px.clamp(8, 14);
+    let ink = Color::rgb(20, 20, 20);
+    let edge = Color::rgb(196, 196, 195);
+    for (index, (label, tab)) in labels
+        .iter()
+        .zip(tab_rects(rect, labels, current, visual.font_px))
+        .enumerate()
+    {
+        let Some(tab) = clip_rect(tab, rect) else {
+            continue;
+        };
+        let fill = if index == current {
+            Color::rgb(250, 250, 250)
         } else {
-            image.stroke_rect(tab, visual.foreground);
-            image.text(x + 2, rect.y + 4, label, visual.foreground, visual.font_px);
-        }
-        x += width + 2;
+            Color::rgb(216, 216, 216)
+        };
+        image.fill_rect(tab, fill);
+        image.stroke_rect(tab, edge);
+        image.text(tab.x + 6, tab.y + 4, label, ink, font_px);
+    }
+}
+
+fn clip_rect(inner: Rect, outer: Rect) -> Option<Rect> {
+    let x0 = inner.x.max(outer.x);
+    let y0 = inner.y.max(outer.y);
+    let x1 = (inner.x + inner.width).min(outer.x + outer.width);
+    let y1 = (inner.y + inner.height).min(outer.y + outer.height);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
     }
 }
 
@@ -1746,6 +1776,52 @@ mod tests {
         assert!(ink, "A was not painted");
         assert!(image.pixel(96, 10).unwrap().g > 100);
         assert!(image.to_ppm().starts_with(b"P6\n"));
+    }
+
+    #[test]
+    fn selected_tab_is_a_light_chip_with_dark_text() {
+        let mut tabs = visual(
+            VisualKind::Tabs {
+                labels: vec!["graphics".into(), "monitors".into()],
+                current: 1,
+            },
+            "",
+            Color::rgb(20, 20, 20),
+        );
+        tabs.class_name = "QTabWidget".into();
+        tabs.background = Color::transparent();
+        tabs.border_px = 0;
+        tabs.rect = Rect::new(0, 0, 220, 80);
+        let image = paint(&[tabs]);
+        let idle = image.pixel(10, 26).unwrap();
+        assert!(idle.r > 180 && idle.r < 240, "idle chip {idle:?}");
+        let selected = image.pixel(70, 26).unwrap();
+        assert!(
+            selected.r > 230 && selected.g > 230 && selected.b > 230,
+            "selected chip {selected:?}"
+        );
+        let mut ink = false;
+        for y in 8..22 {
+            for x in 74..140 {
+                let pixel = image.pixel(x, y).unwrap();
+                if pixel.r < 80 && pixel.g < 80 && pixel.b < 80 {
+                    ink = true;
+                }
+            }
+        }
+        assert!(ink, "selected tab label was not painted");
+    }
+
+    #[test]
+    fn hidden_widgets_do_not_grow_the_canvas() {
+        let mut shown = visual(VisualKind::Frame, "", Color::rgb(0, 0, 0));
+        shown.rect = Rect::new(0, 0, 100, 40);
+        shown.background = Color::rgb(1, 2, 3);
+        let mut hidden = shown.clone();
+        hidden.rect = Rect::new(0, 0, 2000, 900);
+        hidden.visible = false;
+        let image = paint(&[shown, hidden]);
+        assert_eq!((image.width, image.height), (320, 200));
     }
 
     #[test]

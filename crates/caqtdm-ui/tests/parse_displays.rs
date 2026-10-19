@@ -1,7 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use caqtdm_core::{parse_macro_list, PropValue};
-use caqtdm_ui::{expand_includes, load_str, SearchPath, SourceFormat};
+use caqtdm_ui::{expand_includes, load_path, load_str, SearchPath, SourceFormat};
 
 const LABEL_UI: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
@@ -236,7 +236,8 @@ fn include_expands_with_macros() {
     let mut display = load_str(parent, &dir.join("parent.ui")).unwrap();
     let mut search = SearchPath::new();
     search.push(&dir);
-    expand_includes(&mut display.root, &search, &parse_macro_list("")).unwrap();
+    let warnings = expand_includes(&mut display.root, &search, &parse_macro_list("")).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
     let mut texts = Vec::new();
     display.root.walk(&mut |w| {
         if w.class_name == "caLabel" {
@@ -509,4 +510,45 @@ fn https_display_fetch_uses_rustls() {
     )
     .unwrap();
     assert_eq!(text, "panel-1");
+}
+
+#[test]
+fn missing_include_warns_and_keeps_the_parent() {
+    let parent = r#"<?xml version="1.0"?>
+<ui version="4.0"><class>Form</class>
+<widget class="QWidget" name="Form">
+ <property name="geometry"><rect><x>0</x><y>0</y><width>40</width><height>20</height></rect></property>
+ <widget class="caInclude" name="hole">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>10</width><height>10</height></rect></property>
+  <property name="filename"><string>object_quad.adl</string></property>
+ </widget>
+ <widget class="caLabel" name="stays">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>10</width><height>10</height></rect></property>
+  <property name="text"><string>here</string></property>
+ </widget>
+</widget></ui>"#;
+    let mut display = load_str(parent, Path::new("parent.ui")).unwrap();
+    let warnings =
+        expand_includes(&mut display.root, &SearchPath::new(), &parse_macro_list("")).unwrap();
+    assert!(warnings.iter().any(|line| line.contains("object_quad.adl")));
+    assert_eq!(display.root.count_class("caLabel"), 1);
+}
+
+#[test]
+fn upstream_tests_ui_opens_with_a_missing_include() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../upstream/caQtDM_Tests/tests.ui");
+    if !path.is_file() {
+        return;
+    }
+    let mut display = load_path(&path).unwrap();
+    let search = SearchPath::from_file(&path);
+    let warnings = expand_includes(&mut display.root, &search, &parse_macro_list("")).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|line| line.contains("recursive_bad.ui")),
+        "{warnings:?}"
+    );
+    assert!(display.widget_count() > 50);
 }

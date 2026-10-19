@@ -154,7 +154,7 @@ fn eval_python(expr: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
 #[cfg(feature = "python")]
 fn eval_python_embedded(body: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
     let embedded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        pyo3::Python::with_gil(|py| embedded_call(py, body, inputs))
+        pyo3::Python::attach(|py| embedded_call(py, body, inputs))
     }));
     match embedded {
         Ok(value) => value,
@@ -186,8 +186,8 @@ fn embedded_call(py: pyo3::Python<'_>, body: &str, inputs: &CalcInputs) -> Resul
         ))
         .map_err(|err| CalcError::Unsupported(err.to_string()))?;
     value
-        .extract()
-        .map_err(|err| CalcError::Unsupported(err.to_string()))
+        .extract::<f64>()
+        .map_err(|err: pyo3::PyErr| CalcError::Unsupported(err.to_string()))
 }
 
 #[cfg(feature = "python")]

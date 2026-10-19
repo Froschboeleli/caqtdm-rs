@@ -111,10 +111,7 @@ pub fn execute(args: &[String]) -> Result<String, String> {
             let macros = parse_macro_list(&options.macros);
             let mut session = Session::open(display.root, standard_hub(&options), &macros);
             session.allow_shell = options.execute_shell;
-            let mut search = SearchPath::from_file(&path);
-            if let Some(parent) = path.parent() {
-                search.push(parent);
-            }
+            let search = display_search(&path, &options);
             let opts = options.clone();
             let factory = Arc::new(move || standard_hub(&opts));
             caqtdm_egui::launch(session, path, search, macros, factory)
@@ -126,23 +123,43 @@ pub fn execute(args: &[String]) -> Result<String, String> {
 }
 
 fn require_file(options: &Options, command: &str) -> Result<PathBuf, String> {
-    options
+    let requested = options
         .file
         .clone()
-        .ok_or_else(|| format!("{command} needs a display file"))
+        .ok_or_else(|| format!("{command} needs a display file"))?;
+    resolve_display(&requested, options)
+}
+
+fn resolve_display(requested: &Path, options: &Options) -> Result<PathBuf, String> {
+    let mut search = SearchPath::from_env();
+    if let Some(dir) = url_directory(&options.url) {
+        search.push(dir);
+    }
+    search.find(&requested.to_string_lossy()).ok_or_else(|| {
+        format!(
+            "{}: No such file or directory (os error 2)",
+            requested.display()
+        )
+    })
+}
+
+fn display_search(path: &Path, options: &Options) -> SearchPath {
+    let mut search = SearchPath::from_file(path);
+    if let Some(dir) = url_directory(&options.url) {
+        search.push(dir);
+    }
+    search
 }
 
 fn load_display(path: &Path, options: &Options) -> Result<caqtdm_ui::DisplayFile, String> {
     let mut display = load_path(path).map_err(|e| e.to_string())?;
-    let mut search = SearchPath::from_file(path);
-    if let Some(parent) = path.parent() {
-        search.push(parent);
-    }
-    if let Some(dir) = url_directory(&options.url) {
-        search.push(dir);
-    }
+    let search = display_search(path, options);
     let macros = parse_macro_list(&options.macros);
-    expand_includes(&mut display.root, &search, &macros).map_err(|e| e.to_string())?;
+    for warning in
+        expand_includes(&mut display.root, &search, &macros).map_err(|e| e.to_string())?
+    {
+        eprintln!("caQtDM -- {warning}");
+    }
     if let Some(style) = &options.style_file {
         let css = std::fs::read_to_string(style)
             .map_err(|err| format!("style file {}: {err}", style.display()))?;
@@ -163,10 +180,7 @@ fn paint_display(options: &Options) -> Result<String, String> {
     session.tick(0);
     install_font(options)?;
     let mut visuals = session.visuals();
-    let mut search = SearchPath::from_file(&path);
-    if let Some(parent) = path.parent() {
-        search.push(parent);
-    }
+    let search = display_search(&path, options);
     load_image_notes(&mut visuals, |note| {
         search.find(note).and_then(|file| std::fs::read(file).ok())
     });
@@ -424,8 +438,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 }
                 i += 1;
             }
-            "dump" | "validate" | "paint" | "print" | "widgets" | "convert" | "run" | "help"
-            | "config" | "serve"
+            "dump" | "validate" | "paint" | "print" | "snapshot" | "widgets" | "convert"
+            | "run" | "help" | "config" | "serve"
                 if options.command.is_empty() =>
             {
                 options.command = arg.to_string();
@@ -873,6 +887,7 @@ Options:
   -displayFont NAME   accepted and ignored, matching upstream
   -dg WxH             paint canvas size (also -displayGeometry, +X+Y ignored)
   -url DIR            extra directory for included displays
+                      CAQTDM_DISPLAY_PATH is also searched (: on Unix, ; on Windows)
   -option k=v,k2=v2   plugin options (bsmodulo, bsoffset)
   -httpconfig         print the operator settings
   -emptycache         delete files in the display cache

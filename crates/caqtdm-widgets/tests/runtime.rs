@@ -456,3 +456,63 @@ fn properties_axes_tabs_rotation_and_images() {
     assert_eq!((w, h), (1, 1));
     assert_eq!(&rgba[0..3], &[255, 0, 0]);
 }
+
+#[test]
+fn stylesheet_and_the_current_tab_decide_what_is_painted() {
+    let ui = r#"<?xml version="1.0"?>
+<ui version="4.0"><class>MainWindow</class>
+<widget class="QMainWindow" name="MainWindow">
+ <property name="geometry"><rect><x>0</x><y>0</y><width>200</width><height>120</height></rect></property>
+ <property name="styleSheet"><string>QWidget#centralwidget {background: rgb(58, 94, 171);}
+caLineEdit { background: lightyellow; color: black; }</string></property>
+ <widget class="QWidget" name="centralwidget">
+  <widget class="caLineEdit" name="edit">
+   <property name="geometry"><rect><x>4</x><y>4</y><width>40</width><height>16</height></rect></property>
+   <property name="channel"><string>intern://E</string></property>
+  </widget>
+  <widget class="QTabWidget" name="pages">
+   <property name="geometry"><rect><x>0</x><y>30</y><width>180</width><height>80</height></rect></property>
+   <property name="currentIndex"><number>1</number></property>
+   <property name="styleSheet"><string>QTabWidget::tab &gt; QWidget &gt; QWidget {background: wheat;}</string></property>
+   <widget class="QWidget" name="first">
+    <attribute name="title"><string>One</string></attribute>
+    <widget class="caLabel" name="hiddenlabel">
+     <property name="geometry"><rect><x>2</x><y>2</y><width>20</width><height>12</height></rect></property>
+     <property name="text"><string>HIDE</string></property>
+    </widget>
+   </widget>
+   <widget class="QWidget" name="second">
+    <attribute name="title"><string>Two</string></attribute>
+    <widget class="caLabel" name="shownlabel">
+     <property name="geometry"><rect><x>2</x><y>2</y><width>30</width><height>12</height></rect></property>
+     <property name="text"><string>SHOW</string></property>
+     <property name="fontScaleMode"><enum>ESimpleLabel::ScaleMode::None</enum></property>
+    </widget>
+   </widget>
+  </widget>
+ </widget>
+</widget></ui>"#;
+    let display = load_str(ui, std::path::Path::new("styled.ui")).unwrap();
+    let session = Session::open(display.root, Hub::new("epics3"), &MacroMap::new());
+    let visuals = session.visuals();
+    let edit = visuals.iter().find(|v| v.name == "edit").unwrap();
+    assert_eq!(edit.background, Color::rgb(255, 255, 224));
+    assert_eq!(edit.foreground, Color::rgb(0, 0, 0));
+    let page = visuals.iter().find(|v| v.name == "centralwidget").unwrap();
+    assert_eq!(page.background, Color::rgb(58, 94, 171));
+    let hidden = visuals.iter().find(|v| v.name == "hiddenlabel").unwrap();
+    let shown = visuals.iter().find(|v| v.name == "shownlabel").unwrap();
+    assert!(!hidden.visible);
+    assert!(shown.visible);
+    let page = visuals.iter().find(|v| v.name == "second").unwrap();
+    assert_eq!(page.background, Color::rgb(245, 222, 179));
+    assert!(shown.rect.y >= 30 + 28);
+    let tabs = visuals.iter().find(|v| v.name == "pages").unwrap();
+    match &tabs.kind {
+        VisualKind::Tabs { labels, current } => {
+            assert_eq!(labels, &vec!["One".to_string(), "Two".to_string()]);
+            assert_eq!(*current, 1);
+        }
+        other => panic!("expected tabs, got {other:?}"),
+    }
+}

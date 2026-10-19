@@ -700,6 +700,68 @@ pub enum Action {
     },
 }
 
+/// Fusion tab chips along the top of a `QTabWidget`.
+///
+/// Page content is inset by 28px. The chips sit in that strip. When the labels
+/// do not fit, the strip scrolls so `current` stays on screen.
+pub fn tab_rects(outer: Rect, labels: &[String], current: usize, font_px: i32) -> Vec<Rect> {
+    if labels.is_empty() || outer.width <= 0 || outer.height <= 0 {
+        return Vec::new();
+    }
+    let font_px = font_px.clamp(8, 14);
+    let bar_h = 28.min(outer.height);
+    let tab_h = (bar_h - 4).max(12);
+    let gap = 2;
+    let widths: Vec<i32> = labels
+        .iter()
+        .map(|label| {
+            let chars = label.chars().count() as i32;
+            (chars * font_px * 3 / 5 + 16).max(28)
+        })
+        .collect();
+    let total = widths.iter().sum::<i32>() + gap * (widths.len() as i32 - 1).max(0);
+    let available = (outer.width - 4).max(1);
+    let mut origin = 0;
+    if total > available {
+        let shown = current.min(labels.len().saturating_sub(1));
+        let before = widths.iter().take(shown).sum::<i32>() + gap * shown as i32;
+        origin = before.min((total - available).max(0));
+    }
+    let mut x = outer.x + 2 - origin;
+    let y = outer.y + (bar_h - tab_h);
+    widths
+        .into_iter()
+        .map(|width| {
+            let rect = Rect::new(x, y, width, tab_h);
+            x += width + gap;
+            rect
+        })
+        .collect()
+}
+
+/// Index of the tab chip under a display-pixel click. A click in the bar but
+/// not on a chip keeps `current`.
+pub fn tab_at(
+    outer: Rect,
+    labels: &[String],
+    current: usize,
+    font_px: i32,
+    x: f32,
+    y: f32,
+) -> usize {
+    let rects = tab_rects(outer, labels, current, font_px);
+    for (index, rect) in rects.iter().enumerate() {
+        let inside = x >= rect.x as f32
+            && x < (rect.x + rect.width) as f32
+            && y >= rect.y as f32
+            && y < (rect.y + rect.height) as f32;
+        if inside {
+            return index;
+        }
+    }
+    current.min(labels.len().saturating_sub(1))
+}
+
 /// Button rectangle for choice buttons and row/column menus.
 ///
 /// `columns` is how many buttons share a row. A single column fills downward.

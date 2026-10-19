@@ -149,10 +149,14 @@ impl Session {
     }
 
     pub fn visuals(&self) -> Vec<Visual> {
+        let hints = paint_hints(&self.root, &self.tabs);
         self.nodes
             .iter()
             .enumerate()
-            .map(|(id, node)| self.visual(id as u32, node))
+            .map(|(id, node)| {
+                let hint = hints.get(id).cloned().unwrap_or_default();
+                self.visual(id as u32, node, &hint)
+            })
             .collect()
     }
 
@@ -388,9 +392,14 @@ impl Session {
         }
     }
 
-    fn visual(&self, id: u32, node: &WidgetNode) -> Visual {
+    fn visual(&self, id: u32, node: &WidgetNode, hint: &PaintHint) -> Visual {
         let data = self.primary(node);
-        let (mut foreground, background) = colors(node, data);
+        let (mut foreground, mut background) = colors(node, data, &hint.style, hint.is_root);
+        if background.a == 0 {
+            if let Some(fill) = hint.page_fill {
+                background = fill;
+            }
+        }
         if node.class_name == "caLed" {
             foreground = led_lamp(node, data, foreground);
         }
@@ -399,9 +408,13 @@ impl Session {
                 foreground = color;
             }
         }
-        let visible = self.is_visible(node);
+        let visible = self.is_visible(node) && !hint.hidden;
         let text = self.caption(node, data);
         let kind = self.kind(node, data);
+        let mut border = prop_color(node, "borderColor").or_else(|| prop_color(node, "frameColor"));
+        if border.is_none() && node.class_name == "caFrame" {
+            border = prop_color(node, "background").or(Some(Color::rgb(160, 160, 160)));
+        }
         Visual {
             id,
             class_name: node.class_name.clone(),
@@ -413,16 +426,11 @@ impl Session {
             kind,
             visible,
             severity: data.map(|d| d.severity).unwrap_or(Severity::NotConnected),
-            font_px: font_px_of(node),
+            font_px: font_px_of(node, &hint.style),
             rotation: rotation_of(node),
             align: align_of(node),
-            border: prop_color(node, "borderColor").or_else(|| prop_color(node, "frameColor")),
-            border_px: node
-                .prop_f64("lineWidth")
-                .or_else(|| node.prop_f64("borderWidth"))
-                .or_else(|| node.prop_f64("frameLineWidth"))
-                .unwrap_or(1.0)
-                .max(1.0) as i32,
+            border,
+            border_px: border_px_of(node),
         }
     }
 
@@ -1498,14 +1506,15 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
     out
 }
 
-fn colors(node: &WidgetNode, data: Option<&ChannelData>) -> (Color, Color) {
-    // Plot constructors call `setBackground`, `setForeground`, and `setScaleColor`
-    // before any `.ui` property arrives. Other widgets keep the shared defaults.
-    let (fg_default, bg_default) = match node.class_name.as_str() {
-        "caCartesianPlot" => (Color::rgb(255, 255, 255), Color::rgb(0, 0, 0)),
-        "caStripPlot" => (Color::rgb(133, 190, 232), Color::rgb(0, 0, 0)),
-        _ => (Color::rgb(20, 20, 20), Color::rgb(236, 236, 236)),
-    };
+fn colors(
+    node: &WidgetNode,
+    data: Option<&ChannelData>,
+    style: &crate::style::CssStyle,
+    is_root: bool,
+) -> (Color, Color) {
+    // Plot constructors call `setBackground` and `setForeground` before any
+    // `.ui` property arrives. `caLabel` starts transparent with a black pen.
+    let (fg_default, bg_default) = class_colors(node, is_root);
     let mut fg = node
         .prop("foreground")
         .and_then(PropValue::as_color)
@@ -1514,6 +1523,16 @@ fn colors(node: &WidgetNode, data: Option<&ChannelData>) -> (Color, Color) {
         .prop("background")
         .and_then(PropValue::as_color)
         .unwrap_or(bg_default);
+    if node.class_name == "caFrame" {
+        let frame = node
+            .prop("background")
+            .and_then(PropValue::as_color)
+            .unwrap_or(Color::rgb(160, 160, 160));
+        let filled = node
+            .enum_tail("backgroundMode")
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("Filled"));
+        bg = if filled { frame } else { Color::transparent() };
+    }
     let mode = node.enum_tail("colorMode").unwrap_or("Static");
     if mode.eq_ignore_ascii_case("Alarm")
         || mode.eq_ignore_ascii_case("Alarm_Default")
@@ -1527,15 +1546,37 @@ fn colors(node: &WidgetNode, data: Option<&ChannelData>) -> (Color, Color) {
         }
         return (alarm_color(data.severity), bg);
     }
-    if let Some(sheet) = node.prop_str("styleSheet") {
-        if let Some(color) = crate::style::css_color(sheet, "color") {
-            fg = color;
-        }
-        if let Some(color) = crate::style::css_color(sheet, "background-color") {
-            bg = color;
-        }
+    if let Some(color) = style.foreground {
+        fg = color;
+    }
+    if let Some(color) = style.background {
+        bg = color;
     }
     (fg, bg)
+}
+
+fn class_colors(node: &WidgetNode, is_root: bool) -> (Color, Color) {
+    match node.class_name.as_str() {
+        "caCartesianPlot" => (Color::rgb(255, 255, 255), Color::rgb(0, 0, 0)),
+        "caStripPlot" => (Color::rgb(133, 190, 232), Color::rgb(0, 0, 0)),
+        "caLabel" | "caLabelVertical" | "QLabel" => (Color::rgb(0, 0, 0), Color::transparent()),
+        "caChoice" => (Color::rgb(0, 0, 0), Color::rgb(155, 255, 255)),
+        "caSlider" | "caThermo" => (Color::rgb(0, 0, 0), Color::rgb(224, 224, 224)),
+        "caLineEdit" | "caTextEntry" | "QLineEdit" => {
+            (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255))
+        }
+        "QWidget" | "QFrame" | "QMainWindow" | "QDialog" | "QTabWidget" | "QStackedWidget"
+        | "caDoubleTabWidget" => {
+            let bg = if is_root || node.prop_bool("autoFillBackground") == Some(true) {
+                Color::rgb(236, 236, 236)
+            } else {
+                Color::transparent()
+            };
+            (Color::rgb(20, 20, 20), bg)
+        }
+        "caFrame" => (Color::rgb(0, 0, 0), Color::transparent()),
+        _ => (Color::rgb(20, 20, 20), Color::rgb(236, 236, 236)),
+    }
 }
 
 fn limits_of(node: &WidgetNode, data: Option<&ChannelData>) -> (f64, f64) {
@@ -1684,15 +1725,22 @@ fn polyline_points(node: &WidgetNode) -> Vec<caqtdm_core::Point> {
         .collect()
 }
 
-fn font_px_of(node: &WidgetNode) -> i32 {
-    if let Some(sheet) = node.prop_str("styleSheet") {
-        if let Some(px) = crate::style::css_px(sheet, "font-size") {
-            return px;
-        }
+fn font_px_of(node: &WidgetNode, style: &crate::style::CssStyle) -> i32 {
+    if let Some(px) = style.font_px {
+        return px.max(1);
     }
-    let mode = node.enum_tail("fontScaleMode").unwrap_or("None");
+    // `caLabel` constructs with `WidthAndHeight`. The designer enum is that
+    // spelling; `HeightAndWidth` is accepted as the same fit.
+    let mode = node
+        .enum_tail("fontScaleMode")
+        .unwrap_or(match node.class_name.as_str() {
+            "caLabel" | "caLabelVertical" => "WidthAndHeight",
+            _ => "None",
+        });
     let scaled = match mode.to_ascii_lowercase().as_str() {
-        "height" | "heightandwidth" => (f64::from(node.rect.height.max(1)) * 0.7) as i32,
+        "height" | "heightandwidth" | "widthandheight" => {
+            (f64::from(node.rect.height.max(1)) * 0.7) as i32
+        }
         "width" => (f64::from(node.rect.width.max(1)) * 0.2) as i32,
         _ => 0,
     };
@@ -1752,9 +1800,150 @@ fn tab_labels(node: &WidgetNode) -> Vec<String> {
         }
     }
     if labels.is_empty() {
+        labels.extend(node.children.iter().map(|child| {
+            child
+                .attributes
+                .get("title")
+                .filter(|title| !title.is_empty())
+                .cloned()
+                .unwrap_or_else(|| child.name.clone())
+        }));
+    }
+    if labels.is_empty() {
         labels.push("Page".into());
     }
     labels
+}
+
+fn border_px_of(node: &WidgetNode) -> i32 {
+    if let Some(width) = node
+        .prop_f64("lineWidth")
+        .or_else(|| node.prop_f64("borderWidth"))
+        .or_else(|| node.prop_f64("frameLineWidth"))
+    {
+        return width.max(0.0) as i32;
+    }
+    match node.class_name.as_str() {
+        "caClock" => 3,
+        "caSlider" | "caThermo" | "caMeter" | "caChoice" => 1,
+        "caFrame" => 1,
+        "caLabel" | "caLabelVertical" | "QLabel" | "QWidget" | "QFrame" | "QMainWindow"
+        | "QDialog" | "QTabWidget" | "QStackedWidget" | "caDoubleTabWidget" | "caInclude"
+        | "QMenuBar" | "QMenu" | "QStatusBar" | "QToolBar" => 0,
+        _ => 1,
+    }
+}
+
+#[derive(Clone, Default)]
+struct PaintHint {
+    style: crate::style::CssStyle,
+    hidden: bool,
+    is_root: bool,
+    /// Fill from `QTabWidget::tab > QWidget > QWidget` on the parent tab widget.
+    page_fill: Option<Color>,
+}
+
+/// Stylesheet cascade and the tab page that is actually showing.
+/// Off-page widgets stay in the session so their channels still update.
+fn paint_hints(
+    root: &WidgetNode,
+    tabs: &std::collections::BTreeMap<String, usize>,
+) -> Vec<PaintHint> {
+    let mut out = Vec::new();
+    let mut chain: Vec<(String, String)> = Vec::new();
+    let mut sheets: Vec<(usize, String)> = Vec::new();
+    walk_hints(root, &mut chain, &mut sheets, false, true, tabs, &mut out);
+    out
+}
+
+fn walk_hints(
+    node: &WidgetNode,
+    chain: &mut Vec<(String, String)>,
+    sheets: &mut Vec<(usize, String)>,
+    hidden: bool,
+    is_root: bool,
+    tabs: &std::collections::BTreeMap<String, usize>,
+    out: &mut Vec<PaintHint>,
+) {
+    let page_fill = tab_page_fill(chain, sheets);
+    chain.push((node.class_name.clone(), node.name.clone()));
+    let mut pushed_sheet = false;
+    if let Some(css) = node
+        .prop_str("styleSheet")
+        .filter(|css| !css.trim().is_empty())
+    {
+        sheets.push((chain.len() - 1, css.to_string()));
+        pushed_sheet = true;
+    }
+    let idents: Vec<crate::style::WidgetIdent<'_>> = chain
+        .iter()
+        .map(|(class_name, name)| crate::style::WidgetIdent { class_name, name })
+        .collect();
+    let sources: Vec<crate::style::SheetSource<'_>> = sheets
+        .iter()
+        .map(|(owner, css)| crate::style::SheetSource { css, owner: *owner })
+        .collect();
+    out.push(PaintHint {
+        style: crate::style::cascade(&idents, &sources),
+        hidden,
+        is_root,
+        page_fill,
+    });
+    let pages = matches!(
+        node.class_name.as_str(),
+        "QTabWidget" | "caDoubleTabWidget" | "QStackedWidget"
+    );
+    let current = if pages {
+        tabs.get(&node.name)
+            .copied()
+            .unwrap_or_else(|| node.prop_f64("currentIndex").unwrap_or(0.0).max(0.0) as usize)
+    } else {
+        0
+    };
+    for (index, child) in node.children.iter().enumerate() {
+        let child_hidden = hidden || (pages && index != current);
+        walk_hints(child, chain, sheets, child_hidden, false, tabs, out);
+    }
+    if let Some(layout) = &node.layout {
+        walk_layout_hints(layout, chain, sheets, hidden, tabs, out);
+    }
+    if pushed_sheet {
+        sheets.pop();
+    }
+    chain.pop();
+}
+
+fn tab_page_fill(chain: &[(String, String)], sheets: &[(usize, String)]) -> Option<Color> {
+    let index = chain.len().checked_sub(1)?;
+    let (class, _) = chain.get(index)?;
+    if !matches!(class.as_str(), "QTabWidget" | "caDoubleTabWidget") {
+        return None;
+    }
+    let css = sheets
+        .iter()
+        .rev()
+        .find(|(owner, _)| *owner == index)?
+        .1
+        .as_str();
+    crate::style::tab_page_background(css)
+}
+
+fn walk_layout_hints(
+    layout: &caqtdm_ui::LayoutNode,
+    chain: &mut Vec<(String, String)>,
+    sheets: &mut Vec<(usize, String)>,
+    hidden: bool,
+    tabs: &std::collections::BTreeMap<String, usize>,
+    out: &mut Vec<PaintHint>,
+) {
+    for item in &layout.items {
+        if let Some(widget) = &item.widget {
+            walk_hints(widget, chain, sheets, hidden, false, tabs, out);
+        }
+        if let Some(nested) = &item.layout {
+            walk_layout_hints(nested, chain, sheets, hidden, tabs, out);
+        }
+    }
 }
 
 fn scan_waveform(

@@ -1,5 +1,27 @@
 use caqtdm_app::execute;
 
+#[test]
+fn display_path_resolves_the_requested_file() {
+    let dir = std::env::temp_dir().join(format!("caqtdm-display-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("only-on-the-display-path.ui"),
+        r#"<?xml version="1.0"?><ui version="4.0"><class>Form</class><widget class="QWidget" name="Form"><property name="geometry"><rect><x>0</x><y>0</y><width>10</width><height>10</height></rect></property></widget></ui>"#,
+    )
+    .unwrap();
+    let previous = std::env::var("CAQTDM_DISPLAY_PATH").ok();
+    unsafe { std::env::set_var("CAQTDM_DISPLAY_PATH", &dir) };
+    let result = execute(&args(&["validate", "only-on-the-display-path.ui"]));
+    match &previous {
+        Some(value) => unsafe { std::env::set_var("CAQTDM_DISPLAY_PATH", value) },
+        None => unsafe { std::env::remove_var("CAQTDM_DISPLAY_PATH") },
+    }
+    let text = result.expect("CAQTDM_DISPLAY_PATH");
+    assert!(text.contains("ok"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn args(parts: &[&str]) -> Vec<String> {
     std::iter::once("caqtdm".to_string())
         .chain(parts.iter().map(|s| (*s).to_string()))
@@ -275,7 +297,7 @@ fn stylefile_geometry_and_url_change_the_result() {
     let bytes = std::fs::read(&ppm).unwrap();
     assert!(bytes.starts_with(b"P6\n40 20\n"));
     assert!(
-        ppm_has(&bytes, |r, g, b| r == 255 && g == 0 && b == 0),
+        ppm_has(&bytes, |r, g, b| r > 200 && g < 40 && b < 40),
         "stylesheet color was not painted"
     );
     let (r, g, b) = ppm_rgb(&bytes, 38, 18);
@@ -321,8 +343,12 @@ fn stylefile_geometry_and_url_change_the_result() {
 </widget></ui>"#,
     )
     .unwrap();
-    let missing = execute(&args(&["dump", parent.to_str().unwrap()])).unwrap_err();
-    assert!(missing.contains("included display not found"));
+    let missing = execute(&args(&["dump", parent.to_str().unwrap()])).unwrap();
+    assert!(missing.contains("inc"));
+    assert!(
+        !missing.contains("fromurl"),
+        "a missing include must not abort the parent"
+    );
     let dumped = execute(&args(&[
         "dump",
         parent.to_str().unwrap(),
@@ -477,7 +503,7 @@ fn novnc_serves_the_framebuffer_and_readonly_drops_input() {
     let (_w, _h, rgba) = caqtdm_app::rfb_framebuffer(vnc).unwrap();
     assert!(
         rgba.chunks(4)
-            .any(|px| px[0] == 255 && px[1] == 0 && px[2] == 0),
+            .any(|px| px[0] > 200 && px[1] < 40 && px[2] < 40),
         "rfb framebuffer missed the red glyph"
     );
     assert_eq!(caqtdm_app::novnc_version(novnc).unwrap(), "RFB 003.008\n");

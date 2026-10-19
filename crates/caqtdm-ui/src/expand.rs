@@ -5,28 +5,32 @@ use crate::load_path;
 use crate::model::{assign_geometry, WidgetNode};
 use crate::search::SearchPath;
 
-const MAX_INCLUDE_DEPTH: usize = 16;
+/// `CAQTDM_MAX_INCLUDE_LEVEL` is 50 and a load is refused once `level` reaches 49.
+const MAX_INCLUDE_DEPTH: usize = 49;
 
 /// Substitute macros and inline `caInclude` widgets.
+///
+/// A missing include is a warning, not a failure. Upstream posts
+/// `sorry, could not load include file` and still opens the parent.
 pub fn expand_includes(
     root: &mut WidgetNode,
     search: &SearchPath,
     macros: &MacroMap,
-) -> Result<(), UiError> {
-    expand_node(root, search, macros, 0)?;
+) -> Result<Vec<String>, UiError> {
+    let mut warnings = Vec::new();
+    let mut stack = Vec::new();
+    expand_node(root, search, macros, &mut stack, &mut warnings)?;
     assign_geometry(root);
-    Ok(())
+    Ok(warnings)
 }
 
 fn expand_node(
     node: &mut WidgetNode,
     search: &SearchPath,
     macros: &MacroMap,
-    depth: usize,
+    stack: &mut Vec<std::path::PathBuf>,
+    warnings: &mut Vec<String>,
 ) -> Result<(), UiError> {
-    if depth > MAX_INCLUDE_DEPTH {
-        return Err(UiError::msg("include nesting is deeper than 16"));
-    }
     substitute_node(node, macros);
     let mut local = macros.clone();
     if let Some(extra) = node.prop_str("macro").or_else(|| node.prop_str("macros")) {
@@ -34,17 +38,17 @@ fn expand_node(
     }
 
     if node.class_name == "caInclude" {
-        *node = expand_include(node, search, &local, depth)?;
+        *node = expand_include(node, search, &local, stack, warnings)?;
         return Ok(());
     }
 
     for child in &mut node.children {
-        expand_node(child, search, &local, depth)?;
+        expand_node(child, search, &local, stack, warnings)?;
     }
     if let Some(layout) = node.layout.as_mut() {
         for item in &mut layout.items {
             if let Some(widget) = item.widget.as_mut() {
-                expand_node(widget, search, &local, depth)?;
+                expand_node(widget, search, &local, stack, warnings)?;
             }
         }
     }
@@ -55,17 +59,27 @@ fn expand_include(
     node: &WidgetNode,
     search: &SearchPath,
     macros: &MacroMap,
-    depth: usize,
+    stack: &mut Vec<std::path::PathBuf>,
+    warnings: &mut Vec<String>,
 ) -> Result<WidgetNode, UiError> {
-    let filename = node
-        .prop_str("filename")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| UiError::msg(format!("caInclude '{}' has no filename", node.name)))?
-        .to_string();
-    let path = search
-        .find(&filename)
-        .ok_or_else(|| UiError::msg(format!("included display not found: {filename}")))?;
-    let loaded = load_path(&path)?;
+    let filename = node.prop_str("filename").unwrap_or("").trim().to_string();
+    let Some(path) = search.resolve_include(&filename) else {
+        warnings.push(format!("sorry, could not load include file {filename}"));
+        return Ok(empty_include(node));
+    };
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if stack.len() >= MAX_INCLUDE_DEPTH || stack.iter().any(|seen| seen == &canonical) {
+        warnings.push(format!("sorry, could not load include file {filename}"));
+        return Ok(empty_include(node));
+    }
+    stack.push(canonical);
+    let loaded = match load_path(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            stack.pop();
+            return Err(err);
+        }
+    };
     let count = node.prop_f64("numberOfItems").unwrap_or(1.0).max(1.0) as usize;
     let instance_macros = instance_macro_list(node, count);
     let stacking = node.enum_tail("stacking").unwrap_or("Row").to_string();
@@ -92,6 +106,12 @@ fn expand_include(
         vec![inner.clone()]
     };
 
+    let mut nested = search.clone();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            nested.origin = Some(parent.to_path_buf());
+        }
+    }
     for index in 0..count {
         let mut inst_macros = macros.clone();
         if let Some(extra) = instance_macros.get(index) {
@@ -100,12 +120,23 @@ fn expand_include(
         let (dx, dy) = stack_offset(index, count, &stacking, max_lines, base);
         for child in &source_children {
             let mut copy = child.clone();
-            expand_node(&mut copy, search, &inst_macros, depth + 1)?;
+            if let Err(err) = expand_node(&mut copy, &nested, &inst_macros, stack, warnings) {
+                stack.pop();
+                return Err(err);
+            }
             shift_geometry(&mut copy, dx, dy);
             frame.children.push(copy);
         }
     }
+    stack.pop();
     Ok(frame)
+}
+
+fn empty_include(node: &WidgetNode) -> WidgetNode {
+    let mut frame = WidgetNode::new("caFrame", node.name.clone());
+    frame.properties = node.properties.clone();
+    frame.rect = node.rect;
+    frame
 }
 
 fn instance_macro_list(node: &WidgetNode, count: usize) -> Vec<MacroMap> {

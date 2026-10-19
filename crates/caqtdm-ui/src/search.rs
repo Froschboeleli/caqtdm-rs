@@ -1,10 +1,17 @@
 use std::path::{Path, PathBuf};
 
-/// Directories searched for included displays, images, and stylesheets.
-/// `CAQTDM_DISPLAY_PATH` is a colon-separated list, the same variable caQtDM uses.
+/// Directories searched for displays, images, and stylesheets.
+///
+/// This follows `searchFile::findFile`: the name as given (cwd or absolute),
+/// then each entry of `CAQTDM_DISPLAY_PATH`. The separator is `:` on Unix and
+/// `;` on Windows, matching `pathdefinitions.h`. The directory of the display
+/// that is open is tried last, which is the include fallback after the path.
 #[derive(Debug, Clone, Default)]
 pub struct SearchPath {
+    /// `CAQTDM_DISPLAY_PATH`, then extra directories such as `-url`.
     pub dirs: Vec<PathBuf>,
+    /// Directory of the display currently being expanded.
+    pub origin: Option<PathBuf>,
 }
 
 impl SearchPath {
@@ -12,35 +19,35 @@ impl SearchPath {
         Self::default()
     }
 
+    pub fn from_env() -> Self {
+        let dirs = std::env::var("CAQTDM_DISPLAY_PATH")
+            .map(|value| split_display_path(&value))
+            .unwrap_or_default();
+        Self { dirs, origin: None }
+    }
+
     pub fn from_file(file: &Path) -> Self {
         Self::from_env_and_file(Some(file))
     }
 
     pub fn from_env_and_file(file: Option<&Path>) -> Self {
-        let mut dirs = Vec::new();
+        let mut path = Self::from_env();
         if let Some(file) = file {
-            if let Some(parent) = file.parent() {
-                if !parent.as_os_str().is_empty() {
-                    dirs.push(parent.to_path_buf());
-                }
-            }
+            path.origin = directory_of(file);
         }
-        if let Ok(env) = std::env::var("CAQTDM_DISPLAY_PATH") {
-            for part in env.split([':', ';']) {
-                let part = part.trim();
-                if !part.is_empty() {
-                    dirs.push(PathBuf::from(part));
-                }
-            }
-        }
-        Self { dirs }
+        path
     }
 
     pub fn push(&mut self, dir: impl Into<PathBuf>) {
         self.dirs.push(dir.into());
     }
 
+    /// `searchFile::findFile`, then the open display's directory.
     pub fn find(&self, name: &str) -> Option<PathBuf> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
         let raw = PathBuf::from(name);
         if raw.is_file() {
             return Some(raw);
@@ -50,6 +57,30 @@ impl SearchPath {
             if candidate.is_file() {
                 return Some(candidate);
             }
+        }
+        if let Some(origin) = &self.origin {
+            let candidate = origin.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Include and related-display lookup. The original name is searched first.
+    /// A missing `.adl` or `.edl` is tried again as `.ui`, and any other
+    /// suffix is rewritten to `.ui`, matching `caInclude` in `caqtdm_lib.cpp`.
+    pub fn resolve_include(&self, provided: &str) -> Option<PathBuf> {
+        let provided = provided.trim();
+        if provided.is_empty() {
+            return None;
+        }
+        if let Some(found) = self.find(provided) {
+            return Some(found);
+        }
+        let rewritten = rewrite_missing_include(provided);
+        if rewritten != provided {
+            return self.find(&rewritten);
         }
         None
     }
@@ -69,6 +100,51 @@ impl SearchPath {
         }
         None
     }
+}
+
+fn directory_of(file: &Path) -> Option<PathBuf> {
+    let parent = file.parent()?;
+    if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// `pathSeparator` in `pathdefinitions.h`. Windows entries may be quoted.
+pub fn split_display_path(value: &str) -> Vec<PathBuf> {
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    value
+        .split(separator)
+        .filter_map(|part| {
+            let part = if cfg!(windows) {
+                part.replace('"', "")
+            } else {
+                part.to_string()
+            };
+            let part = part.trim();
+            if part.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(part))
+            }
+        })
+        .collect()
+}
+
+fn rewrite_missing_include(name: &str) -> String {
+    let path = Path::new(name);
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "prc" || ext == "ui" {
+        return name.to_string();
+    }
+    let mut rewritten = PathBuf::from(name);
+    rewritten.set_extension("ui");
+    rewritten.to_string_lossy().into_owned()
 }
 
 fn trust_anchors_from_env() -> Vec<Vec<u8>> {
@@ -235,4 +311,62 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
         i += 4;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_path_separator_matches_search_file() {
+        let parts = split_display_path(if cfg!(windows) {
+            r#""C:\one";"D:\two";"#
+        } else {
+            "/one:/two: :/three"
+        });
+        if cfg!(windows) {
+            assert_eq!(
+                parts,
+                vec![PathBuf::from(r"C:\one"), PathBuf::from(r"D:\two")]
+            );
+        } else {
+            assert_eq!(
+                parts,
+                vec![
+                    PathBuf::from("/one"),
+                    PathBuf::from("/two"),
+                    PathBuf::from("/three")
+                ]
+            );
+            assert_eq!(split_display_path("/a;/b").len(), 1);
+        }
+    }
+
+    #[test]
+    fn display_path_beats_the_including_directory() {
+        let root = std::env::temp_dir().join(format!("caqtdm-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path_dir = root.join("path");
+        let origin = root.join("origin");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(path_dir.join("panel.ui"), "from-path").unwrap();
+        std::fs::write(origin.join("panel.ui"), "from-origin").unwrap();
+        std::fs::write(origin.join("sibling.ui"), "sib").unwrap();
+        std::fs::write(origin.join("object_quad.ui"), "converted").unwrap();
+        let search = SearchPath {
+            dirs: vec![path_dir],
+            origin: Some(origin),
+        };
+        let found = search.find("panel.ui").unwrap();
+        assert_eq!(std::fs::read_to_string(&found).unwrap(), "from-path");
+        assert_eq!(
+            std::fs::read_to_string(search.find("sibling.ui").unwrap()).unwrap(),
+            "sib"
+        );
+        let rewritten = search.resolve_include("object_quad.adl").unwrap();
+        assert_eq!(std::fs::read_to_string(&rewritten).unwrap(), "converted");
+        assert!(search.resolve_include("missing.adl").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

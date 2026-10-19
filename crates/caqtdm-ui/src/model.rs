@@ -190,6 +190,12 @@ fn place_children(parent: &mut WidgetNode) {
         layout_into(layout, content_box(parent_rect, layout));
     }
 
+    let tab_parent = parent.class_name == "QTabWidget" || parent.class_name == "caDoubleTabWidget";
+    let (inset_l, inset_t, inset_r, inset_b) = if tab_parent {
+        tab_bar_insets(parent)
+    } else {
+        (0, 0, 0, 0)
+    };
     for child in &mut parent.children {
         if child.class_name == "QMenuBar" {
             child.rect = Rect::new(parent_rect.x, parent_rect.y, parent_rect.width, menu_h);
@@ -205,12 +211,32 @@ fn place_children(parent: &mut WidgetNode) {
             && child.geometry_prop().is_none()
         {
             child.rect = client;
+        } else if tab_parent && child.geometry_prop().is_none() {
+            // Designer pages fill the area under the tab bar. Their children
+            // are positioned inside that page, not under the tabs.
+            child.rect = Rect::new(
+                parent.rect.x + inset_l,
+                parent.rect.y + inset_t,
+                (parent.rect.width - inset_l - inset_r).max(0),
+                (parent.rect.height - inset_t - inset_b).max(0),
+            );
         } else if let Some(g) = child.geometry_prop() {
             child.rect = Rect::new(parent.rect.x + g.x, parent.rect.y + g.y, g.width, g.height);
         } else if child.rect.is_empty() {
             child.rect = parent.rect;
         }
         place_children(child);
+    }
+}
+
+/// North tab bars in the Fusion style are about 28px for the default font.
+fn tab_bar_insets(parent: &WidgetNode) -> (i32, i32, i32, i32) {
+    let bar = 28;
+    match parent.enum_tail("tabPosition").unwrap_or("North") {
+        "South" => (0, 0, 0, bar),
+        "West" => (bar, 0, 0, 0),
+        "East" => (0, 0, bar, 0),
+        _ => (0, bar, 0, 0),
     }
 }
 

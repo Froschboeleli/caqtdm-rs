@@ -8,9 +8,10 @@ License: GPL-3.0-or-later, the same terms as caQtDM. The full text is in [LICENS
 
 ## Build
 
-Rust 1.85 or newer (the committed `rust-toolchain.toml` selects stable).
+Rust 1.85 or newer (the committed `rust-toolchain.toml` selects stable). PyO3 0.30 is what the `python` feature links. It accepts CPython 3.9 through 3.15, including 3.14, so `cargo build --release` does not need `PYO3_USE_ABI3_FORWARD_COMPATIBILITY`. The feature is on by default.
 
 ```bash
+cargo build --release
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -32,7 +33,14 @@ cargo run -p caqtdm-app -- run examples/displays/vacuum.ui -macro SYS=VAC
 
 Channel names follow caQtDM: `intern://NAME`, `sim://sine:20:4000:40`, `env://VAR`, `pva://NAME`, `ca://NAME`, or a bare name on the default plugin (`-cs epics3` by default). `--ca HOST:PORT` and `--pva HOST:PORT` connect the scalar clients. Without those flags the EPICS plugins stay offline and the simulated plugins still run.
 
-Included displays are searched next to the parent file and in `CAQTDM_DISPLAY_PATH` (colon or semicolon separated).
+Display files are resolved the way `searchFile::findFile` does. The name is tried as given (the working directory, or an absolute path). If that file is not there, each directory in `CAQTDM_DISPLAY_PATH` is tried. The separator is `:` on Unix and `;` on Windows. The directory of the display that is already open is the last fallback, which is how an include sitting next to its parent is found after the path has been searched. `-url DIR` adds one more directory. The same search is used for the file you pass on the command line, for `caInclude`, and for a related display.
+
+A missing include does not stop the display. The message is `sorry, could not load include file <name>`, and the rest of the file still opens. A missing `.adl` or `.edl` is tried again as `.ui`. Nested includes stop at 49 levels, or when a file includes itself.
+
+```bash
+CAQTDM_DISPLAY_PATH=/opt/displays:/opt/includes ./target/release/caqtdm S_OP_overview.ui
+./target/release/caqtdm upstream/caQtDM_Tests/tests.ui
+```
 
 ## Crates
 
@@ -60,4 +68,12 @@ The HIPA and PRO archive plugin is reimplemented from the public `hipaRetrieval.
 
 Closing that gap needs one of three things: the `libNewLogRPC` / `libNewLogRPC_64.a` binary, its source, or a wire-protocol specification. A capture of traffic from a real PSI archive server would also do, if the request and reply bytes can be matched to `GetLogShift`.
 
-Without a real installation, two further checks stay unverified. Channel Access and PV Access are tested against the in-process soft IOC and loopback clients, not against live EPICS process variables on a site network. Display parsing and painting are tested against the samples in this repo and, when `upstream/` is present, against the upstream examples (`test.ui`, `graphics.edl`, `prcshowcase.prc`, and the `.ui` files in that tree). They have not been compared with a facility's production `.adl` or `.ui` set.
+Channel Access and PV Access are tested against the in-process soft IOC and loopback clients, not against live EPICS process variables on a site network. Display parsing and painting are tested against the samples in this repo and, when `upstream/` is present, against the upstream examples. They have not been compared with a facility's production set, including the PSI SwissFEL overview (`S_OP_overview.ui` is not in this tree).
+
+The original C++ caQtDM from the reference commit was built outside the source tree with Qt 5.15.13, Qwt 6.1.4 (`libqwt-qt5`), and Debian `epics-dev`. That package ships pvAccess headers without the pvAccess libraries, so the epics4 plugin was not linked. The viewer is `caQtDM` V4.9.0. `scripts/compare-displays.sh` paints the Rust display and, when `CAQTDM_BIN` and `LD_LIBRARY_PATH` point at that build, grabs the display window under Xvfb. The version splash is not the grab. Output goes to `artifacts/compare/` (gitignored).
+
+That run wrote 39 side-by-side grabs. The window size matches for `tests.ui` (1090×756), `test.ui` (800×600), `numeric.ui` (1973×987), and `examples/displays/vacuum.ui` (640×360). `graphics.edl` crashes the Qt binary on this build, so it has a Rust snapshot only.
+
+On that run, `tests.ui` opens in both programs at 1090×756. A missing include is a warning (`sorry, could not load include file recursive_bad.ui`) and the window still opens. The outer `currentIndex` is 1, so the monitors page is the one on screen. `QTabWidget::tab > QWidget > QWidget` fills that page with wheat `(245, 222, 179)`, which is the dominant color in both grabs. The central widget stays stylesheet blue `(58, 94, 171)` in the margin, `caLineEdit` is light yellow, and `caTable` is cornsilk. `examples/displays/vacuum.ui` is 640×360 in both. The Rust plot fills its widget with the plot background; Qwt leaves a gray margin and draws the trace inside the scale. A label with no `fontScaleMode` uses WidthAndHeight, so the Rust glyphs are larger than Qt's point size when the widget is tall.
+
+What the Rust raster still does not match in Qt: FreeType hinting, stylesheet sub-controls (`::groove`, slider handles, `qlineargradient`), and the exact Fusion metrics of a tab bar. The page under a north tab bar is inset by 28 pixels and the chips are flat gray (`#d8d8d8`, selected `#fafafa`) with dark text. A long strip scrolls so the current tab stays visible. Inactive tab pages are hidden and do not enlarge the snapshot. A label with no `background` is transparent so the parent shows through.

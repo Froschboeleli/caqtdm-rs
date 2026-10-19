@@ -40,8 +40,8 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | caGraphics | Rectangle, circle, arc (0 degrees at 3 o'clock), triangle, and arrow. A paint test checks a pixel on each form and a pixel that stays empty | done |
 | caPolyLine | `xyPairs`, open or closed. The `graphics.edl` polyline vertex is painted | done |
 | caImage | PPM, PNG, GIF, and a small SVG (`rect`, `circle`, `line`) via `filename` | done |
-| caInclude | `filename`, `numberOfItems`, stacking, per-item macros, depth limit 16 | done |
-| caDoubleTabWidget | Tab labels from `items` / `itemsHorizontal` / `itemsVertical`. A choice selects the page | done |
+| caInclude | `filename`, `numberOfItems`, stacking, per-item macros. A missing file warns and the parent stays open. Depth cap 49 | done |
+| caDoubleTabWidget | Tab labels from `items` or from each page's `title`. Only the current page is painted. A choice selects the page | done |
 | caClock | Digital `HH:MM:SS` from the tick. Analog draws hour and minute hands (12 is up). A paint test checks 03:00:00 | done |
 | caBitnames | Bit cells. `trueStrings` or `names` are drawn in the cells | done |
 | caLed | On when the value is non-zero, or when `bitNr` is set | done |
@@ -90,8 +90,8 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | Number formats | `formattype.h`, `calineedit` | decimal, exponential, engineering, compact, truncated, hex, octal, string, sexagesimal, and enumeric | done |
 | Alarm colors | `alarmdefs.h` | NO_ALARM green, MINOR yellow, MAJOR red, INVALID white, disconnected gray | done |
 | Channel prefixes | `caqtdm_lib.cpp` | `plugin://`, `pva://` and `ca://` to epics4, bare names to the default plugin | done |
-| Search path | `CAQTDM_DISPLAY_PATH` | file directory, that variable, `http://` GET, and `https://` with rustls | done |
-| Includes | `caInclude` stacking and macros | `expand_includes`, depth limit 16 | done |
+| Search path | `CAQTDM_DISPLAY_PATH` | `searchFile` order: the name as given, then that variable (`:` on Unix, `;` on Windows), then the open display's directory. The top-level file, includes, and related displays all use it. `http://` GET and `https://` with rustls | done |
+| Includes | `caInclude` stacking and macros | `expand_includes`. A missing file warns `sorry, could not load include file` and the parent still opens. `.adl` and `.edl` fall back to `.ui`. Depth cap 49, matching `CAQTDM_MAX_INCLUDE_LEVEL` | done |
 
 ## Data sources
 
@@ -121,11 +121,11 @@ Designer-only helpers (task menus, extension factories, elevation properties) ar
 | Macro file | `-macrodefs` | one `KEY=VALUE` per line, then `-macro` overrides | done |
 | Shell policy | runs commands, web flag can allow them | dry-run unless `--execute-shell`. `caScriptButton` never runs | done |
 | HTTP / WebSocket | `-server`, web launcher | `GET /` and one RFC 6455 text frame on a local port. `-novnc` also speaks RFB 3.8 (raw encoding, security None) on TCP and the same bytes in WebSocket binary frames. `-novnc_readonly` drops pointer and key events. A test reads a red pixel off the RFB socket and checks the version string `RFB 003.008` | done |
-| Stylesheets | `-style`, `-stylefile` | `color`, `background-color`, and `font-size` on a widget `styleSheet` | done |
+| Stylesheets | `-style`, `-stylefile` | `color`, `background`, `background-color`, and `font` / `font-size` from the widget's own sheet and from ancestor selectors (`caLineEdit`, `QWidget#name`). `rgb()` and the SVG color names Qt accepts. Sub-controls such as `::groove` are not painted | done |
 | Single instance | `-attach` | TCP handshake. `run -attach HOST:PORT` sends the display path and does not open a second window | done |
 | Qt Designer plugins | `caQtDM_QtControls/plugins` | Qt `.so` plugins are not loaded. `install_designer_plugin` registers a custom class and paints it as a label, LED, frame, or gauge. See `DESIGNER.md`. A registered lamp is painted and the center pixel is checked | done |
 | Calc plugin ABI | Qt plugin loader plus Python | C ABI `caqtdm_plugin_abi` / `caqtdm_plugin_eval`, example cdylib adds one | done |
-| Font scaling | `fontscalingwidget` | `fontScaleMode` Height, Width, and HeightAndWidth, plus stylesheet `font-size` | done |
+| Font scaling | `fontscalingwidget` | `fontScaleMode` Height, Width, WidthAndHeight, and HeightAndWidth. `caLabel` starts at WidthAndHeight, as its constructor does. Stylesheet `font-size` and `font: Npt` win when they match | done |
 | Python visibility | `%P/` expressions | With the default `python` feature, pyo3 embeds CPython and calls `PythonCalc(a, b, c, d)`. If that fails, the same body is sent to `python3`. Nonzero is visible. A function with another name is an error. Without the feature the same text is `CalcError::Unsupported` | done |
 | PNG, GIF, SVG images | Qt image readers | PNG and GIF through the `image` crate. SVG subset painted directly | done |
 | Camera codecs | `caCamera` | mono8, rgb888, mono16, and rgba. Tests check rgb888 and mono16. `ROI_readType` / `ROI_readmarkerType` draw the marker from `ROI_readChannels`. A drag writes `ROI_writeChannels` with the `Callback_WriteDetectedValues` layout. `caScan2D` joins `channelSAVEDATA_PATH`, `SUBDIR`, and `FILENAME` and loads the 2D MDA detector column | done |

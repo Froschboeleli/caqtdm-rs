@@ -2,9 +2,9 @@
 
 A display manager for EPICS control screens. It reads Qt Designer `.ui` files and the MEDM `.adl`, EDM `.edl`, alarm-handler `.alh`, and PSI `.prc` formats, subscribes to process variables, and draws the widgets.
 
-This is a Rust port of [caQtDM](https://github.com/caqtdm/caqtdm) aimed at feature parity. The upstream tree used as the reference is commit `87607049b9a9630fad8bef55656293509803f007`. Clone it into `upstream/` if you want the C++ sources beside this repo (that directory is gitignored). What is finished, partial, or missing is listed in [PARITY.md](PARITY.md).
+This is a Rust port of [caQtDM](https://github.com/caqtdm/caqtdm), written by Anton Mezger at the Paul Scherrer Institute and released under GPL-3.0-or-later. The upstream tree used as the reference is commit `87607049b9a9630fad8bef55656293509803f007`. Clone it into `upstream/` if you want the C++ sources beside this repo (that directory is gitignored). What is finished, partial, or missing is listed in [PARITY.md](PARITY.md).
 
-License: GPL-3.0-or-later, the same license as caQtDM.
+License: GPL-3.0-or-later, the same terms as caQtDM. The full text is in [LICENSE](LICENSE). Faces in `crates/caqtdm-paint/fonts/` keep their own licenses: Arimo, Cousine, and Noto Sans are SIL Open Font License 1.1, and Droid Sans Fallback and WenQuanYi Micro Hei are Apache-2.0.
 
 ## Build
 

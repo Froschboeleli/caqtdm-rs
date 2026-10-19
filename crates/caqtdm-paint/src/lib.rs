@@ -651,6 +651,36 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         rect.width.saturating_sub(8 + gutter + align).max(1),
         rect.height.saturating_sub(28).max(1),
     );
+    // A black canvas is the plot constructor color. Scale widgets sit on the
+    // foreground palette, so black ticks stay visible beside the canvas. The
+    // top band is left alone: legend text uses the series color, and the first
+    // constructor series is white.
+    let black_canvas = visual.background == Color::rgb(0, 0, 0);
+    if black_canvas {
+        let left_w = plot.x - rect.x;
+        if left_w > 0 {
+            image.fill_rect(
+                Rect::new(rect.x, plot.y, left_w, plot.height),
+                visual.foreground,
+            );
+        }
+        let right = plot.x + plot.width;
+        let right_w = rect.x + rect.width - right;
+        if right_w > 0 {
+            image.fill_rect(
+                Rect::new(right, plot.y, right_w, plot.height),
+                visual.foreground,
+            );
+        }
+        let bottom = plot.y + plot.height;
+        let bottom_h = rect.y + rect.height - bottom;
+        if bottom_h > 0 {
+            image.fill_rect(
+                Rect::new(rect.x, bottom, rect.width, bottom_h),
+                visual.foreground,
+            );
+        }
+    }
     image.stroke_rect(plot, visual.foreground);
     let scale = plot_paint.scale_color.unwrap_or(visual.foreground);
     if plot_paint.grid {
@@ -694,13 +724,18 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         let ticks = plot_paint.x_ticks.clamp(1, 12);
         for tick in 0..ticks {
             let x = plot.x + (plot.width * tick as i32) / ticks as i32;
-            image.line(
-                x,
-                plot.y + plot.height - 1,
-                x,
-                plot.y + plot.height - 4,
-                scale,
-            );
+            if black_canvas {
+                let y0 = plot.y + plot.height;
+                image.line(x, y0, x, y0 + 3, scale);
+            } else {
+                image.line(
+                    x,
+                    plot.y + plot.height - 1,
+                    x,
+                    plot.y + plot.height - 4,
+                    scale,
+                );
+            }
         }
     }
     for (index, samples) in plot_paint.series.iter().enumerate() {

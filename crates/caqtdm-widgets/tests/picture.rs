@@ -65,7 +65,7 @@ fn legend_colors_and_extra_axes_change_the_plot() {
         "second axis places 500 mid-scale"
     );
     assert!(
-        image.pixel(20, 18).unwrap().r < 80,
+        image.pixel(20, 19).unwrap().r < 80,
         "500 is not clipped to the top"
     );
     let mut legend_ink = false;
@@ -325,7 +325,7 @@ fn curve_style_grid_and_x_axis_change_the_plot() {
         "a line crosses mid-scale"
     );
     assert!(
-        dots.pixel(40, 34).unwrap().r > 35,
+        dots.pixel(40, 34).unwrap().r < 40,
         "dots leave the middle empty"
     );
     let on = lines.pixel(20, 22).unwrap();
@@ -335,8 +335,8 @@ fn curve_style_grid_and_x_axis_change_the_plot() {
         "grid is Qt gray, got {on:?}"
     );
     assert!(
-        off.r > 220 && off.g > 220,
-        "grid off leaves the widget background, got {off:?}"
+        off.r < 20 && off.g < 20,
+        "grid off leaves the black constructor canvas, got {off:?}"
     );
     // Qt DashLine at width 1 is 4 on, 2 off. The line starts at plot.x + 1.
     let fourth = lines.pixel(8, 22).unwrap();
@@ -346,12 +346,12 @@ fn curve_style_grid_and_x_axis_change_the_plot() {
         "DashLine keeps the fourth pixel on, got {fourth:?}"
     );
     assert!(
-        gap.r > 220 && gap.g > 220,
+        gap.r < 20 && gap.g < 20,
         "DashLine turns the fifth pixel off, got {gap:?}"
     );
     assert_ne!(
-        lines.pixel(18, 47).unwrap(),
-        none.pixel(18, 47).unwrap(),
+        lines.pixel(18, 51).unwrap(),
+        none.pixel(18, 51).unwrap(),
         "hiding the x axis removes the tick"
     );
 }
@@ -372,7 +372,7 @@ fn symbols_x_limits_time_and_grid_color_change_pixels() {
         plot.set_prop("symbolResizeFactor", PropValue::Double(10.0));
     });
     assert!(
-        plain.pixel(39, 28).unwrap().r > 35,
+        plain.pixel(39, 28).unwrap().r < 40,
         "no symbol leaves the arm empty"
     );
     assert!(
@@ -384,7 +384,7 @@ fn symbols_x_limits_time_and_grid_color_change_pixels() {
         "Rect is the ellipse myMarker draws"
     );
     assert!(
-        cross.pixel(42, 37).unwrap().r > 35,
+        cross.pixel(42, 37).unwrap().r < 40,
         "the cross does not fill the diagonal"
     );
 
@@ -398,7 +398,7 @@ fn symbols_x_limits_time_and_grid_color_change_pixels() {
         "index scale spans the plot"
     );
     assert!(
-        limited.pixel(40, 34).unwrap().r > 35,
+        limited.pixel(40, 34).unwrap().r < 40,
         "user limits 0;6 stop index 2 before mid-plot"
     );
     let linear = peaked(false);
@@ -408,7 +408,7 @@ fn symbols_x_limits_time_and_grid_color_change_pixels() {
         "the middle sample is the linear peak"
     );
     assert!(
-        logged.pixel(39, 25).unwrap().r > 35,
+        logged.pixel(39, 25).unwrap().r < 40,
         "log10 moves that peak toward the right"
     );
 
@@ -694,7 +694,7 @@ fn erase_trace() -> (Vec<f64>, Vec<f64>) {
         .find(|v| v.name == "plot")
         .unwrap();
     let ink = paint(&[drawn]);
-    assert!(ink.pixel(4, 25).unwrap().r > 250, "the trace is painted");
+    assert!(ink.pixel(20, 25).unwrap().r > 250, "the trace is painted");
     intern.insert("E", ChannelData::scalar(1.0));
     session.tick(3_000);
     let after = series_of(&session);
@@ -705,7 +705,7 @@ fn erase_trace() -> (Vec<f64>, Vec<f64>) {
         .unwrap();
     let cleared = paint(&[drawn]);
     assert!(
-        cleared.pixel(4, 25).unwrap().r < 250,
+        cleared.pixel(20, 25).unwrap().r < 40,
         "erase removes the painted trace"
     );
     (before, after)
@@ -798,9 +798,102 @@ fn strip_refresh_period_sync_and_archive_backfill() {
     });
     let edge = ellipse.pixel(45, 37).unwrap();
     assert!(
-        edge.r > 236 && edge.r < 252,
+        edge.r > 20 && edge.r < 250,
         "the ellipse edge is antialiased, got {edge:?}"
     );
+}
+
+#[test]
+fn omitted_plot_colors_follow_the_constructor() {
+    let cartesian = bare_plot("caCartesianPlot");
+    assert_eq!(cartesian.foreground, Color::rgb(255, 255, 255));
+    assert_eq!(cartesian.background, Color::rgb(0, 0, 0));
+    match &cartesian.kind {
+        VisualKind::Plot {
+            scale_color,
+            colors,
+            ..
+        } => {
+            assert_eq!(*scale_color, Some(Color::rgb(0, 0, 0)));
+            assert_eq!(colors[3], Some(Color::rgb(0, 0, 255)));
+            assert_eq!(colors[5], Some(Color::rgb(255, 0, 255)));
+        }
+        other => panic!("{other:?}"),
+    }
+    let image = paint(&[cartesian]);
+    assert_eq!(image.pixel(20, 30).unwrap(), Color::rgb(0, 0, 0), "canvas");
+    assert_eq!(
+        image.pixel(2, 30).unwrap(),
+        Color::rgb(255, 255, 255),
+        "scale well"
+    );
+    assert_eq!(
+        image.pixel(18, 51).unwrap(),
+        Color::rgb(0, 0, 0),
+        "black tick on the well"
+    );
+
+    let strip = bare_plot("caStripPlot");
+    assert_eq!(strip.foreground, Color::rgb(133, 190, 232));
+    assert_eq!(strip.background, Color::rgb(0, 0, 0));
+    match &strip.kind {
+        VisualKind::Plot { colors, .. } => {
+            assert_eq!(colors[3], Some(Color::rgb(0, 255, 255)));
+            assert_eq!(colors[4], Some(Color::rgb(255, 0, 255)));
+            assert_eq!(colors[5], Some(Color::rgb(0, 255, 0)));
+        }
+        other => panic!("{other:?}"),
+    }
+    let mut plot = WidgetNode::new("caCartesianPlot", "chosen");
+    plot.rect = Rect::new(0, 0, 40, 30);
+    plot.set_prop("background", PropValue::Color(Color::rgb(10, 20, 30)));
+    plot.set_prop("foreground", PropValue::Color(Color::rgb(1, 2, 3)));
+    plot.set_prop("scaleColor", PropValue::Color(Color::rgb(4, 5, 6)));
+    plot.set_prop("color_4", PropValue::Color(Color::rgb(7, 8, 9)));
+    for (index, name) in ["A", "B", "C", "D"].into_iter().enumerate() {
+        plot.set_prop(
+            format!("channels_{}", index + 1),
+            PropValue::String(format!("intern://{name}")),
+        );
+    }
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    let chosen = open(root, InternSource::new())
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "chosen")
+        .unwrap();
+    assert_eq!(chosen.background, Color::rgb(10, 20, 30));
+    assert_eq!(chosen.foreground, Color::rgb(1, 2, 3));
+    match chosen.kind {
+        VisualKind::Plot {
+            scale_color,
+            colors,
+            ..
+        } => {
+            assert_eq!(scale_color, Some(Color::rgb(4, 5, 6)));
+            assert_eq!(colors[3], Some(Color::rgb(7, 8, 9)));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+fn bare_plot(class_name: &str) -> caqtdm_widgets::Visual {
+    let mut plot = WidgetNode::new(class_name, "plot");
+    plot.rect = Rect::new(0, 0, 80, 60);
+    for (index, name) in ["A", "B", "C", "D", "E", "F"].into_iter().enumerate() {
+        plot.set_prop(
+            format!("channels_{}", index + 1),
+            PropValue::String(format!("intern://{name}")),
+        );
+    }
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.children.push(plot);
+    open(root, InternSource::new())
+        .visuals()
+        .into_iter()
+        .find(|v| v.name == "plot")
+        .unwrap()
 }
 
 fn strip_samples(refresh: &str, ticks: &[u64]) -> Vec<f64> {

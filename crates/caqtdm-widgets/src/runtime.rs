@@ -730,7 +730,7 @@ impl Session {
             log_x: axis_named(node, "XaxisType", "log10"),
             time_x: axis_named(node, "XaxisType", "time"),
             grid_color: prop_color(node, "gridColor").unwrap_or(Color::rgb(160, 160, 160)),
-            scale_color: prop_color(node, "scaleColor"),
+            scale_color: prop_color(node, "scaleColor").or(Some(Color::rgb(0, 0, 0))),
             xs,
             align_px: self.align_px(node),
             time_at: if axis_named(node, "XaxisType", "time") {
@@ -1499,14 +1499,21 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
 }
 
 fn colors(node: &WidgetNode, data: Option<&ChannelData>) -> (Color, Color) {
+    // Plot constructors call `setBackground`, `setForeground`, and `setScaleColor`
+    // before any `.ui` property arrives. Other widgets keep the shared defaults.
+    let (fg_default, bg_default) = match node.class_name.as_str() {
+        "caCartesianPlot" => (Color::rgb(255, 255, 255), Color::rgb(0, 0, 0)),
+        "caStripPlot" => (Color::rgb(133, 190, 232), Color::rgb(0, 0, 0)),
+        _ => (Color::rgb(20, 20, 20), Color::rgb(236, 236, 236)),
+    };
     let mut fg = node
         .prop("foreground")
         .and_then(PropValue::as_color)
-        .unwrap_or_else(|| Color::rgb(20, 20, 20));
+        .unwrap_or(fg_default);
     let mut bg = node
         .prop("background")
         .and_then(PropValue::as_color)
-        .unwrap_or_else(|| Color::rgb(236, 236, 236));
+        .unwrap_or(bg_default);
     let mode = node.enum_tail("colorMode").unwrap_or("Static");
     if mode.eq_ignore_ascii_case("Alarm")
         || mode.eq_ignore_ascii_case("Alarm_Default")
@@ -1949,7 +1956,8 @@ fn custom_color_map(node: &WidgetNode) -> ColorMap {
 
 fn plot_colors(node: &WidgetNode, count: usize) -> Vec<Option<Color>> {
     // `caCartesianPlot` constructor: white, red, yellow, blue, green, magenta.
-    const DEFAULTS: [Color; 6] = [
+    // `caStripPlot` uses cyan, magenta, green, blue for curves 4 through 7.
+    const CARTESIAN: [Color; 6] = [
         Color::rgb(255, 255, 255),
         Color::rgb(255, 0, 0),
         Color::rgb(255, 255, 0),
@@ -1957,11 +1965,25 @@ fn plot_colors(node: &WidgetNode, count: usize) -> Vec<Option<Color>> {
         Color::rgb(0, 255, 0),
         Color::rgb(255, 0, 255),
     ];
+    const STRIP: [Color; 7] = [
+        Color::rgb(255, 255, 255),
+        Color::rgb(255, 0, 0),
+        Color::rgb(255, 255, 0),
+        Color::rgb(0, 255, 255),
+        Color::rgb(255, 0, 255),
+        Color::rgb(0, 255, 0),
+        Color::rgb(0, 0, 255),
+    ];
+    let defaults: &[Color] = if node.class_name == "caStripPlot" {
+        &STRIP
+    } else {
+        &CARTESIAN
+    };
     (1..=count)
         .map(|index| {
             Some(
                 prop_color(node, &format!("color_{index}")).unwrap_or_else(|| {
-                    DEFAULTS
+                    defaults
                         .get(index - 1)
                         .copied()
                         .unwrap_or(Color::rgb(255, 255, 255))

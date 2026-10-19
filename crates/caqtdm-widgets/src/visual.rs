@@ -114,7 +114,8 @@ pub enum VisualKind {
         time_x: bool,
         /// `gridColor`. Absent is Qt gray.
         grid_color: Color,
-        /// `scaleColor` for the tick marks. Absent uses the foreground.
+        /// `scaleColor` for the tick marks. A cartesian or strip plot with no
+        /// property uses black, which is what both constructors set.
         scale_color: Option<Color>,
         /// X samples parallel to `series`. Empty keeps the sample index as X.
         xs: Vec<Vec<f64>>,

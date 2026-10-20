@@ -80,31 +80,20 @@ fn expand_include(
             return Err(err);
         }
     };
-    let count = node.prop_f64("numberOfItems").unwrap_or(1.0).max(1.0) as usize;
-    let instance_macros = instance_macro_list(node, count);
-    let stacking = node.enum_tail("stacking").unwrap_or("Row").to_string();
-    let max_lines = node
-        .prop_f64("maximumLines")
-        .unwrap_or(count as f64)
-        .max(1.0) as i32;
+    let items = instance_items(node);
+    // `HandleWidget` loops `qMax(macroList.count(), getItemCount())` times.
+    let count = node
+        .prop_f64("numberOfItems")
+        .unwrap_or(1.0)
+        .max(1.0)
+        .max(items.len() as f64) as usize;
+    let layout = IncludeLayout::from_node(node);
     let base = node.geometry_prop().unwrap_or(Rect::new(0, 0, 100, 40));
+    let item_size = root_size(&loaded.root);
 
     let mut frame = WidgetNode::new("caFrame", node.name.clone());
     frame.properties = node.properties.clone();
     frame.rect = node.rect;
-
-    let inner = loaded.root;
-    // Use the central widget's children when the included file is a main window.
-    let source_children = if inner.class_name == "QMainWindow" {
-        inner
-            .children
-            .iter()
-            .find(|c| c.name == "centralwidget")
-            .map(|c| c.children.clone())
-            .unwrap_or(inner.children.clone())
-    } else {
-        vec![inner.clone()]
-    };
 
     let mut nested = search.clone();
     if let Some(parent) = path.parent() {
@@ -112,24 +101,189 @@ fn expand_include(
             nested.origin = Some(parent.to_path_buf());
         }
     }
+    let mut extent = (1, 1);
+    let mut cells = (0, 0);
     for index in 0..count {
+        let item = items.get(index).cloned().unwrap_or_default();
         let mut inst_macros = macros.clone();
-        if let Some(extra) = instance_macros.get(index) {
-            inst_macros.extend_from(extra);
+        inst_macros.extend_from(&parse_macro_list(&item.macros));
+        let (x, y) = layout.place(index, item_size, &item);
+        extent.0 = extent.0.max(x + item_size.0);
+        extent.1 = extent.1.max(y + item_size.1);
+        cells = layout.cells(index + 1);
+        // The loaded window keeps its own class, name, and stylesheet. Its
+        // central widget fills it, so a `QWidget#centralWidget` rule applies.
+        let mut copy = loaded.root.clone();
+        copy.set_prop(
+            "geometry",
+            PropValue::Rect(Rect::new(x, y, item_size.0, item_size.1)),
+        );
+        if let Err(err) = expand_node(&mut copy, &nested, &inst_macros, stack, warnings) {
+            stack.pop();
+            return Err(err);
         }
-        let (dx, dy) = stack_offset(index, count, &stacking, max_lines, base);
-        for child in &source_children {
-            let mut copy = child.clone();
-            if let Err(err) = expand_node(&mut copy, &nested, &inst_macros, stack, warnings) {
-                stack.pop();
-                return Err(err);
-            }
-            shift_geometry(&mut copy, dx, dy);
-            frame.children.push(copy);
-        }
+        frame.children.push(copy);
     }
     stack.pop();
+    if layout.adjust {
+        // `includeWidget->resize(...)` after the loop.
+        let margin = layout.margin;
+        let (width, height) = if layout.positions {
+            (extent.0 + margin, extent.1 + margin)
+        } else {
+            let (columns, rows) = (cells.0.max(1), cells.1.max(1));
+            (
+                columns * item_size.0 + (columns - 1) * layout.spacing_h + margin,
+                rows * item_size.1 + (rows - 1) * layout.spacing_v + margin,
+            )
+        };
+        frame.set_prop(
+            "geometry",
+            PropValue::Rect(Rect::new(base.x, base.y, width, height)),
+        );
+    }
     Ok(frame)
+}
+
+/// Size of an included file's top-level widget: its `geometry` or `size`.
+fn root_size(root: &WidgetNode) -> (i32, i32) {
+    if let Some(g) = root.geometry_prop() {
+        return (g.width.max(1), g.height.max(1));
+    }
+    if let Some(PropValue::Size(s)) = root.prop("size") {
+        return (s.width.max(1), s.height.max(1));
+    }
+    (100, 40)
+}
+
+/// Stacking rules of `caInclude`, as `HandleWidget` fills the grid layout.
+///
+/// `Row` adds item `j` at grid row `j` (a vertical stack). `Column` adds it at
+/// column `j` (a horizontal run). `RowColumn` fills `maximumLines` rows per
+/// column, `ColumnRow` fills `maximumColumns` columns per row. `Positions`
+/// moves each copy to the `[x,y]` pair carried in its macro, scaled by the
+/// correction factors, offset by half the margin.
+struct IncludeLayout {
+    stacking: String,
+    positions: bool,
+    adjust: bool,
+    max_lines: i32,
+    max_columns: i32,
+    spacing_h: i32,
+    spacing_v: i32,
+    margin: i32,
+    x_factor: f64,
+    y_factor: f64,
+}
+
+impl IncludeLayout {
+    fn from_node(node: &WidgetNode) -> Self {
+        let stacking = node
+            .enum_tail("stacking")
+            .unwrap_or("Row")
+            .to_ascii_lowercase();
+        Self {
+            positions: stacking == "positions",
+            stacking,
+            adjust: node.prop_bool("adjustSizeToContents").unwrap_or(true),
+            max_lines: node.prop_f64("maximumLines").unwrap_or(1.0).max(1.0) as i32,
+            max_columns: node.prop_f64("maximumColumns").unwrap_or(1.0).max(1.0) as i32,
+            spacing_h: node.prop_f64("horizontalSpacing").unwrap_or(0.0).max(0.0) as i32,
+            spacing_v: node.prop_f64("verticalSpacing").unwrap_or(0.0).max(0.0) as i32,
+            margin: node.prop_f64("margin").unwrap_or(0.0).max(0.0) as i32,
+            x_factor: node.prop_f64("xCorrectionFactor").unwrap_or(1.0),
+            y_factor: node.prop_f64("yCorrectionFactor").unwrap_or(1.0),
+        }
+    }
+
+    /// Grid cell (column, row) of item `index`.
+    fn cell(&self, index: usize) -> (i32, i32) {
+        let i = index as i32;
+        match self.stacking.as_str() {
+            "column" => (i, 0),
+            "rowcolumn" => (i / self.max_lines, i % self.max_lines),
+            "columnrow" => (i % self.max_columns, i / self.max_columns),
+            _ => (0, i),
+        }
+    }
+
+    /// Columns and rows used by the first `count` items.
+    fn cells(&self, count: usize) -> (i32, i32) {
+        let mut columns = 0;
+        let mut rows = 0;
+        for index in 0..count {
+            let (column, row) = self.cell(index);
+            columns = columns.max(column + 1);
+            rows = rows.max(row + 1);
+        }
+        (columns, rows)
+    }
+
+    fn place(&self, index: usize, size: (i32, i32), item: &IncludeItem) -> (i32, i32) {
+        if self.positions {
+            let x = (f64::from(item.x) * self.x_factor).round() as i32;
+            let y = (f64::from(item.y) * self.y_factor).round() as i32;
+            return (x + self.margin / 2, y + self.margin / 2);
+        }
+        let (column, row) = self.cell(index);
+        (
+            column * (size.0 + self.spacing_h),
+            row * (size.1 + self.spacing_v),
+        )
+    }
+}
+
+/// One entry of the `macro` list: its macro text and, for `Positions`
+/// stacking, the first `[x,y]` pair. A pair that names a channel instead of
+/// a number starts at 0; `caInclude::setMacro` keeps only the first pair.
+#[derive(Debug, Clone, Default)]
+struct IncludeItem {
+    macros: String,
+    x: i32,
+    y: i32,
+}
+
+fn instance_items(node: &WidgetNode) -> Vec<IncludeItem> {
+    let raw = node
+        .prop_str("macro")
+        .or_else(|| node.prop_str("macrolist"))
+        .unwrap_or("");
+    raw.split(';')
+        .map(str::trim)
+        .filter(|piece| !piece.is_empty())
+        .map(parse_include_item)
+        .collect()
+}
+
+fn parse_include_item(piece: &str) -> IncludeItem {
+    let mut item = IncludeItem {
+        macros: piece.to_string(),
+        x: 0,
+        y: 0,
+    };
+    let Some(open) = piece.find('[') else {
+        return item;
+    };
+    let Some(close) = piece[open..].find(']').map(|i| open + i) else {
+        return item;
+    };
+    let inner = &piece[open + 1..close];
+    let mut parts = inner.split(',').map(str::trim);
+    let x = parts.next().unwrap_or("");
+    let y = parts.next().unwrap_or("");
+    item.x = x.parse().unwrap_or(0);
+    item.y = y.parse().unwrap_or(0);
+    let mut rest = String::new();
+    rest.push_str(piece[..open].trim_end_matches([',', ' ']));
+    let tail = piece[close + 1..].trim_start_matches([',', ' ']);
+    if !tail.is_empty() {
+        if !rest.is_empty() {
+            rest.push(',');
+        }
+        rest.push_str(tail);
+    }
+    item.macros = rest;
+    item
 }
 
 fn empty_include(node: &WidgetNode) -> WidgetNode {
@@ -137,58 +291,6 @@ fn empty_include(node: &WidgetNode) -> WidgetNode {
     frame.properties = node.properties.clone();
     frame.rect = node.rect;
     frame
-}
-
-fn instance_macro_list(node: &WidgetNode, count: usize) -> Vec<MacroMap> {
-    let raw = node
-        .prop_str("macro")
-        .or_else(|| node.prop_str("macrolist"))
-        .unwrap_or("");
-    let pieces: Vec<&str> = raw
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if pieces.len() <= 1 && !raw.contains(';') {
-        return vec![parse_macro_list(raw); count];
-    }
-    pieces.into_iter().map(parse_macro_list).collect()
-}
-
-fn stack_offset(
-    index: usize,
-    count: usize,
-    stacking: &str,
-    max_lines: i32,
-    base: Rect,
-) -> (i32, i32) {
-    let i = index as i32;
-    let step_x = base.width.max(1);
-    let step_y = base.height.max(1);
-    match stacking.to_ascii_lowercase().as_str() {
-        "column" | "vertical" => (0, i * step_y),
-        "rowcolumn" | "rowcolumnwrap" => {
-            let lines = max_lines.max(1);
-            let col = i / lines;
-            let row = i % lines;
-            (col * step_x, row * step_y)
-        }
-        "positions" => (0, 0),
-        _ => {
-            let _ = count;
-            (i * step_x, 0)
-        }
-    }
-}
-
-fn shift_geometry(node: &mut WidgetNode, dx: i32, dy: i32) {
-    if let Some(PropValue::Rect(rect)) = node.properties.get_mut("geometry") {
-        rect.x += dx;
-        rect.y += dy;
-    }
-    for child in &mut node.children {
-        shift_geometry(child, dx, dy);
-    }
 }
 
 fn substitute_node(node: &mut WidgetNode, macros: &MacroMap) {

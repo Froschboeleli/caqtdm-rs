@@ -60,6 +60,7 @@ fn read_widget(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Wid
         attr(start, "class").unwrap_or_else(|| "QWidget".to_string()),
         attr(start, "name").unwrap_or_else(|| "widget".to_string()),
     );
+    let mut zorder: Vec<String> = Vec::new();
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => match local_name(&e).as_str() {
@@ -77,6 +78,7 @@ fn read_widget(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Wid
                 "widget" => node.children.push(read_widget(reader, &e)?),
                 "layout" => node.layout = Some(read_layout(reader, &e)?),
                 "item" => skip_rest(reader)?,
+                "zorder" => zorder.push(read_text_deep(reader)?.trim().to_string()),
                 _ => skip_rest(reader)?,
             },
             Ok(Event::Empty(e)) => {
@@ -87,7 +89,10 @@ fn read_widget(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Wid
                     ));
                 }
             }
-            Ok(Event::End(e)) if local_name_end(&e) == "widget" => return Ok(node),
+            Ok(Event::End(e)) if local_name_end(&e) == "widget" => {
+                apply_zorder(&mut node, &zorder);
+                return Ok(node);
+            }
             Ok(Event::Eof) => return Err(UiError::msg("unclosed widget")),
             Err(err) => return Err(UiError::Xml(err.to_string())),
             _ => {}
@@ -423,4 +428,25 @@ fn num(map: &BTreeMap<String, String>, key: &str) -> u8 {
 
 fn num_i(map: &BTreeMap<String, String>, key: &str) -> i32 {
     map.get(key).and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// `uic` raises each child named in a `<zorder>` element in turn, so the
+/// last name ends on top. Children that are not named keep their file order
+/// underneath.
+fn apply_zorder(node: &mut WidgetNode, zorder: &[String]) {
+    if zorder.is_empty() {
+        return;
+    }
+    let mut children = std::mem::take(&mut node.children);
+    let mut raised = Vec::new();
+    for name in zorder {
+        if let Some(pos) = children.iter().position(|child| &child.name == name) {
+            raised.push(children.remove(pos));
+        } else if let Some(pos) = raised.iter().position(|child| &child.name == name) {
+            let child = raised.remove(pos);
+            raised.push(child);
+        }
+    }
+    children.extend(raised);
+    node.children = children;
 }

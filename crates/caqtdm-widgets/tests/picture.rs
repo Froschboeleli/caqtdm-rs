@@ -288,8 +288,9 @@ fn border_color_and_line_width_change_the_outline() {
         220,
         "lineWidth is more than one pixel"
     );
+    // The text is left-aligned, so the interior right of it keeps the fill.
     assert!(
-        image.pixel(8, 8).unwrap().r > 200,
+        image.pixel(19, 8).unwrap().r > 200,
         "interior stays the background"
     );
 }

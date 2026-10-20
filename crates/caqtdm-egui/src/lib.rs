@@ -213,6 +213,17 @@ fn draw(
     if !visual.visible {
         return;
     }
+    let clipped;
+    let painter = match visual.clip {
+        Some(clip) => {
+            clipped = painter.with_clip_rect(egui::Rect::from_min_size(
+                egui::pos2(clip.x as f32, clip.y as f32),
+                egui::vec2(clip.width.max(0) as f32, clip.height.max(0) as f32),
+            ));
+            &clipped
+        }
+        None => painter,
+    };
     let rect = egui::Rect::from_min_size(
         egui::pos2(visual.rect.x as f32, visual.rect.y as f32),
         egui::vec2(
@@ -299,7 +310,7 @@ fn draw(
             );
         }
     }
-    if let VisualKind::Led { on } = &visual.kind {
+    if let VisualKind::Led { on, .. } = &visual.kind {
         let fill = if *on || visual.class_name == "caLed" {
             fg
         } else {
@@ -467,6 +478,8 @@ mod tests {
             align: 0,
             border: None,
             border_px: 1,
+            clip: None,
+            font_fit: 0,
         }
     }
 

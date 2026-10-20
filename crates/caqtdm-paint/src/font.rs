@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use fontdue::{Font, FontSettings, Metrics};
 
 use crate::Image;
-use caqtdm_core::Color;
+use caqtdm_core::{Color, Rect};
 
 const ARIMO: &[u8] = include_bytes!("../fonts/Arimo-Regular.ttf");
 const COUSINE: &[u8] = include_bytes!("../fonts/Cousine-Regular.ttf");
@@ -193,4 +193,112 @@ fn is_noto(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "noto" | "noto sans" | "noto-sans"
     )
+}
+
+/// Line spacing of the current face at `px`, the `QFontMetricsF::lineSpacing`
+/// the fit loops compare against.
+pub fn line_height(px: i32) -> i32 {
+    let px = (px.max(6) as f32).min(72.0);
+    FACE.with(|face| line_spacing(&face.borrow(), px).round() as i32)
+}
+
+fn line_spacing(font: &Font, px: f32) -> f32 {
+    font.horizontal_line_metrics(px)
+        .map(|line| line.new_line_size)
+        .unwrap_or(px * 1.2)
+}
+
+/// `FontScalingWidget::calculateFontPointSizeF`. Mode 1 steps the point
+/// size by 0.5 until the line spacing fits `height - 2`. Mode 2 then shrinks
+/// it while the text is wider than `width - 4`. Mode 0 keeps `base_px`.
+/// The result is in pixels at 96 dpi (one point is 4/3 pixel).
+pub fn fit_px(text: &str, rect: Rect, mode: u8, base_px: i32) -> i32 {
+    if mode == 0 || text.is_empty() {
+        return base_px;
+    }
+    const MIN_PT: f32 = 4.0;
+    let to_px = |pt: f32| pt * 4.0 / 3.0;
+    let lines = text.lines().count().max(1) as f32;
+    let border_h = (rect.height - 2) as f32;
+    let border_w = (rect.width - 4) as f32;
+    let longest = text
+        .lines()
+        .max_by_key(|line| line.chars().count())
+        .unwrap_or(text);
+    FACE.with(|face| {
+        let font = face.borrow();
+        let mut pt = (base_px as f32 * 0.75).max(MIN_PT);
+        let height = |pt: f32| lines * line_spacing(&font, to_px(pt));
+        let mut guard = 0;
+        while height(pt) > border_h && pt > MIN_PT && guard < 1000 {
+            pt -= 0.5;
+            guard += 1;
+        }
+        guard = 0;
+        while height(pt) < border_h && guard < 1000 {
+            pt += 0.5;
+            guard += 1;
+        }
+        if mode == 2 {
+            guard = 0;
+            while advance(&font, to_px(pt), longest) > border_w && pt > MIN_PT && guard < 1000 {
+                pt -= 0.5;
+                guard += 1;
+            }
+        }
+        to_px(pt.max(MIN_PT)).round() as i32
+    })
+}
+
+/// Top-left origin that centers `text` in `rect`.
+pub fn centered_origin(text: &str, px: i32, rect: Rect) -> (i32, i32) {
+    let width = advance_current(text, px);
+    (
+        rect.x + (rect.width - width) / 2,
+        rect.y + (rect.height - line_height(px)) / 2,
+    )
+}
+
+/// Text turned a quarter turn. `up` reads from the bottom of `rect` upward,
+/// the `caLabelVertical::Up` direction; otherwise it reads downward. Each
+/// glyph pixel is transposed into place with its coverage.
+pub fn draw_rotated(image: &mut Image, rect: Rect, text: &str, color: Color, px: i32, up: bool) {
+    let px_f = (px.max(6) as f32).min(72.0);
+    let height = line_height(px).max(1);
+    // The rotated block is `height` wide, centered across the widget, and
+    // starts at the end of `rect` that the reading direction begins from.
+    let x0 = rect.x + (rect.width - height) / 2;
+    FACE.with(|face| {
+        let font = face.borrow();
+        let ascent = font
+            .horizontal_line_metrics(px_f)
+            .map(|line| line.ascent)
+            .unwrap_or(px_f * 0.8)
+            .round() as i32;
+        let mut cursor = 0.0_f32;
+        for ch in text.chars().take(80) {
+            let chosen = face_for(Some(&font), ch);
+            let (metrics, bitmap) = chosen.rasterize(ch, px_f);
+            let origin_x = cursor.round() as i32 + metrics.xmin;
+            let origin_y = ascent - metrics.ymin - metrics.height as i32;
+            for row in 0..metrics.height {
+                for col in 0..metrics.width {
+                    let coverage = bitmap[row * metrics.width + col];
+                    if coverage == 0 {
+                        continue;
+                    }
+                    // Upright position inside the text line.
+                    let sx = origin_x + col as i32;
+                    let sy = origin_y + row as i32;
+                    let (x, y) = if up {
+                        (x0 + sy, rect.y + rect.height - 1 - sx)
+                    } else {
+                        (x0 + height - 1 - sy, rect.y + sx)
+                    };
+                    image.cover(x, y, color, coverage);
+                }
+            }
+            cursor += metrics.advance_width;
+        }
+    });
 }

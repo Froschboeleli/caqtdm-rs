@@ -54,6 +54,11 @@ pub struct Session {
     now_ms: u64,
     /// Widgets in the same order as [`WidgetNode::walk`].
     nodes: Vec<WidgetNode>,
+    /// Index into `nodes` of each widget's parent. The root has none.
+    parents: Vec<Option<usize>>,
+    /// `caCalc` variables. They are soft channels: always connected, and a
+    /// widget that names one reads the calc result instead of a plugin.
+    soft: BTreeSet<String>,
 }
 
 impl Session {
@@ -86,13 +91,88 @@ impl Session {
             allow_shell: false,
             now_ms: 0,
             nodes: Vec::new(),
+            parents: Vec::new(),
+            soft: BTreeSet::new(),
         };
         session.reindex();
+        session.register_soft();
         let channels = session.channels();
         for raw in channels {
             session.watch(&raw);
         }
+        session.refresh_soft();
         session
+    }
+
+    /// `HandleWidget` adds every `caCalc` variable to the soft PV list before
+    /// the other widgets are scanned, and seeds it with `initialValue`.
+    fn register_soft(&mut self) {
+        for node in &self.nodes {
+            if node.class_name != "caCalc" {
+                continue;
+            }
+            let Some(name) = soft_name(node) else {
+                continue;
+            };
+            let initial = node.prop_f64("initialValue").unwrap_or(0.0);
+            self.cache
+                .entry(name.clone())
+                .or_insert_with(|| ChannelData::scalar(initial));
+            self.soft.insert(name);
+        }
+    }
+
+    /// Recompute every `caCalc` with a `calc` expression. An input that is
+    /// not connected counts as 0, the way `CalcVisibility` fills `valueArray`.
+    /// Two passes let a calc that reads another calc settle.
+    fn refresh_soft(&mut self) {
+        if self.soft.is_empty() {
+            return;
+        }
+        let calcs: Vec<(String, String, usize)> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.class_name == "caCalc")
+            .filter_map(|(index, node)| {
+                let name = soft_name(node)?;
+                let expr = node.prop_str("calc")?.trim().to_string();
+                if expr.is_empty() {
+                    return None;
+                }
+                Some((name, expr, index))
+            })
+            .collect();
+        for _ in 0..2 {
+            for (name, expr, index) in &calcs {
+                let inputs = self.calc_inputs(&self.nodes[*index]);
+                if let Ok(value) = eval_calc(expr, &inputs) {
+                    let entry = self
+                        .cache
+                        .entry(name.clone())
+                        .or_insert_with(|| ChannelData::scalar(value));
+                    entry.value = PvValue::Double(value);
+                    entry.connected = true;
+                }
+            }
+        }
+    }
+
+    /// Write to a channel. A soft channel is updated in place; the rest go
+    /// to the plugin hub.
+    fn put(&mut self, raw: &str, value: &PutValue) -> Result<(), caqtdm_datasource::DsError> {
+        if self.soft.contains(raw) {
+            if let Some(number) = value.as_f64() {
+                let entry = self
+                    .cache
+                    .entry(raw.to_string())
+                    .or_insert_with(|| ChannelData::scalar(number));
+                entry.value = PvValue::Double(number);
+                entry.connected = true;
+            }
+            return Ok(());
+        }
+        self.hub.put(raw, value)
     }
 
     pub fn tick(&mut self, now_ms: u64) {
@@ -118,6 +198,7 @@ impl Session {
                 self.cache.insert(name, data);
             }
         }
+        self.refresh_soft();
         self.refresh_plots();
         self.propagate_rescale();
     }
@@ -150,14 +231,29 @@ impl Session {
 
     pub fn visuals(&self) -> Vec<Visual> {
         let hints = paint_hints(&self.root, &self.tabs);
-        self.nodes
-            .iter()
-            .enumerate()
-            .map(|(id, node)| {
-                let hint = hints.get(id).cloned().unwrap_or_default();
-                self.visual(id as u32, node, &hint)
-            })
-            .collect()
+        let mut out: Vec<Visual> = Vec::with_capacity(self.nodes.len());
+        for (id, node) in self.nodes.iter().enumerate() {
+            let hint = hints.get(id).cloned().unwrap_or_default();
+            let mut visual = self.visual(id as u32, node, &hint);
+            // A hidden parent hides the whole subtree, and a child may only
+            // paint inside its parent, as in Qt.
+            // A widget without a geometry has no edge to clip at (a top-level
+            // window gets its size from the window manager).
+            if let Some(parent) = self.parents.get(id).copied().flatten() {
+                let parent_visual = &out[parent];
+                visual.visible = visual.visible && parent_visual.visible;
+                visual.clip = match (parent_visual.clip, parent_visual.rect.is_empty()) {
+                    (Some(outer), false) => Some(outer.intersect(parent_visual.rect)),
+                    (Some(outer), true) => Some(outer),
+                    (None, false) => Some(parent_visual.rect),
+                    (None, true) => None,
+                };
+            } else {
+                visual.clip = None;
+            }
+            out.push(visual);
+        }
+        out
     }
 
     pub fn act(&mut self, action: Action) -> Vec<Effect> {
@@ -282,7 +378,7 @@ impl Session {
                     expr.parse().unwrap_or(0.0)
                 };
                 if let Some(out) = node.prop_str("outputA").filter(|s| !s.is_empty()) {
-                    let _ = self.hub.put(out, &PutValue::Double(value));
+                    let _ = self.put(out, &PutValue::Double(value));
                     self.log.push(format!("put {out} = {value}"));
                 }
                 Vec::new()
@@ -351,7 +447,7 @@ impl Session {
         let Some(raw) = node.prop_str("channel").or_else(|| node.prop_str("pv")) else {
             return;
         };
-        match self.hub.put(raw, &PutValue::Double(value)) {
+        match self.put(raw, &PutValue::Double(value)) {
             Ok(()) => self.log.push(format!("put {raw} = {value}")),
             Err(err) => self.log.push(err.to_string()),
         }
@@ -366,7 +462,7 @@ impl Session {
         } else {
             PutValue::String(text.to_string())
         };
-        match self.hub.put(raw, &value) {
+        match self.put(raw, &value) {
             Ok(()) => self.log.push(format!("put {raw} = {text}")),
             Err(err) => self.log.push(err.to_string()),
         }
@@ -385,7 +481,7 @@ impl Session {
             if raw.is_empty() {
                 continue;
             }
-            match self.hub.put(raw, &PutValue::Double(value)) {
+            match self.put(raw, &PutValue::Double(value)) {
                 Ok(()) => self.log.push(format!("put {raw} = {value}")),
                 Err(err) => self.log.push(err.to_string()),
             }
@@ -410,10 +506,48 @@ impl Session {
         }
         let visible = self.is_visible(node) && !hint.hidden;
         let text = self.caption(node, data);
-        let kind = self.kind(node, data);
+        let mut kind = self.kind(node, data);
+        // `setWhiteColors`: a cartesian plot whose channel is not connected
+        // paints canvas, scales, and grid white. Archive channels are exempt.
+        if node.class_name == "caCartesianPlot" && data.is_some_and(|d| !d.connected) {
+            let archive = node_channels(node)
+                .first()
+                .is_some_and(|name| name.starts_with("archive"));
+            if !archive {
+                let white = Color::rgb(255, 255, 255);
+                foreground = white;
+                background = white;
+                if let VisualKind::Plot {
+                    grid_color,
+                    scale_color,
+                    ..
+                } = &mut kind
+                {
+                    *grid_color = white;
+                    *scale_color = Some(white);
+                }
+            }
+        }
         let mut border = prop_color(node, "borderColor").or_else(|| prop_color(node, "frameColor"));
         if border.is_none() && node.class_name == "caFrame" {
             border = prop_color(node, "background").or(Some(Color::rgb(160, 160, 160)));
+        }
+        // `SetColorsNotConnected` paints a widget whose channel never
+        // connected with `AL_WHITE`. Which parts go white is per class.
+        if data.is_some_and(|d| !d.connected) && has_monitor(node) {
+            let white = Color::rgb(255, 255, 255);
+            match node.class_name.as_str() {
+                "caLineEdit" | "caTextEntry" | "caThermo" => {
+                    foreground = white;
+                    background = white;
+                }
+                "caLabel" | "caLabelVertical" | "caLed" => foreground = white,
+                "caGraphics" | "caPolyLine" => {
+                    foreground = white;
+                    border = Some(white);
+                }
+                _ => {}
+            }
         }
         Visual {
             id,
@@ -431,6 +565,8 @@ impl Session {
             align: align_of(node),
             border,
             border_px: border_px_of(node),
+            clip: None,
+            font_fit: font_fit_of(node),
         }
     }
 
@@ -485,15 +621,28 @@ impl Session {
                 bands: thermo_bands(node, data, min, max),
             },
             "caMeter" => VisualKind::Meter { fraction },
-            "caLed" => VisualKind::Led {
-                on: led_on(
-                    node,
-                    value,
-                    data.map(|item| item.value.as_text())
-                        .as_deref()
-                        .unwrap_or(""),
-                ),
-            },
+            "caLed" => {
+                let gradient = node.prop_bool("gradientEnabled").unwrap_or(true);
+                let mut led_w = node.prop_f64("ledWidth").unwrap_or(18.0).max(1.0) as i32;
+                let mut led_h = node.prop_f64("ledHeight").unwrap_or(18.0).max(1.0) as i32;
+                if gradient {
+                    led_w = led_w.min(led_h);
+                    led_h = led_w;
+                }
+                VisualKind::Led {
+                    on: led_on(
+                        node,
+                        value,
+                        data.map(|item| item.value.as_text())
+                            .as_deref()
+                            .unwrap_or(""),
+                    ),
+                    rectangular: node.prop_bool("rectangular").unwrap_or(false),
+                    led_w,
+                    led_h,
+                    scale: node.prop_bool("scaleContents").unwrap_or(false),
+                }
+            }
             "caGraphics" => VisualKind::Shape {
                 form: shape_form(node),
                 filled: node
@@ -642,12 +791,21 @@ impl Session {
             .to_string()
     }
 
+    /// `setObjectVisibility`. A frame or include is evaluated on every
+    /// update, connected or not, with 0 for an input that has no connection.
+    /// A label, graphic, polyline, or image only changes visibility once its
+    /// channel is connected, so an unconnected one keeps its initial state.
     fn is_visible(&self, node: &WidgetNode) -> bool {
         let mode = node.enum_tail("visibility").unwrap_or("StaticV");
-        let value = self
-            .primary(node)
-            .and_then(|d| d.value.as_f64())
-            .unwrap_or(0.0);
+        if mode.eq_ignore_ascii_case("StaticV") {
+            return true;
+        }
+        let data = self.primary(node);
+        let connected = data.is_some_and(|d| d.connected);
+        if !connected && !matches!(node.class_name.as_str(), "caFrame" | "caInclude") {
+            return true;
+        }
+        let value = data.and_then(|d| d.value.as_f64()).unwrap_or(0.0);
         match mode.to_ascii_lowercase().as_str() {
             "ifnotzero" => value != 0.0,
             "ifzero" => value == 0.0,
@@ -1106,7 +1264,7 @@ impl Session {
             })
             .collect();
         for (name, value) in jobs {
-            if self.hub.put(&name, &PutValue::Double(value)).is_ok() {
+            if self.put(&name, &PutValue::Double(value)).is_ok() {
                 self.log.push(format!("rescale {name} = {value}"));
             }
         }
@@ -1125,6 +1283,9 @@ impl Session {
     }
 
     fn watch(&mut self, raw: &str) {
+        if self.soft.contains(raw) {
+            return;
+        }
         match self.hub.monitor(raw) {
             Ok(id) => {
                 self.subs.insert(id, raw.to_string());
@@ -1137,7 +1298,8 @@ impl Session {
 
     fn reindex(&mut self) {
         self.nodes.clear();
-        collect(&self.root, &mut self.nodes);
+        self.parents.clear();
+        collect(&self.root, None, &mut self.nodes, &mut self.parents);
     }
 
     fn alarm_tree_rows(&self, node: &WidgetNode) -> Vec<TreeRow> {
@@ -1310,24 +1472,64 @@ impl Session {
     }
 }
 
-fn collect(node: &WidgetNode, out: &mut Vec<WidgetNode>) {
+fn collect(
+    node: &WidgetNode,
+    parent: Option<usize>,
+    out: &mut Vec<WidgetNode>,
+    parents: &mut Vec<Option<usize>>,
+) {
+    let index = out.len();
     out.push(node.clone());
+    parents.push(parent);
     for child in &node.children {
-        collect(child, out);
+        collect(child, Some(index), out, parents);
     }
     if let Some(layout) = &node.layout {
-        collect_layout(layout, out);
+        collect_layout(layout, index, out, parents);
     }
 }
 
-fn collect_layout(layout: &caqtdm_ui::LayoutNode, out: &mut Vec<WidgetNode>) {
+fn collect_layout(
+    layout: &caqtdm_ui::LayoutNode,
+    parent: usize,
+    out: &mut Vec<WidgetNode>,
+    parents: &mut Vec<Option<usize>>,
+) {
     for item in &layout.items {
         if let Some(widget) = &item.widget {
-            collect(widget, out);
+            collect(widget, Some(parent), out, parents);
         }
         if let Some(nested) = &item.layout {
-            collect_layout(nested, out);
+            collect_layout(nested, parent, out, parents);
         }
+    }
+}
+
+/// Soft channel name of a `caCalc`: its `variable` without a plugin prefix.
+fn soft_name(node: &WidgetNode) -> Option<String> {
+    let raw = node.prop_str("variable")?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let name = raw.split_once("://").map_or(raw, |(_, tail)| tail);
+    Some(name.to_string())
+}
+
+/// Whether `HandleWidget` adds a monitor for this widget. A static label or
+/// graphic with a channel but `StaticV` visibility and `Static` color mode
+/// gets none (`InitVisibility` returns 0), so nothing recolors it.
+fn has_monitor(node: &WidgetNode) -> bool {
+    match node.class_name.as_str() {
+        "caLabel" | "caLabelVertical" | "caGraphics" | "caPolyLine" => {
+            let static_visibility = node
+                .enum_tail("visibility")
+                .is_none_or(|mode| mode.eq_ignore_ascii_case("StaticV"));
+            let static_color = node
+                .enum_tail("colorMode")
+                .is_none_or(|mode| mode.eq_ignore_ascii_case("Static"));
+            !(static_visibility && static_color)
+        }
+        _ => true,
     }
 }
 
@@ -1725,34 +1927,36 @@ fn polyline_points(node: &WidgetNode) -> Vec<caqtdm_core::Point> {
         .collect()
 }
 
+/// Pixel size of the widget font before any `fontScaleMode` fit. Qt's
+/// default application font is 9 point, and a point is 4/3 pixel at 96 dpi.
 fn font_px_of(node: &WidgetNode, style: &crate::style::CssStyle) -> i32 {
     if let Some(px) = style.font_px {
         return px.max(1);
     }
-    // `caLabel` constructs with `WidthAndHeight`. The designer enum is that
-    // spelling; `HeightAndWidth` is accepted as the same fit.
+    let points = node
+        .prop("font")
+        .and_then(|value| match value {
+            PropValue::Font(font) if font.point_size > 0 => Some(font.point_size),
+            _ => None,
+        })
+        .unwrap_or(9);
+    (f64::from(points) * 4.0 / 3.0).round() as i32
+}
+
+/// `fontScaleMode`. `caLabel`, `caCalc`, and `caLineEdit` construct with
+/// `WidthAndHeight`; everything else keeps its point size.
+fn font_fit_of(node: &WidgetNode) -> u8 {
     let mode = node
         .enum_tail("fontScaleMode")
         .unwrap_or(match node.class_name.as_str() {
-            "caLabel" | "caLabelVertical" => "WidthAndHeight",
+            "caLabel" | "caCalc" | "caLineEdit" | "caTextEntry" => "WidthAndHeight",
             _ => "None",
         });
-    let scaled = match mode.to_ascii_lowercase().as_str() {
-        "height" | "heightandwidth" | "widthandheight" => {
-            (f64::from(node.rect.height.max(1)) * 0.7) as i32
-        }
-        "width" => (f64::from(node.rect.width.max(1)) * 0.2) as i32,
+    match mode.to_ascii_lowercase().as_str() {
+        "height" => 1,
+        "widthandheight" | "heightandwidth" => 2,
         _ => 0,
-    };
-    if scaled > 0 {
-        return scaled.clamp(6, 64);
     }
-    node.prop("font")
-        .and_then(|value| match value {
-            PropValue::Font(font) => Some(font.point_size),
-            _ => None,
-        })
-        .unwrap_or(10)
 }
 
 fn rotation_of(node: &WidgetNode) -> i32 {

@@ -184,7 +184,12 @@ fn paint_display(options: &Options) -> Result<String, String> {
     load_image_notes(&mut visuals, |note| {
         search.find(note).and_then(|file| std::fs::read(file).ok())
     });
-    let (width, height) = options.geometry.unwrap_or((0, 0));
+    // The window is the root widget's size. Children past its edge are
+    // clipped, the way Qt shows them.
+    let root = session.root.rect;
+    let (width, height) = options
+        .geometry
+        .unwrap_or((root.width.max(1) as u32, root.height.max(1) as u32));
     let caption = if options.command == "snapshot" {
         let short = path
             .file_name()
@@ -619,7 +624,12 @@ fn framebuffer(options: &Options) -> Result<RfbFrame, String> {
             &parse_macro_list(&options.macros),
         );
         session.tick(0);
-        let image = paint_in(&session.visuals(), 0, 0);
+        let root = session.root.rect;
+        let image = paint_in(
+            &session.visuals(),
+            root.width.max(1) as u32,
+            root.height.max(1) as u32,
+        );
         return Ok(RfbFrame {
             width: image.width.min(u16::MAX as u32) as u16,
             height: image.height.min(u16::MAX as u32) as u16,

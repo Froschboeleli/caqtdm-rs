@@ -296,7 +296,7 @@ fn designer_plugin_paints_as_the_registered_kind() {
     let session = session(root, InternSource::new());
     let visuals = session.visuals();
     let visual = visuals.iter().find(|v| v.name == "lamp").unwrap();
-    assert!(matches!(visual.kind, VisualKind::Led { on: true }));
+    assert!(matches!(visual.kind, VisualKind::Led { on: true, .. }));
     let image = caqtdm_paint::paint(std::slice::from_ref(visual));
     let pixel = image
         .pixel(
@@ -346,7 +346,7 @@ fn led_units_alignment_and_log_scale_follow_the_properties() {
     session.tick(0);
     let visuals = session.visuals();
     let lamp = visuals.iter().find(|v| v.name == "lamp").unwrap();
-    assert!(matches!(lamp.kind, VisualKind::Led { on: true }));
+    assert!(matches!(lamp.kind, VisualKind::Led { on: true, .. }));
     assert_eq!(lamp.foreground, caqtdm_core::Color::rgb(0, 200, 0));
     let readout = visuals.iter().find(|v| v.name == "readout").unwrap();
     assert!(readout.text.ends_with(" mA"), "{}", readout.text);

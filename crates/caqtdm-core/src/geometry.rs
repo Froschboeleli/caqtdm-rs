@@ -57,4 +57,13 @@ impl Rect {
     pub fn is_empty(self) -> bool {
         self.width <= 0 || self.height <= 0
     }
+
+    /// Overlap of two rectangles. A disjoint pair gives an empty rectangle.
+    pub fn intersect(self, other: Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        Rect::new(x, y, (right - x).max(0), (bottom - y).max(0))
+    }
 }

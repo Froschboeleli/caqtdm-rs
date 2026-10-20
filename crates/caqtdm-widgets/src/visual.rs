@@ -23,6 +23,12 @@ pub struct Visual {
     pub border: Option<Color>,
     /// `lineWidth`, `borderWidth`, or `frameLineWidth`. 1 is a single pixel.
     pub border_px: i32,
+    /// Where the widget may paint. Qt clips a child to its parent, so this is
+    /// the intersection of every ancestor rectangle. `None` is unclipped.
+    pub clip: Option<Rect>,
+    /// `fontScaleMode`: 0 keeps `font_px`, 1 fits the height, 2 fits the
+    /// height and then shrinks until the text fits the width.
+    pub font_fit: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,8 +59,14 @@ pub enum VisualKind {
     Meter {
         fraction: f64,
     },
+    /// `ELed`. The lamp is `led_w` by `led_h` centered in the widget unless
+    /// `scale` fills it. A gradient lamp keeps a square aspect.
     Led {
         on: bool,
+        rectangular: bool,
+        led_w: i32,
+        led_h: i32,
+        scale: bool,
     },
     Shape {
         form: ShapeForm,

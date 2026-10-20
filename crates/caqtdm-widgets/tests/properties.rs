@@ -172,7 +172,7 @@ fn each_widget_honors_the_properties_an_author_sets() {
         other => panic!("{other:?}"),
     }
     match by("led").kind {
-        VisualKind::Led { on } => assert!(on),
+        VisualKind::Led { on, .. } => assert!(on),
         other => panic!("{other:?}"),
     }
     for (name, circular) in [("gauge", false), ("dial", true)] {

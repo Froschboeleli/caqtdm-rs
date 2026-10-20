@@ -89,7 +89,7 @@ fn alarm_calc_visibility_and_writes() {
     assert_eq!(pv.severity, Severity::Minor);
     assert_eq!(pv.foreground, caqtdm_core::alarm_color(Severity::Minor));
     let led = visuals.iter().find(|v| v.name == "led").unwrap();
-    assert!(matches!(led.kind, VisualKind::Led { on: true }));
+    assert!(matches!(led.kind, VisualKind::Led { on: true, .. }));
     let shape = visuals.iter().find(|v| v.name == "box").unwrap();
     assert!(shape.visible);
     assert!(matches!(

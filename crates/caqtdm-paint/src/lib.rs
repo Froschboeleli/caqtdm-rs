@@ -21,6 +21,8 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// Pixels outside this rectangle are left alone. `None` paints anywhere.
+    pub clip: Option<Rect>,
 }
 
 impl Image {
@@ -33,6 +35,7 @@ impl Image {
             width,
             height,
             rgba,
+            clip: None,
         }
     }
 
@@ -52,6 +55,11 @@ impl Image {
     pub fn put(&mut self, x: i32, y: i32, color: Color) {
         if color.a == 0 || x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
             return;
+        }
+        if let Some(clip) = self.clip {
+            if x < clip.x || y < clip.y || x >= clip.right() || y >= clip.bottom() {
+                return;
+            }
         }
         let i = ((y as u32 * self.width + x as u32) * 4) as usize;
         self.rgba[i] = color.r;
@@ -212,6 +220,7 @@ impl Image {
             width,
             height,
             rgba,
+            clip: None,
         })
     }
 
@@ -245,8 +254,10 @@ pub fn paint_in(visuals: &[Visual], width: u32, height: u32) -> Image {
     };
     let mut image = Image::new(width, height, Color::rgb(40, 44, 52));
     for visual in visuals.iter().filter(|v| v.visible) {
+        image.clip = visual.clip;
         paint_one(&mut image, visual);
     }
+    image.clip = None;
     image
 }
 
@@ -268,11 +279,11 @@ fn stroke_border(image: &mut Image, rect: Rect, color: Color, width: i32) {
     }
 }
 
-fn text_origin_x(visual: &Visual, rect: caqtdm_core::Rect, text: &str) -> i32 {
+fn text_origin_px(visual: &Visual, rect: caqtdm_core::Rect, text: &str, px: i32) -> i32 {
     if visual.align == 0 {
         return rect.x + 2;
     }
-    let advance = font::advance_current(text, visual.font_px);
+    let advance = font::advance_current(text, px);
     let room = rect.width - advance;
     if visual.align == 2 {
         rect.x + room.max(2) - 2
@@ -350,19 +361,42 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             let y1 = cy - (angle.sin() * f64::from(radius)) as i32;
             image.line(cx, cy, x1, y1, visual.foreground);
         }
-        VisualKind::Led { on } => {
+        VisualKind::Led {
+            on,
+            rectangular,
+            led_w,
+            led_h,
+            scale,
+        } => {
             let color = if *on || visual.class_name == "caLed" {
                 visual.foreground
             } else {
                 Color::rgb(70, 70, 70)
             };
-            let r = rect.width.min(rect.height) / 2;
-            image.fill_circle(
-                rect.x + rect.width / 2,
-                rect.y + rect.height / 2,
-                r.max(1),
-                color,
+            // `ELed::paintEvent`: the lamp box is centered, 2 pixels inside
+            // the widget when it scales, and outlined with the border pen.
+            let (w, h) = if *scale {
+                (rect.width - 2, rect.height - 2)
+            } else {
+                (*led_w, *led_h)
+            };
+            let lamp = Rect::new(
+                rect.x + (rect.width - w) / 2,
+                rect.y + (rect.height - h) / 2,
+                w.max(1),
+                h.max(1),
             );
+            let edge = visual.border.unwrap_or(Color::rgb(0, 0, 0));
+            if *rectangular {
+                image.fill_rect(lamp, color);
+                image.stroke_rect(lamp, edge);
+            } else {
+                let r = (w.min(h) / 2).max(1);
+                let cx = lamp.x + lamp.width / 2;
+                let cy = lamp.y + lamp.height / 2;
+                image.fill_circle(cx, cy, r, color);
+                image.stroke_circle(cx, cy, r, edge);
+            }
         }
         VisualKind::Shape {
             form,
@@ -533,6 +567,18 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             roi,
             ..
         } => {
+            if rgba.is_empty() && visual.class_name == "caCamera" {
+                // `ImageWidget::paintEvent` before the first frame.
+                let gray = Color::rgb(100, 100, 100);
+                let white = Color::rgb(255, 255, 255);
+                image.fill_rect(rect, gray);
+                image.stroke_rect(rect, white);
+                let note = "Rendering initial image, please wait...";
+                let px = visual.font_px.max(6);
+                let (x, y) = font::centered_origin(note, px, rect);
+                image.text(x, y, note, white, px);
+                return;
+            }
             blit_rgba(image, rect, rgba, *width, *height);
             if let Some(mark) = roi {
                 paint_roi(image, rect, mark, *width, *height);
@@ -553,31 +599,28 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 | VisualKind::Clock { analog: true, .. }
         )
     {
+        let px = font::fit_px(&visual.text, rect, visual.font_fit, visual.font_px);
         if visual.rotation % 180 == 90 {
-            let mut y = rect.y + 2;
-            for ch in visual.text.chars().take(24) {
-                image.text(
-                    rect.x + 2,
-                    y,
-                    &ch.to_string(),
-                    visual.foreground,
-                    visual.font_px,
-                );
-                y += visual.font_px.max(8);
-            }
+            // `caLabelVertical` rotates the painter: `Up` reads bottom to top.
+            let up = visual.rotation == 90 && visual.class_name == "caLabelVertical";
+            font::draw_rotated(image, rect, &visual.text, visual.foreground, px, up);
         } else if visual.text.contains('\n') {
-            let mut y = rect.y + 2;
-            for line in visual.text.lines().take(8) {
-                image.text(rect.x + 2, y, line, visual.foreground, visual.font_px);
-                y += visual.font_px.max(8);
+            let line_h = font::line_height(px);
+            let lines: Vec<&str> = visual.text.lines().take(8).collect();
+            let block = line_h * lines.len() as i32;
+            let mut y = rect.y + (rect.height - block) / 2;
+            for line in lines {
+                image.text(rect.x + 2, y, line, visual.foreground, px);
+                y += line_h;
             }
         } else {
+            let y = rect.y + (rect.height - font::line_height(px)) / 2;
             image.text(
-                text_origin_x(visual, rect, &visual.text),
-                rect.y + 2,
+                text_origin_px(visual, rect, &visual.text, px),
+                y,
                 &visual.text,
                 visual.foreground,
-                visual.font_px,
+                px,
             );
         }
     }
@@ -1739,6 +1782,8 @@ mod tests {
             align: 0,
             border: None,
             border_px: 1,
+            clip: None,
+            font_fit: 0,
         }
     }
 
@@ -1755,7 +1800,13 @@ mod tests {
                 foreground: green,
                 background: Color::rgb(0, 0, 0),
                 text: String::new(),
-                kind: VisualKind::Led { on: true },
+                kind: VisualKind::Led {
+                    on: true,
+                    rectangular: false,
+                    led_w: 16,
+                    led_h: 16,
+                    scale: true,
+                },
                 visible: true,
                 severity: Severity::NoAlarm,
                 font_px: 10,
@@ -1763,6 +1814,8 @@ mod tests {
                 align: 0,
                 border: None,
                 border_px: 1,
+                clip: None,
+                font_fit: 0,
             },
         ]);
         let mut ink = false;

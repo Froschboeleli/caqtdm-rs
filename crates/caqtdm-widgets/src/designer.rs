@@ -54,7 +54,13 @@ pub fn designer_kind(class_name: &str) -> Option<VisualKind> {
     let plugin = guard.iter().find(|item| item.class_name == class_name)?;
     Some(match plugin.kind {
         DesignerKind::Label => VisualKind::Label,
-        DesignerKind::Led => VisualKind::Led { on: true },
+        DesignerKind::Led => VisualKind::Led {
+            on: true,
+            rectangular: false,
+            led_w: 18,
+            led_h: 18,
+            scale: false,
+        },
         DesignerKind::Frame => VisualKind::Frame,
         DesignerKind::Gauge => VisualKind::Gauge {
             fraction: 0.5,

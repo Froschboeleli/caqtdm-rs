@@ -95,6 +95,7 @@ enum Op {
     Mul,
     Div,
     Rem,
+    Pow,
     Not,
     BitNot,
 }
@@ -400,31 +401,38 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_mul(&mut self, inputs: &CalcInputs) -> Result<f64, CalcError> {
-        let mut v = self.parse_unary(inputs)?;
+        let mut v = self.parse_pow(inputs)?;
         loop {
             match self.peek() {
                 Some(Tok::Op(Op::Mul)) => {
                     self.bump();
-                    v *= self.parse_unary(inputs)?;
+                    v *= self.parse_pow(inputs)?;
                 }
                 Some(Tok::Op(Op::Div)) => {
+                    // `calcPerform` divides in IEEE arithmetic: `A/0` is inf.
                     self.bump();
-                    let r = self.parse_unary(inputs)?;
-                    if r == 0.0 {
-                        return Err(CalcError::DivByZero);
-                    }
-                    v /= r;
+                    v /= self.parse_pow(inputs)?;
                 }
                 Some(Tok::Op(Op::Rem)) => {
+                    // `5 % 0` is NaN in `calcPerform`.
                     self.bump();
-                    let r = self.parse_unary(inputs)?;
-                    if r == 0.0 {
-                        return Err(CalcError::DivByZero);
-                    }
-                    v %= r;
+                    let r = self.parse_pow(inputs)?;
+                    v = if r == 0.0 { f64::NAN } else { v % r };
                 }
                 _ => break,
             }
+        }
+        Ok(v)
+    }
+
+    /// `**` and `^` bind tighter than `*` and group left to right, so
+    /// `2**3**2` is 64, the value `postfix` produces.
+    fn parse_pow(&mut self, inputs: &CalcInputs) -> Result<f64, CalcError> {
+        let mut v = self.parse_unary(inputs)?;
+        while matches!(self.peek(), Some(Tok::Op(Op::Pow))) {
+            self.bump();
+            let r = self.parse_unary(inputs)?;
+            v = v.powf(r);
         }
         Ok(v)
     }
@@ -526,6 +534,8 @@ fn ident_value(name: &str, inputs: &CalcInputs) -> Result<f64, CalcError> {
         "PI" => Ok(std::f64::consts::PI),
         "D2R" => Ok(std::f64::consts::PI / 180.0),
         "R2D" => Ok(180.0 / std::f64::consts::PI),
+        "INF" | "INFINITY" => Ok(f64::INFINITY),
+        "NAN" => Ok(f64::NAN),
         _ => Err(CalcError::Unknown(name.to_string())),
     }
 }
@@ -548,11 +558,8 @@ fn call_fn(name: &str, args: &[f64]) -> Result<f64, CalcError> {
     };
     match n.as_str() {
         "ABS" => Ok(one()?.abs()),
-        "SQR" => {
-            let v = one()?;
-            Ok(v * v)
-        }
-        "SQRT" => Ok(one()?.sqrt()),
+        // Both spell square root in `postfix.c` (`SQU_RT`).
+        "SQR" | "SQRT" => Ok(one()?.sqrt()),
         "CEIL" => Ok(one()?.ceil()),
         "FLOOR" => Ok(one()?.floor()),
         "NINT" => Ok(one()?.round()),
@@ -584,10 +591,7 @@ fn call_fn(name: &str, args: &[f64]) -> Result<f64, CalcError> {
         }
         "FMOD" => {
             let (a, b) = two()?;
-            if b == 0.0 {
-                return Err(CalcError::DivByZero);
-            }
-            Ok(a % b)
+            Ok(if b == 0.0 { f64::NAN } else { a % b })
         }
         "MIN" => {
             if args.is_empty() {
@@ -681,7 +685,14 @@ fn tokenize(expr: &str) -> Result<Vec<Tok>, CalcError> {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                 i += 1;
             }
-            out.push(Tok::Ident(expr[start..i].to_string()));
+            let word = &expr[start..i];
+            out.push(match word.to_ascii_uppercase().as_str() {
+                "AND" => Tok::Op(Op::BitAnd),
+                "OR" => Tok::Op(Op::BitOr),
+                "XOR" => Tok::Op(Op::BitXor),
+                "NOT" => Tok::Op(Op::BitNot),
+                _ => Tok::Ident(word.to_string()),
+            });
             continue;
         }
         return Err(CalcError::Syntax(format!(
@@ -702,6 +713,13 @@ fn match_op(s: &[u8]) -> Option<(Op, usize)> {
         Some((Op::Eq, 2))
     } else if two(b'!', b'=') {
         Some((Op::Ne, 2))
+    } else if two(b'*', b'*') {
+        Some((Op::Pow, 2))
+    } else if s[0] == b'=' {
+        // EPICS `postfix` accepts a single `=` as the equality test.
+        Some((Op::Eq, 1))
+    } else if s[0] == b'#' {
+        Some((Op::Ne, 1))
     } else if two(b'<', b'=') {
         Some((Op::Le, 2))
     } else if two(b'>', b'=') {
@@ -713,7 +731,8 @@ fn match_op(s: &[u8]) -> Option<(Op, usize)> {
     } else if s[0] == b'|' {
         Some((Op::BitOr, 1))
     } else if s[0] == b'^' {
-        Some((Op::BitXor, 1))
+        // `^` is the power operator in EPICS calc. Exclusive or is the `XOR` word.
+        Some((Op::Pow, 1))
     } else if s[0] == b'&' {
         Some((Op::BitAnd, 1))
     } else if s[0] == b'<' {
@@ -758,7 +777,7 @@ mod tests {
         assert_eq!(eval_calc("A+1", &inputs).unwrap(), 3.0);
         assert_eq!(eval_calc("(A+B)*C", &inputs).unwrap(), 20.0);
         assert_eq!(eval_calc("ABS(A-B)", &inputs).unwrap(), 1.0);
-        assert_eq!(eval_calc("SQR(A)", &inputs).unwrap(), 4.0);
+        assert_eq!(eval_calc("SQR(A)", &inputs).unwrap(), 2.0_f64.sqrt());
         assert_eq!(eval_calc("SQRT(9)", &inputs).unwrap(), 3.0);
         assert_eq!(eval_calc("MAX(A,B,C)", &inputs).unwrap(), 4.0);
         assert_eq!(eval_calc("MIN(A,B)", &inputs).unwrap(), 2.0);
@@ -768,7 +787,48 @@ mod tests {
         assert_eq!(eval_calc("NINT(1.6)", &inputs).unwrap(), 2.0);
         assert_eq!(eval_calc("A>5?1:0", &with_a(6.0)).unwrap(), 1.0);
         assert_eq!(eval_calc("A>5?1:0", &with_a(4.0)).unwrap(), 0.0);
-        assert!(eval_calc("1/0", &inputs).is_err());
+        assert_eq!(eval_calc("1/0", &inputs).unwrap(), f64::INFINITY);
+    }
+
+    /// Expected values come from EPICS `postfix` + `calcPerform` (libCom)
+    /// with A=1, B=2, C=3.
+    #[test]
+    fn epics_postfix_operators() {
+        let mut inputs = CalcInputs::default();
+        inputs.set(0, 1.0);
+        inputs.set(1, 2.0);
+        inputs.set(2, 3.0);
+        let calc = |expr: &str| eval_calc(expr, &inputs).unwrap();
+        assert_eq!(calc("A=1"), 1.0);
+        assert_eq!(calc("A=2"), 0.0);
+        assert_eq!(calc("A#1"), 0.0);
+        assert_eq!(calc("A#2"), 1.0);
+        assert_eq!(calc("A=1||A=3"), 1.0);
+        assert_eq!(calc("A!=4&&B!=4"), 1.0);
+        assert_eq!(calc("A=1&&B=2||C=3"), 1.0);
+        assert_eq!(calc("A#1||B#2"), 0.0);
+        assert_eq!(calc("A=1?2:3"), 2.0);
+        assert_eq!(calc("!A=1"), 0.0);
+        assert_eq!(calc("1=1=1"), 1.0);
+        assert_eq!(calc("1<2=1"), 1.0);
+        assert_eq!(calc("2**3"), 8.0);
+        assert_eq!(calc("2^3"), 8.0);
+        assert_eq!(calc("2**3**2"), 64.0);
+        assert_eq!(calc("2**-1"), 0.5);
+        assert_eq!(calc("3 XOR 5"), 6.0);
+        assert_eq!(calc("3 AND 6"), 2.0);
+        assert_eq!(calc("1 OR 2"), 3.0);
+        assert_eq!(calc("NOT 1"), -2.0);
+        assert_eq!(calc("~0"), -1.0);
+        assert_eq!(calc("2<<1+1"), 8.0);
+        assert_eq!(calc("SQR(4)"), 2.0);
+        assert_eq!(calc("a=1"), 1.0);
+        assert_eq!(calc("A/0"), f64::INFINITY);
+        assert!(calc("5 % 0").is_nan());
+        assert!(calc("NaN").is_nan());
+        assert_eq!(calc("ISNAN(NaN)"), 1.0);
+        assert_eq!(calc("INF"), f64::INFINITY);
+        assert!(eval_calc("A<?B", &inputs).is_err());
     }
 
     #[test]

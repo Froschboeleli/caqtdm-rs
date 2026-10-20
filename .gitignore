@@ -4,3 +4,6 @@
 **/*.rs.bk
 .DS_Store
 *.ppm
+# never commit internal third-party panels
+sf_op_qt/
+S_OP_*

@@ -93,7 +93,8 @@ impl Image {
             return;
         }
         if let Some(dst) = self.pixel(x, y) {
-            let c = u32::from(coverage);
+            // A translucent color covers in proportion to its alpha.
+            let c = u32::from(coverage) * u32::from(color.a) / 255;
             let inv = 255 - c;
             self.put(
                 x,
@@ -328,12 +329,15 @@ fn paint_one(image: &mut Image, visual: &Visual) {
     let rect = visual.rect;
     if !matches!(visual.kind, VisualKind::GroupBox { .. }) {
         image.fill_rect(rect, visual.background);
-        stroke_border(
-            image,
-            rect,
-            visual.border.unwrap_or(visual.foreground),
-            visual.border_px,
-        );
+        // A shape strokes its own outline inside `paint_shape`.
+        if !matches!(visual.kind, VisualKind::Shape { .. }) {
+            stroke_border(
+                image,
+                rect,
+                visual.border.unwrap_or(visual.foreground),
+                visual.border_px,
+            );
+        }
     }
     match &visual.kind {
         VisualKind::GroupBox { frame, title } => {
@@ -1453,22 +1457,23 @@ fn paint_shape(
 ) {
     let cx = rect.x + rect.width / 2;
     let cy = rect.y + rect.height / 2;
+    // `caGraphics::paintEvent`: the pen is `lineColor`, the brush `foreground`.
     let color = visual.foreground;
+    let pen = visual.border.unwrap_or(color);
     match form {
         ShapeForm::Circle => {
             let r = rect.width.min(rect.height) / 2;
             if filled {
                 image.fill_circle(cx, cy, r, color);
-            } else {
-                image.stroke_circle(cx, cy, r.max(1), color);
             }
+            image.stroke_circle(cx, cy, r.max(1), pen);
         }
         ShapeForm::Line => image.line(
             rect.x,
             rect.y,
             rect.x + rect.width - 1,
             rect.y + rect.height - 1,
-            color,
+            pen,
         ),
         ShapeForm::Triangle => {
             fill_triangle(
@@ -1506,6 +1511,41 @@ fn paint_shape(
         ShapeForm::Rectangle => {
             if filled {
                 image.fill_rect(rect, color);
+            }
+            stroke_pen_rect(image, rect, pen, visual.border_px);
+        }
+    }
+}
+
+/// The antialiased `lineSize` pen of `caGraphics::paintEvent` around a
+/// rectangle inset by `lineSize / 2`: an even pen covers whole pixel rings,
+/// an odd pen's outermost ring straddles the widget edge and lands at half
+/// coverage on the inner pixel (the outer half is clipped by the widget).
+fn stroke_pen_rect(image: &mut Image, rect: Rect, pen: Color, width: i32) {
+    if width <= 0 {
+        return;
+    }
+    let full = width - width % 2;
+    stroke_border(image, rect, pen, full);
+    if width % 2 == 1 {
+        let ring = Rect::new(
+            rect.x + full,
+            rect.y + full,
+            rect.width - 2 * full,
+            rect.height - 2 * full,
+        );
+        if ring.width > 0 && ring.height > 0 {
+            for x in ring.x..ring.x + ring.width {
+                image.cover(x, ring.y, pen, 128);
+                if ring.height > 1 {
+                    image.cover(x, ring.y + ring.height - 1, pen, 128);
+                }
+            }
+            for y in ring.y + 1..ring.y + ring.height - 1 {
+                image.cover(ring.x, y, pen, 128);
+                if ring.width > 1 {
+                    image.cover(ring.x + ring.width - 1, y, pen, 128);
+                }
             }
         }
     }

@@ -575,6 +575,11 @@ impl Session {
         if border.is_none() && node.class_name == "caFrame" {
             border = prop_color(node, "background").or(Some(Color::rgb(160, 160, 160)));
         }
+        if node.class_name == "caGraphics" {
+            // `caGraphics::paintEvent` strokes with `lineColor` (black by
+            // default) and fills with `foreground`.
+            border = prop_color(node, "lineColor").or(Some(Color::rgb(0, 0, 0)));
+        }
         // `SetColorsNotConnected` paints a widget whose channel never
         // connected with `AL_WHITE`. Which parts go white is per class.
         if data.is_some_and(|d| !d.connected) && has_monitor(node) {
@@ -690,9 +695,10 @@ impl Session {
             }
             "caGraphics" => VisualKind::Shape {
                 form: shape_form(node),
+                // The constructor default is `Outline`; Designer omits it.
                 filled: node
                     .enum_tail("fillstyle")
-                    .is_none_or(|s| !s.eq_ignore_ascii_case("Outline")),
+                    .is_some_and(|s| s.eq_ignore_ascii_case("Filled")),
                 start_angle: node.prop_f64("startAngle").unwrap_or(0.0) as i32,
                 span_angle: node.prop_f64("spanAngle").unwrap_or(90.0) as i32,
             },
@@ -2162,6 +2168,10 @@ fn border_px_of(node: &WidgetNode) -> i32 {
     match node.class_name.as_str() {
         "caClock" => 3,
         "caSlider" | "caThermo" | "caMeter" | "caChoice" => 1,
+        // The shape strokes its own outline `lineSize` wide; a polyline
+        // has no outline around its rectangle at all.
+        "caGraphics" => node.prop_f64("lineSize").map_or(1, |size| size.max(0.0) as i32),
+        "caPolyLine" => 0,
         "caFrame" | "caLabel" | "caLabelVertical" | "QLabel" | "QWidget" | "QFrame"
         | "QMainWindow" | "QDialog" | "QTabWidget" | "QStackedWidget" | "caDoubleTabWidget"
         | "caInclude" | "QMenuBar" | "QMenu" | "QStatusBar" | "QToolBar" => 0,

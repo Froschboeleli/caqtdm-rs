@@ -90,6 +90,9 @@ fn each_widget_honors_the_properties_an_author_sets() {
     frame.children.push(child);
     let mut shape = leaf("caGraphics", "shape", "");
     shape.set_prop("form", PropValue::Enum("caGraphics::Form::Circle".into()));
+    shape.set_prop("fillstyle", PropValue::Enum("caGraphics::Filled".into()));
+    // Designer omits the constructor default `Outline`.
+    let outline = leaf("caGraphics", "outline", "");
     let mut poly = leaf("caPolyLine", "poly", "");
     poly.set_prop("xyPairs", PropValue::String("0,0,10,8".into()));
     poly.set_prop("polystyle", PropValue::Enum("Polygon".into()));
@@ -139,7 +142,7 @@ fn each_widget_honors_the_properties_an_author_sets() {
 
     root.children.extend([
         numeric, apply, slider, menu, choice, text, button, toggle, led, gauge, dial, thermo,
-        meter, hex, lines, label, frame, shape, poly, clock, bits, byte, table, wave, calc, fall,
+        meter, hex, lines, label, frame, shape, outline, poly, clock, bits, byte, table, wave, calc, fall,
         scan, draw, tree, log, plot, strip, shell, script, mime, rowcol, cam,
     ]);
 
@@ -200,6 +203,10 @@ fn each_widget_honors_the_properties_an_author_sets() {
             assert_eq!(form, ShapeForm::Circle);
             assert!(filled);
         }
+        other => panic!("{other:?}"),
+    }
+    match by("outline").kind {
+        VisualKind::Shape { filled, .. } => assert!(!filled),
         other => panic!("{other:?}"),
     }
     match by("poly").kind {

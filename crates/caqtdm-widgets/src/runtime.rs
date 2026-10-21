@@ -15,8 +15,8 @@ use caqtdm_ui::WidgetNode;
 use crate::curves::{parse_curve, strip_timing, CurveKind, CurveSlot, PlotMode};
 
 use crate::visual::{
-    qt_global_color, Action, ColorMap, CssBox, CurveStyle, CurveSymbol, Effect, GridCell, ShapeForm,
-    ThermoBand, TreeRow, Visual, VisualKind,
+    qt_global_color, Action, ColorMap, CssBox, CurveStyle, CurveSymbol, Effect, GridCell,
+    ShapeForm, ThermoBand, TreeRow, Visual, VisualKind,
 };
 
 const HISTORY: usize = 240;
@@ -1955,7 +1955,12 @@ fn align_of(node: &WidgetNode) -> i8 {
     let raw = node.prop_str("alignment").unwrap_or("");
     let mut out = 0;
     for flag in raw.split('|') {
-        let flag = flag.trim().rsplit("::").next().unwrap_or("").to_ascii_lowercase();
+        let flag = flag
+            .trim()
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         match flag.as_str() {
             "alignright" | "aligntrailing" | "right" => out = 2,
             "alignhcenter" | "aligncenter" | "center" => out = 1,
@@ -1971,7 +1976,12 @@ fn valign_of(node: &WidgetNode) -> i8 {
     let raw = node.prop_str("alignment").unwrap_or("");
     let mut out = 0;
     for flag in raw.split('|') {
-        let flag = flag.trim().rsplit("::").next().unwrap_or("").to_ascii_lowercase();
+        let flag = flag
+            .trim()
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         match flag.as_str() {
             "aligntop" => out = 1,
             "alignbottom" => out = 2,
@@ -2032,7 +2042,9 @@ fn font_fit_of(node: &WidgetNode) -> u8 {
     let mode = node
         .enum_tail("fontScaleMode")
         .unwrap_or(match node.class_name.as_str() {
-            "caLabel" | "caCalc" | "caLineEdit" | "caTextEntry" => "WidthAndHeight",
+            "caLabel" | "caLabelVertical" | "caCalc" | "caLineEdit" | "caTextEntry" => {
+                "WidthAndHeight"
+            }
             _ => "None",
         });
     match mode.to_ascii_lowercase().as_str() {
@@ -2150,9 +2162,9 @@ fn border_px_of(node: &WidgetNode) -> i32 {
     match node.class_name.as_str() {
         "caClock" => 3,
         "caSlider" | "caThermo" | "caMeter" | "caChoice" => 1,
-        "caFrame" | "caLabel" | "caLabelVertical" | "QLabel" | "QWidget" | "QFrame" | "QMainWindow"
-        | "QDialog" | "QTabWidget" | "QStackedWidget" | "caDoubleTabWidget" | "caInclude"
-        | "QMenuBar" | "QMenu" | "QStatusBar" | "QToolBar" => 0,
+        "caFrame" | "caLabel" | "caLabelVertical" | "QLabel" | "QWidget" | "QFrame"
+        | "QMainWindow" | "QDialog" | "QTabWidget" | "QStackedWidget" | "caDoubleTabWidget"
+        | "caInclude" | "QMenuBar" | "QMenu" | "QStatusBar" | "QToolBar" => 0,
         _ => 1,
     }
 }

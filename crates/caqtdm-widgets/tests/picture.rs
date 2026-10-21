@@ -745,7 +745,10 @@ fn erase_trace() -> (Vec<f64>, Vec<f64>) {
         plot_value_y(inner, 8.0, 0.0, 10.0),
     );
     let ink = paint(&[drawn]);
-    assert!(ink.pixel(probe.0, probe.1).unwrap().r > 250, "the trace is painted");
+    assert!(
+        ink.pixel(probe.0, probe.1).unwrap().r > 250,
+        "the trace is painted"
+    );
     intern.insert("E", ChannelData::scalar(1.0));
     session.tick(3_000);
     let after = series_of(&session);
@@ -890,12 +893,16 @@ fn omitted_plot_colors_follow_the_constructor() {
         "canvas shows the widget fill"
     );
     assert_eq!(
-        image.pixel(inner.x - 4, inner.y + inner.height / 2).unwrap(),
+        image
+            .pixel(inner.x - 4, inner.y + inner.height / 2)
+            .unwrap(),
         Color::rgb(255, 255, 255),
         "scale well between two ticks"
     );
     assert_eq!(
-        image.pixel(inner.x - 5, inner.y + inner.height - 1).unwrap(),
+        image
+            .pixel(inner.x - 5, inner.y + inner.height - 1)
+            .unwrap(),
         Color::rgb(0, 0, 0),
         "black tick on the well"
     );

@@ -115,7 +115,14 @@ pub fn draw_styled(
             let chosen = face_for(Some(font), ch);
             let (metrics, bitmap) = chosen.rasterize(ch, px);
             for dx in 0..=extra {
-                blit(image, cursor + dx as f32, baseline, &metrics, &bitmap, color);
+                blit(
+                    image,
+                    cursor + dx as f32,
+                    baseline,
+                    &metrics,
+                    &bitmap,
+                    color,
+                );
             }
             cursor += metrics.advance_width + extra as f32;
         }

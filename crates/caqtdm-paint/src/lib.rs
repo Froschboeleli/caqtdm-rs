@@ -562,7 +562,20 @@ fn paint_one(image: &mut Image, visual: &Visual) {
         )
     {
         let bold = visual.bold;
-        let px = font::fit_px_styled(&visual.text, rect, visual.font_fit, visual.font_px, bold);
+        // `calculateVertFontPointSizeF` fits a rotated label's line height
+        // to the widget width and its text width to the widget height.
+        let fit_rect = if visual.rotation % 180 == 90 {
+            Rect::new(rect.x, rect.y, rect.height, rect.width)
+        } else {
+            rect
+        };
+        let px = font::fit_px_styled(
+            &visual.text,
+            fit_rect,
+            visual.font_fit,
+            visual.font_px,
+            bold,
+        );
         if visual.rotation % 180 == 90 {
             // `caLabelVertical` rotates the painter: `Up` reads bottom to top.
             let up = visual.rotation == 90 && visual.class_name == "caLabelVertical";
@@ -711,7 +724,13 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         );
     }
     if !plot_paint.title_y.is_empty() {
-        image.text(rect.x + 2, rect.y + 10, plot_paint.title_y, ink, visual.font_px);
+        image.text(
+            rect.x + 2,
+            rect.y + 10,
+            plot_paint.title_y,
+            ink,
+            visual.font_px,
+        );
     }
     if !plot_paint.title_x.is_empty() {
         image.text(
@@ -756,13 +775,25 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         for value in &y_ticks {
             let y = map_y(*value);
             if y >= plot.y && y < plot.y + plot.height {
-                dash_hline(image, plot.x, plot.x + plot.width - 1, y, plot_paint.grid_color);
+                dash_hline(
+                    image,
+                    plot.x,
+                    plot.x + plot.width - 1,
+                    y,
+                    plot_paint.grid_color,
+                );
             }
         }
         for frac in &x_fracs {
             let x = map_x(*frac);
             if x >= plot.x && x < plot.x + plot.width {
-                dash_vline(image, x, plot.y, plot.y + plot.height - 1, plot_paint.grid_color);
+                dash_vline(
+                    image,
+                    x,
+                    plot.y,
+                    plot.y + plot.height - 1,
+                    plot_paint.grid_color,
+                );
             }
         }
     }
@@ -1074,7 +1105,11 @@ fn axis_label(value: f64) -> String {
     if !(-5..6).contains(&exponent) {
         let mantissa = value / 10f64.powi(exponent);
         let text = trim_decimals(&format!("{mantissa:.5}"));
-        return format!("{text}e{}{:02}", if exponent < 0 { '-' } else { '+' }, exponent.abs());
+        return format!(
+            "{text}e{}{:02}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
+        );
     }
     let decimals = (5 - exponent).max(0) as usize;
     trim_decimals(&format!("{value:.decimals$}"))
@@ -1139,7 +1174,13 @@ fn paint_group_box(
             if let Some(fill) = frame.fill {
                 fill_round_rect(image, body, frame.radius, fill);
             }
-            stroke_round_rect(image, body, frame.radius, frame.border_px, frame.border_color);
+            stroke_round_rect(
+                image,
+                body,
+                frame.radius,
+                frame.border_px,
+                frame.border_color,
+            );
         }
         None => {
             let body = Rect::new(
@@ -2237,6 +2278,39 @@ mod tests {
     }
 
     #[test]
+    fn rotated_label_fits_its_text_along_the_tall_side() {
+        // `calculateVertFontPointSizeF`: a `caLabelVertical` in a 20x80 rect
+        // fits its line height to the 20 px width and the text to the 80 px
+        // height, so the glyphs run a good way up the column (about 25 px
+        // for "BLM" at the fitted 13 px; the upright fit would give 7 px).
+        let mut vert = visual(VisualKind::Label, "BLM", Color::rgb(0, 0, 0));
+        vert.class_name = "caLabelVertical".into();
+        vert.background = Color::rgb(255, 255, 255);
+        vert.border_px = 0;
+        vert.rect = Rect::new(2, 2, 20, 80);
+        vert.rotation = 90;
+        vert.font_fit = 2;
+        vert.font_px = 12;
+        let image = paint(&[vert]);
+        let (mut top, mut bottom, mut left, mut right) = (i32::MAX, 0, i32::MAX, 0);
+        for y in 2..82 {
+            for x in 2..22 {
+                if image.pixel(x, y).unwrap().r < 128 {
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                    left = left.min(x);
+                    right = right.max(x);
+                }
+            }
+        }
+        assert!(
+            bottom - top >= 20,
+            "ink spans {top}..{bottom}, text was not fitted to the height"
+        );
+        assert!(right - left >= 8, "ink spans {left}..{right} horizontally");
+    }
+
+    #[test]
     fn selected_tab_is_a_light_chip_with_dark_text() {
         let mut tabs = visual(
             VisualKind::Tabs {
@@ -2568,11 +2642,19 @@ mod tests {
         let drawn = paint(&[two]);
         let x = inner.x + 1;
         assert!(
-            drawn.pixel(x, plot_value_y(inner, 3.0, 0.0, 10.0)).unwrap().b > 150,
+            drawn
+                .pixel(x, plot_value_y(inner, 3.0, 0.0, 10.0))
+                .unwrap()
+                .b
+                > 150,
             "recent sample"
         );
         assert!(
-            drawn.pixel(x, plot_value_y(inner, 1.0, 0.0, 10.0)).unwrap().b < 100,
+            drawn
+                .pixel(x, plot_value_y(inner, 1.0, 0.0, 10.0))
+                .unwrap()
+                .b
+                < 100,
             "older sample is outside the span"
         );
     }

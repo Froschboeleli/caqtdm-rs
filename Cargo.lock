@@ -736,6 +736,7 @@ version = "0.1.0"
 dependencies = [
  "caqtdm-core",
  "caqtdm-datasource",
+ "caqtdm-paint",
  "caqtdm-ui",
  "caqtdm-widgets",
  "eframe",

@@ -24,7 +24,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 thiserror = "2"
 regex = "1"
-caqtdm-core = { path = "crates/caqtdm-core" }
+caqtdm-core = { path = "crates/caqtdm-core", default-features = false }
 caqtdm-ui = { path = "crates/caqtdm-ui" }
 caqtdm-datasource = { path = "crates/caqtdm-datasource" }
 caqtdm-epics-ca = { path = "crates/caqtdm-epics-ca" }

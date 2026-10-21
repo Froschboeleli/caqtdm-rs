@@ -3,6 +3,13 @@ use std::path::Path;
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(has_libzmq)");
     println!("cargo:rerun-if-changed=build.rs");
+    // The probe looks at host library paths; a cross build (for example
+    // x86_64-pc-windows-gnu) must not link the host's libzmq.
+    let host = std::env::var("HOST").unwrap_or_default();
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if host != target {
+        return;
+    }
     let candidates = [
         "/usr/lib/x86_64-linux-gnu/libzmq.so.5",
         "/usr/lib64/libzmq.so.5",

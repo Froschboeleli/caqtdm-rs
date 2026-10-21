@@ -2448,6 +2448,42 @@ struct LibcTm {
     tm_zone: *const i8,
 }
 
+/// Windows CRT: `_localtime64_s` fills the nine ISO C fields; the zone
+/// offset is the difference `_mkgmtime64` reads back from them.
+#[cfg(windows)]
+fn local_tm(unix_secs: i64) -> Option<LibcTm> {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CrtTm([i32; 9]);
+    extern "C" {
+        fn _localtime64_s(result: *mut CrtTm, timep: *const i64) -> i32;
+        fn _mkgmtime64(tm: *mut CrtTm) -> i64;
+    }
+    unsafe {
+        let mut crt = CrtTm([0; 9]);
+        if _localtime64_s(&mut crt, &unix_secs) != 0 {
+            return None;
+        }
+        let mut copy = crt;
+        let as_utc = _mkgmtime64(&mut copy);
+        let f = crt.0;
+        Some(LibcTm {
+            tm_sec: f[0],
+            tm_min: f[1],
+            tm_hour: f[2],
+            tm_mday: f[3],
+            tm_mon: f[4],
+            tm_year: f[5],
+            tm_wday: f[6],
+            tm_yday: f[7],
+            tm_isdst: f[8],
+            tm_gmtoff: if as_utc == -1 { 0 } else { as_utc - unix_secs },
+            tm_zone: std::ptr::null(),
+        })
+    }
+}
+
+#[cfg(not(windows))]
 fn local_tm(unix_secs: i64) -> Option<LibcTm> {
     extern "C" {
         fn localtime_r(timep: *const i64, result: *mut LibcTm) -> *mut LibcTm;

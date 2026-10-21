@@ -153,6 +153,16 @@ fn serve_client(
             Err(_) => break,
         }
         while let Some((header, payload)) = take_message(&mut buf)? {
+            // TCP name search (EPICS_CA_NAME_SERVERS): answer for known names.
+            if header.command == CMD_SEARCH {
+                let name = unpad_string(&payload);
+                if db.lock().expect("ca db").records.contains_key(&name) {
+                    let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
+                    let reply = search_reply(port, header.cid);
+                    stream.write_all(&reply)?;
+                }
+                continue;
+            }
             if let Some(frame) = handle(&db, &mut subs, header, &payload)? {
                 stream.write_all(&frame)?;
             }
@@ -230,7 +240,8 @@ fn read_notify(db: &Mutex<Database>, header: CaHeader) -> Result<Option<Vec<u8>>
     let mut reply = CaHeader::new(CMD_READ_NOTIFY);
     reply.data_type = dbr;
     reply.count = header.count.max(1);
-    reply.cid = header.cid;
+    // caProto.h: the reply's cid field carries the ECA status.
+    reply.cid = u32::from(crate::protocol::ECA_NORMAL);
     reply.available = header.available;
     Ok(Some(crate::protocol::encode_message(reply, &payload)))
 }
@@ -328,7 +339,7 @@ fn push_events(db: &Mutex<Database>, subs: &mut [Sub]) -> Result<Option<Vec<u8>>
         let mut header = CaHeader::new(CMD_EVENT_ADD);
         header.data_type = sub.dbr;
         header.count = sub.count;
-        header.cid = sub.sid;
+        header.cid = u32::from(crate::protocol::ECA_NORMAL);
         header.available = sub.sub_id;
         out.extend_from_slice(&crate::protocol::encode_message(header, &payload));
     }

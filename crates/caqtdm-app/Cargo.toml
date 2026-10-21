@@ -11,6 +11,12 @@ description = "caQtDM command line and desktop viewer"
 name = "caqtdm"
 path = "src/main.rs"
 
+[features]
+default = ["python"]
+# Python visibility expressions (`%P/...`). Off for the Windows cross build,
+# which has no target Python to link.
+python = ["caqtdm-core/python"]
+
 [dependencies]
 caqtdm-core.workspace = true
 caqtdm-ui.workspace = true

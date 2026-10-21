@@ -65,6 +65,7 @@ struct Options {
     novnc_readonly: bool,
     slave_server: bool,
     options: Vec<(String, String)>,
+    wait: Option<f64>,
 }
 
 pub fn execute(args: &[String]) -> Result<String, String> {
@@ -178,6 +179,23 @@ fn paint_display(options: &Options) -> Result<String, String> {
     );
     session.allow_shell = options.execute_shell;
     session.tick(0);
+    // `-wait <seconds>` (or CAQTDM_SNAPSHOT_WAIT) keeps polling live data
+    // sources before the frame is grabbed.
+    let wait = options
+        .wait
+        .or_else(|| {
+            std::env::var("CAQTDM_SNAPSHOT_WAIT")
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+        })
+        .unwrap_or(0.0);
+    if wait > 0.0 {
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs_f64() < wait {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            session.tick(start.elapsed().as_millis() as u64);
+        }
+    }
     install_font(options)?;
     let mut visuals = session.visuals();
     let search = display_search(&path, options);
@@ -293,7 +311,10 @@ fn standard_hub(options: &Options) -> Hub {
                 hub.register(Box::new(CaSource::offline()));
             }
         },
-        None => hub.register(Box::new(CaSource::offline())),
+        None => match CaSource::from_env() {
+            Some(source) => hub.register(Box::new(source)),
+            None => hub.register(Box::new(CaSource::offline())),
+        },
     }
     match options.pva {
         Some(addr) => match PvaSource::connect(addr) {
@@ -356,6 +377,7 @@ fn default_options() -> Options {
         novnc_readonly: false,
         slave_server: false,
         options: Vec::new(),
+        wait: None,
     }
 }
 
@@ -404,7 +426,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             | "-web_timeout"
             | "-web_instance_limit"
             | "-host"
-            | "-web_launcher_root_file" => {
+            | "-web_launcher_root_file"
+            | "-wait" => {
                 let value = args
                     .get(i + 1)
                     .ok_or_else(|| format!("{arg} needs a value"))?
@@ -439,6 +462,13 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                         }
                     }
                     "-web_launcher_root_file" => options.launcher_root = value,
+                    "-wait" => {
+                        options.wait = Some(
+                            value
+                                .parse()
+                                .map_err(|_| format!("-wait needs seconds, got {value}"))?,
+                        )
+                    }
                     _ => {}
                 }
                 i += 1;

@@ -9,6 +9,7 @@
 mod client;
 mod dbr;
 mod ioc;
+mod live;
 mod protocol;
 mod source;
 
@@ -19,6 +20,7 @@ pub use dbr::{
     DBR_STRING, DBR_TIME_DOUBLE,
 };
 pub use ioc::SoftIoc;
+pub use live::{CaConfig, CaStats, LiveCa};
 pub use protocol::{
     align8, decode_header, decode_search_reply, pad_string, search_message, CaError, CaHeader,
     CA_MAJOR, CA_MINOR, CMD_ERROR, CMD_EVENTS_OFF, CMD_EVENTS_ON, CMD_EVENT_CANCEL, CMD_NOT_FOUND,

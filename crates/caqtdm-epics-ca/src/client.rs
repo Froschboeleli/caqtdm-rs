@@ -29,6 +29,9 @@ pub struct CaClient {
     next_cid: u32,
     next_ioid: u32,
     channels: BTreeMap<String, Chan>,
+    /// Subscription id to channel name; monitor replies carry the ECA
+    /// status in the cid field, not the server id.
+    subs: BTreeMap<u32, String>,
 }
 
 #[derive(Clone)]
@@ -57,6 +60,7 @@ impl CaClient {
             next_cid: 1,
             next_ioid: 1,
             channels: BTreeMap::new(),
+            subs: BTreeMap::new(),
         };
         let _ = client.read_matching(|h| h.command == CMD_VERSION)?;
         client.write_msg(
@@ -197,6 +201,7 @@ impl CaClient {
     pub fn subscribe_dbr(&mut self, name: &str, dbr: u16, count: u32) -> Result<u32, CaError> {
         let sid = self.sid(name)?;
         let sub_id = self.alloc_ioid();
+        self.subs.insert(sub_id, name.to_string());
         let mut header = CaHeader::new(CMD_EVENT_ADD);
         header.data_type = dbr;
         header.count = count.max(1);
@@ -220,12 +225,7 @@ impl CaClient {
             }
             let data = decode_dbr(&payload, header.data_type)
                 .unwrap_or_else(|_| ChannelData::disconnected(""));
-            let name = self
-                .channels
-                .iter()
-                .find(|(_, chan)| chan.sid == header.cid)
-                .map(|(name, _)| name.clone())
-                .unwrap_or_default();
+            let name = self.subs.get(&header.available).cloned().unwrap_or_default();
             events.push(MonitorEvent {
                 name,
                 sub_id: header.available,

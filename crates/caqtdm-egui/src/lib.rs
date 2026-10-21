@@ -1,5 +1,7 @@
-//! Desktop viewer. It paints the same visuals as the PPM rasterizer and sends
-//! clicks back through [`Session::act`](caqtdm_widgets::Session::act).
+//! Desktop viewer. The window is the display: the visuals are rasterized by
+//! `caqtdm_paint` exactly as the headless snapshot is, shown as one texture,
+//! and clicks go back through [`Session::act`](caqtdm_widgets::Session::act).
+//! Escape closes a related display opened on top.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,8 +11,8 @@ use caqtdm_core::{parse_macro_list, MacroMap};
 use caqtdm_datasource::Hub;
 use caqtdm_ui::{expand_includes, load_path, SearchPath};
 use caqtdm_widgets::{
-    cell_at, load_image_notes, tab_at, tab_rects, toggled_bit_value, Action, Effect, Session,
-    Visual, VisualKind,
+    cell_at, load_image_notes, tab_at, toggled_bit_value, Action, Effect, Session, Visual,
+    VisualKind,
 };
 use eframe::egui;
 
@@ -21,8 +23,17 @@ pub fn launch(
     macros: MacroMap,
     hub_factory: Arc<dyn Fn() -> Hub + Send + Sync>,
 ) -> eframe::Result<()> {
+    // Upstream opens each display in a window of its own size, titled with
+    // the file name.
+    let (width, height) = display_size(&session.visuals());
+    let title = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "caQtDM".to_string());
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 640.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([width as f32, height as f32])
+            .with_title(title),
         ..Default::default()
     };
     eframe::run_native(
@@ -34,9 +45,16 @@ pub fn launch(
                 search,
                 macros,
                 hub_factory,
+                texture: None,
             }))
         }),
     )
+}
+
+/// The size the visuals cover, which is the window size.
+pub fn display_size(visuals: &[Visual]) -> (u32, u32) {
+    let image = caqtdm_paint::paint(visuals);
+    (image.width.max(1), image.height.max(1))
 }
 
 struct Page {
@@ -49,6 +67,7 @@ struct Viewer {
     search: SearchPath,
     macros: MacroMap,
     hub_factory: Arc<dyn Fn() -> Hub + Send + Sync>,
+    texture: Option<egui::TextureHandle>,
 }
 
 impl eframe::App for Viewer {
@@ -61,20 +80,11 @@ impl eframe::App for Viewer {
         if let Some(page) = self.stack.last_mut() {
             page.session.tick(now);
         }
-        egui::TopBottomPanel::top("bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Back").clicked() && self.stack.len() > 1 {
-                    self.stack.pop();
-                }
-                if let Some(page) = self.stack.last() {
-                    ui.label(format!("{} widgets", page.session.visuals().len()));
-                    if let Some(last) = page.session.log.last() {
-                        ui.label(last);
-                    }
-                }
-            });
-        });
-        egui::CentralPanel::default().show(ctx, |ui| {
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && self.stack.len() > 1 {
+            self.stack.pop();
+        }
+        let frame = egui::Frame::NONE;
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let mut visuals = self
                 .stack
                 .last()
@@ -84,25 +94,31 @@ impl eframe::App for Viewer {
             load_image_notes(&mut visuals, |note| {
                 search.find(note).and_then(|path| std::fs::read(path).ok())
             });
-            let width = visuals
-                .iter()
-                .map(|v| v.rect.x + v.rect.width)
-                .max()
-                .unwrap_or(400) as f32;
-            let height = visuals
-                .iter()
-                .map(|v| v.rect.y + v.rect.height)
-                .max()
-                .unwrap_or(300) as f32;
+            let image = caqtdm_paint::paint(&visuals);
+            let size = [image.width as usize, image.height as usize];
+            let pixels = egui::ColorImage::from_rgba_unmultiplied(size, &image.rgba);
+            let texture = match &mut self.texture {
+                Some(texture) => {
+                    texture.set(pixels, egui::TextureOptions::NEAREST);
+                    texture.clone()
+                }
+                None => {
+                    let texture =
+                        ctx.load_texture("display", pixels, egui::TextureOptions::NEAREST);
+                    self.texture = Some(texture.clone());
+                    texture
+                }
+            };
             let (response, painter) = ui.allocate_painter(
-                egui::vec2(width.max(1.0), height.max(1.0)),
+                egui::vec2(image.width as f32, image.height as f32),
                 egui::Sense::click_and_drag(),
             );
-            let mut textures = Vec::new();
-            for visual in &visuals {
-                draw(ctx, &painter, visual, &mut textures);
-            }
-            let _hold_textures = textures.len();
+            painter.image(
+                texture.id(),
+                response.rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
             if response.clicked() || response.drag_stopped() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(hit) = hit_test(&visuals, pos) {
@@ -202,143 +218,6 @@ impl Viewer {
         let session = Session::open(display.root, (self.hub_factory)(), &macros);
         self.stack.push(Page { session, path });
     }
-}
-
-fn draw(
-    ctx: &egui::Context,
-    painter: &egui::Painter,
-    visual: &Visual,
-    textures: &mut Vec<egui::TextureHandle>,
-) {
-    if !visual.visible {
-        return;
-    }
-    let clipped;
-    let painter = match visual.clip {
-        Some(clip) => {
-            clipped = painter.with_clip_rect(egui::Rect::from_min_size(
-                egui::pos2(clip.x as f32, clip.y as f32),
-                egui::vec2(clip.width.max(0) as f32, clip.height.max(0) as f32),
-            ));
-            &clipped
-        }
-        None => painter,
-    };
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(visual.rect.x as f32, visual.rect.y as f32),
-        egui::vec2(
-            visual.rect.width.max(1) as f32,
-            visual.rect.height.max(1) as f32,
-        ),
-    );
-    let fg = color(visual.foreground);
-    let bg = color(visual.background);
-    if visual.background.a > 0 {
-        painter.rect_filled(rect, 2.0, bg);
-    }
-    if visual.border_px > 0 {
-        let edge = visual.border.map(color).unwrap_or(fg);
-        painter.rect_stroke(
-            rect,
-            2.0,
-            egui::Stroke::new(visual.border_px as f32, edge),
-            egui::StrokeKind::Inside,
-        );
-    }
-    if let VisualKind::Slider { fraction, .. } | VisualKind::Thermo { fraction, .. } = &visual.kind
-    {
-        let mut bar = rect;
-        bar.set_width(rect.width() * *fraction as f32);
-        painter.rect_filled(bar, 0.0, fg);
-    }
-    if let VisualKind::Image {
-        rgba,
-        width,
-        height,
-        ..
-    } = &visual.kind
-    {
-        if *width > 0 && *height > 0 && rgba.len() >= (*width as usize * *height as usize * 4) {
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([*width as usize, *height as usize], rgba);
-            let texture = ctx.load_texture(
-                format!("ca-image-{}", visual.id),
-                image,
-                egui::TextureOptions::NEAREST,
-            );
-            painter.image(
-                texture.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-            textures.push(texture);
-        }
-    }
-    if let VisualKind::Tabs { labels, current } = &visual.kind {
-        let bar_h = 28.0_f32.min(rect.height());
-        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_h));
-        painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(225, 225, 225));
-        let ink = egui::Color32::from_rgb(20, 20, 20);
-        for (index, (label, tab)) in labels
-            .iter()
-            .zip(tab_rects(visual.rect, labels, *current, visual.font_px))
-            .enumerate()
-        {
-            let chip = egui::Rect::from_min_size(
-                egui::pos2(tab.x as f32, tab.y as f32),
-                egui::vec2(tab.width as f32, tab.height as f32),
-            );
-            let fill = if index == *current {
-                egui::Color32::from_rgb(250, 250, 250)
-            } else {
-                egui::Color32::from_rgb(216, 216, 216)
-            };
-            painter.rect_filled(chip, 0.0, fill);
-            painter.rect_stroke(
-                chip,
-                0.0,
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(196, 196, 195)),
-                egui::StrokeKind::Inside,
-            );
-            painter.text(
-                chip.left_top() + egui::vec2(6.0, 4.0),
-                egui::Align2::LEFT_TOP,
-                label,
-                egui::FontId::monospace(visual.font_px.clamp(8, 14) as f32),
-                ink,
-            );
-        }
-    }
-    if let VisualKind::Led { on, .. } = &visual.kind {
-        let fill = if *on || visual.class_name == "caLed" {
-            fg
-        } else {
-            egui::Color32::DARK_GRAY
-        };
-        painter.circle_filled(rect.center(), rect.width().min(rect.height()) * 0.4, fill);
-    }
-    if !visual.text.is_empty() {
-        let (pos, align) = match visual.align {
-            1 => (
-                rect.center_top() + egui::vec2(0.0, 2.0),
-                egui::Align2::CENTER_TOP,
-            ),
-            2 => (
-                rect.right_top() + egui::vec2(-3.0, 2.0),
-                egui::Align2::RIGHT_TOP,
-            ),
-            _ => (
-                rect.left_top() + egui::vec2(3.0, 2.0),
-                egui::Align2::LEFT_TOP,
-            ),
-        };
-        painter.text(pos, align, &visual.text, egui::FontId::monospace(13.0), fg);
-    }
-}
-
-fn color(c: caqtdm_core::Color) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
 }
 
 fn hit_test(visuals: &[Visual], pos: egui::Pos2) -> Option<Visual> {

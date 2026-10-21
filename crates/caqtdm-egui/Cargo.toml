@@ -12,4 +12,5 @@ caqtdm-core.workspace = true
 caqtdm-ui.workspace = true
 caqtdm-datasource.workspace = true
 caqtdm-widgets.workspace = true
+caqtdm-paint.workspace = true
 eframe = "0.31"

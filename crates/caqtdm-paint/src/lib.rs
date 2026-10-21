@@ -15,7 +15,19 @@ pub use print::{print_ps_layout, render_print_pdf, PrintLayout, PRINT_DPI};
 /// Pixels kept free on the right of a plot that has a second Y scale.
 const Y2_GUTTER: i32 = 22;
 /// Qwt axis font: `setAxisFont(QFont("Arial", 8))`, 8pt at 96 dpi.
-const AXIS_PX: i32 = 11;
+const AXIS_PX: i32 = 10;
+/// Height of one Qwt scale label line in the oracle's `Arial 8` axis font,
+/// which lays the labels out; the glyphs come from the 10px face above.
+const AXIS_LINE_H: i32 = 12;
+/// Gap between a tick and its label (`QwtScaleWidget::spacing`).
+const AXIS_SPACING: i32 = 4;
+/// Medium and minor tick lengths (`QwtAbstractScaleDraw` defaults).
+const TICK_MEDIUM: i32 = 6;
+const TICK_MINOR: i32 = 4;
+/// The oracle's Arial digits start two pixels below the label line top;
+/// the 10px Noto digits start four below the text origin, so text is
+/// drawn two pixels higher.
+const AXIS_TEXT_DY: i32 = 2;
 /// `QwtScaleDraw` major tick length.
 const TICK_LEN: i32 = 8;
 
@@ -283,6 +295,41 @@ pub fn paint_in(visuals: &[Visual], width: u32, height: u32) -> Image {
     image
 }
 
+/// The `border-style: outset` frame `caLineEdit` styles itself with: the
+/// top and left in the frame color's `darker()`, the bottom and right in
+/// its `lighter()`.
+fn stroke_outset(image: &mut Image, rect: Rect, color: Color, width: i32) {
+    let scale = |c: u8, by: f64| (f64::from(c) * by).round().min(255.0) as u8;
+    let dark = Color::rgba(
+        scale(color.r, 0.5),
+        scale(color.g, 0.5),
+        scale(color.b, 0.5),
+        color.a,
+    );
+    let light = Color::rgba(
+        scale(color.r, 1.5),
+        scale(color.g, 1.5),
+        scale(color.b, 1.5),
+        color.a,
+    );
+    for inset in 0..width.max(0) {
+        let band = inset_rect(rect, inset);
+        if band.width <= 0
+            || band.height <= 0
+            || rect.width <= 2 * inset
+            || rect.height <= 2 * inset
+        {
+            break;
+        }
+        let right = band.x + band.width - 1;
+        let bottom = band.y + band.height - 1;
+        image.line(band.x, bottom, right, bottom, light);
+        image.line(right, band.y, right, bottom, light);
+        image.line(band.x, band.y, right, band.y, dark);
+        image.line(band.x, band.y, band.x, bottom, dark);
+    }
+}
+
 fn stroke_border(image: &mut Image, rect: Rect, color: Color, width: i32) {
     if width <= 0 {
         return;
@@ -301,14 +348,80 @@ fn stroke_border(image: &mut Image, rect: Rect, color: Color, width: i32) {
     }
 }
 
-fn text_origin_px(visual: &Visual, rect: caqtdm_core::Rect, text: &str, px: i32) -> i32 {
+/// Where a widget lays out its text: the contents rectangle inside any
+/// frame, the rectangle the font is fitted to, the fit borders, and the
+/// horizontal margin the text keeps from the contents edge.
+struct TextSpace {
+    contents: Rect,
+    fit: Rect,
+    lateral: i32,
+    bot_top: i32,
+    inset: i32,
+}
+
+fn text_space(visual: &Visual, rect: Rect) -> TextSpace {
+    let bw = visual.border_px.max(0);
+    match visual.kind {
+        // `ESimpleLabel::calculateTextSpace` takes the frame off the
+        // contents rectangle a second time; `QLabel` draws flush with it.
+        VisualKind::Label => TextSpace {
+            contents: inset_rect(rect, bw),
+            fit: inset_rect(rect, 2 * bw),
+            lateral: 2,
+            bot_top: 2,
+            inset: 0,
+        },
+        // `caLineEdit` styles a `padding: 0 0 0 2px` inside its frame,
+        // fits with borders of the line width plus one, and `QLineEdit`
+        // keeps a 2px horizontal margin.
+        VisualKind::Entry { .. } => {
+            let contents = Rect::new(
+                rect.x + bw + 2,
+                rect.y + bw,
+                (rect.width - 2 * bw - 2).max(1),
+                (rect.height - 2 * bw).max(1),
+            );
+            TextSpace {
+                contents,
+                fit: contents,
+                lateral: bw + 1,
+                bot_top: bw + 1,
+                inset: 2,
+            }
+        }
+        _ => TextSpace {
+            contents: rect,
+            fit: rect,
+            lateral: 2,
+            bot_top: 2,
+            inset: 2,
+        },
+    }
+}
+
+fn inset_rect(rect: Rect, by: i32) -> Rect {
+    Rect::new(
+        rect.x + by,
+        rect.y + by,
+        (rect.width - 2 * by).max(1),
+        (rect.height - 2 * by).max(1),
+    )
+}
+
+fn text_origin_px(
+    visual: &Visual,
+    rect: caqtdm_core::Rect,
+    text: &str,
+    px: i32,
+    inset: i32,
+) -> i32 {
     if visual.align == 0 {
-        return rect.x + 2;
+        return rect.x + inset;
     }
     let advance = font::advance_styled(text, px, visual.bold);
     let room = rect.width - advance;
     if visual.align == 2 {
-        rect.x + room.max(2) - 2
+        rect.x + room.max(inset) - inset
     } else {
         rect.x + room.max(0) / 2
     }
@@ -330,7 +443,14 @@ fn paint_one(image: &mut Image, visual: &Visual) {
     if !matches!(visual.kind, VisualKind::GroupBox { .. }) {
         image.fill_rect(rect, visual.background);
         // A shape strokes its own outline inside `paint_shape`.
-        if !matches!(visual.kind, VisualKind::Shape { .. }) {
+        if matches!(visual.kind, VisualKind::Entry { .. }) {
+            stroke_outset(
+                image,
+                rect,
+                visual.border.unwrap_or(Color::rgb(0, 0, 0)),
+                visual.border_px,
+            );
+        } else if !matches!(visual.kind, VisualKind::Shape { .. }) {
             stroke_border(
                 image,
                 rect,
@@ -397,6 +517,7 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             led_w,
             led_h,
             scale,
+            gradient,
         } => {
             let color = if *on || visual.class_name == "caLed" {
                 visual.foreground
@@ -405,11 +526,15 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             };
             // `ELed::paintEvent`: the lamp box is centered, 2 pixels inside
             // the widget when it scales, and outlined with the border pen.
-            let (w, h) = if *scale {
+            let (mut w, mut h) = if *scale {
                 (rect.width - 2, rect.height - 2)
             } else {
                 (*led_w, *led_h)
             };
+            if gradient.is_some() {
+                w = w.min(h);
+                h = w;
+            }
             let lamp = Rect::new(
                 rect.x + (rect.width - w) / 2,
                 rect.y + (rect.height - h) / 2,
@@ -417,17 +542,9 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 h.max(1),
             );
             let edge = visual.border.unwrap_or(Color::rgb(0, 0, 0));
-            if *rectangular {
-                image.fill_rect(lamp, color);
-                image.stroke_rect(lamp, edge);
-            } else {
-                let r = (w.min(h) / 2).max(1);
-                let cx = lamp.x + lamp.width / 2;
-                let cy = lamp.y + lamp.height / 2;
-                image.fill_circle(cx, cy, r, color);
-                image.stroke_circle(cx, cy, r, edge);
-            }
+            paint_led(image, rect, lamp, *rectangular, *gradient, color, edge);
         }
+        VisualKind::Toggle { on } => paint_check_box(image, rect, visual, *on),
         VisualKind::Shape {
             form,
             filled,
@@ -559,6 +676,7 @@ fn paint_one(image: &mut Image, visual: &Visual) {
                 | VisualKind::GroupBox { .. }
                 | VisualKind::Plot { .. }
                 | VisualKind::Tabs { .. }
+                | VisualKind::Toggle { .. }
                 | VisualKind::Choice { .. }
                 | VisualKind::Grid { .. }
                 | VisualKind::Waterfall { .. }
@@ -566,19 +684,22 @@ fn paint_one(image: &mut Image, visual: &Visual) {
         )
     {
         let bold = visual.bold;
+        let space = text_space(visual, rect);
         // `calculateVertFontPointSizeF` fits a rotated label's line height
         // to the widget width and its text width to the widget height.
         let fit_rect = if visual.rotation % 180 == 90 {
-            Rect::new(rect.x, rect.y, rect.height, rect.width)
+            Rect::new(space.fit.x, space.fit.y, space.fit.height, space.fit.width)
         } else {
-            rect
+            space.fit
         };
-        let px = font::fit_px_styled(
+        let px = font::fit_px_bordered(
             &visual.text,
             fit_rect,
             visual.font_fit,
             visual.font_px,
             bold,
+            space.lateral,
+            space.bot_top,
         );
         if visual.rotation % 180 == 90 {
             // `caLabelVertical` rotates the painter: `Up` reads bottom to top.
@@ -588,15 +709,23 @@ fn paint_one(image: &mut Image, visual: &Visual) {
             let line_h = font::line_height(px);
             let lines: Vec<&str> = visual.text.lines().take(8).collect();
             let block = line_h * lines.len() as i32;
-            // `Qt::AlignTop` / `AlignBottom` / `AlignVCenter` of the block.
+            let area = space.contents;
+            // `Qt::AlignTop` / `AlignBottom` / `AlignVCenter` of the block;
+            // a half-pixel centering offset rounds the baseline up.
             let mut y = match visual.valign {
-                1 => rect.y + 1,
-                2 => rect.y + rect.height - block - 1,
-                _ => rect.y + (rect.height - block) / 2,
+                1 => area.y,
+                2 => area.y + area.height - block,
+                _ => area.y + (area.height - block + 1).div_euclid(2),
+            };
+            // A framed `QLabel` indents its text by half an `x`.
+            let inset = if matches!(visual.kind, VisualKind::Label) && visual.border_px > 0 {
+                font::advance_styled("x", px, bold) / 2
+            } else {
+                space.inset
             };
             for line in lines {
                 image.text_styled(
-                    text_origin_px(visual, rect, line, px),
+                    text_origin_px(visual, area, line, px, inset),
                     y,
                     line,
                     visual.foreground,
@@ -749,10 +878,14 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         && plot_paint.y2_min.is_finite()
         && plot_paint.y2_max.is_finite();
     let scale = plot_paint.scale_color.unwrap_or(visual.foreground);
-    let layout = plot_layout(rect, plot_paint, visual.font_px);
+    // The scales and canvas are laid out inside the widget's own frame.
+    let layout = plot_layout(
+        inset_rect(rect, visual.border_px.max(0)),
+        plot_paint,
+        visual.font_px,
+    );
     let canvas = layout.canvas;
     let plot = layout.plot;
-    let axis_h = font::line_height(AXIS_PX);
     let y_ticks = layout.y_ticks;
     let y_labels = layout.y_labels;
     if let Some(fill) = plot_paint.canvas {
@@ -802,13 +935,31 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         }
     }
     if plot_paint.show_y {
+        // The left scale's ticks end on the first canvas column inside the
+        // frame and run outward: 7, 5, and 3 pixels for major, medium, and
+        // minor ticks. Labels end 12 pixels before that column.
+        let x_end = canvas.x + 2;
+        let minor = if plot_paint.log_y {
+            (Vec::new(), Vec::new())
+        } else {
+            qwt_minor_ticks(&y_ticks, nice_step(y_lo, y_hi, 8), 5, (y_lo, y_hi))
+        };
+        for (ticks, len) in [
+            (&y_ticks, TICK_LEN - 1),
+            (&minor.1, TICK_MEDIUM - 1),
+            (&minor.0, TICK_MINOR - 1),
+        ] {
+            for value in ticks {
+                let y = map_y(*value);
+                image.line(x_end - len + 1, y, x_end, y, scale);
+            }
+        }
         for (value, label) in y_ticks.iter().zip(&y_labels) {
             let y = map_y(*value);
-            image.line(canvas.x - TICK_LEN, y, canvas.x - 1, y, scale);
             let width = font::advance_current(label, AXIS_PX);
             image.text(
-                canvas.x - TICK_LEN - 2 - width,
-                y - axis_h / 2,
+                x_end - TICK_LEN - AXIS_SPACING - width,
+                y - AXIS_LINE_H / 2 - AXIS_TEXT_DY,
                 label,
                 scale,
                 AXIS_PX,
@@ -816,9 +967,17 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         }
     }
     if y2 {
+        // The ruler sticks out past the canvas frame; its scale is the
+        // vertical span of the data rectangle.
+        let ruler = Rect::new(
+            plot.x,
+            plot.y,
+            canvas.x + canvas.width - plot.x,
+            plot.height,
+        );
         paint_y2_axis(
             image,
-            plot,
+            ruler,
             plot_paint.y2_min,
             plot_paint.y2_max,
             plot_paint.log_y,
@@ -827,7 +986,24 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
         );
     }
     if plot_paint.show_x {
+        // The bottom scale's ticks start on the row below the canvas frame:
+        // 8, 6, and 4 pixels long. `PlotScaleEngine` divides each major
+        // step into at most ten minor steps.
         let y0 = canvas.y + canvas.height;
+        if !plot_paint.log_x && !plot_paint.time_x && x_hi > x_lo {
+            let step = (x_hi - x_lo) / f64::from(x_steps);
+            let majors: Vec<f64> = x_fracs
+                .iter()
+                .map(|frac| x_lo + frac * step * f64::from(x_steps))
+                .collect();
+            let (minor, medium) = qwt_minor_ticks(&majors, step, 10, (x_lo, x_hi));
+            for (ticks, len) in [(&medium, TICK_MEDIUM), (&minor, TICK_MINOR)] {
+                for value in ticks {
+                    let x = map_x((value - x_lo) / (x_hi - x_lo));
+                    image.line(x, y0, x, y0 + len - 1, scale);
+                }
+            }
+        }
         for frac in &x_fracs {
             let x = map_x(*frac);
             image.line(x, y0, x, y0 + TICK_LEN - 1, scale);
@@ -841,7 +1017,13 @@ fn paint_plot(image: &mut Image, rect: Rect, visual: &Visual, plot_paint: &PlotP
             };
             let label = axis_label(value);
             let width = font::advance_current(&label, AXIS_PX);
-            image.text(x - width / 2, y0 + TICK_LEN, &label, scale, AXIS_PX);
+            image.text(
+                x - width / 2,
+                y0 + TICK_LEN + AXIS_SPACING - AXIS_TEXT_DY,
+                &label,
+                scale,
+                AXIS_PX,
+            );
         }
     }
     for (index, samples) in plot_paint.series.iter().enumerate() {
@@ -927,7 +1109,6 @@ fn plot_layout(rect: Rect, plot_paint: &PlotPaint<'_>, font_px: i32) -> PlotLayo
         && plot_paint.y2_max.is_finite();
     let gutter = if y2 { Y2_GUTTER } else { 0 };
     let align = plot_paint.align_px.max(0);
-    let axis_h = font::line_height(AXIS_PX);
     let top = if plot_paint.title.is_empty() {
         0
     } else {
@@ -947,12 +1128,12 @@ fn plot_layout(rect: Rect, plot_paint: &PlotPaint<'_>, font_px: i32) -> PlotLayo
         .unwrap_or(0);
     let left = align
         + if plot_paint.show_y {
-            label_w + TICK_LEN + 2
+            label_w + TICK_LEN + AXIS_SPACING
         } else {
             0
         };
     let bottom = if plot_paint.show_x {
-        axis_h + TICK_LEN
+        TICK_LEN + AXIS_SPACING + AXIS_LINE_H
     } else {
         0
     };
@@ -962,11 +1143,31 @@ fn plot_layout(rect: Rect, plot_paint: &PlotPaint<'_>, font_px: i32) -> PlotLayo
         (rect.width - left - gutter).max(1),
         (rect.height - top - bottom).max(1),
     );
+    // The scales are not aligned to the canvas: a bottom scale keeps half
+    // of its widest end label clear at both ends, a left scale half a label
+    // line, measured from the canvas edge. Curves and grid share that map.
+    let interior = inset_rect(canvas, 2);
+    let x_inset = if plot_paint.show_x && !plot_paint.time_x {
+        let (x_lo, x_hi) = x_axis_span(plot_paint);
+        let widest = [x_lo, x_hi]
+            .iter()
+            .map(|value| font::advance_current(&axis_label(*value), AXIS_PX))
+            .max()
+            .unwrap_or(0);
+        (widest + 1) / 2
+    } else {
+        0
+    };
+    let y_inset = if plot_paint.show_y {
+        AXIS_LINE_H / 2
+    } else {
+        2
+    };
     let plot = Rect::new(
-        canvas.x + 3,
-        canvas.y + 3,
-        (canvas.width - 6).max(1),
-        (canvas.height - 6).max(1),
+        interior.x + x_inset,
+        canvas.y + y_inset,
+        (interior.width - 2 * x_inset).max(1),
+        (canvas.height - 2 * y_inset).max(1),
     );
     PlotLayout {
         canvas,
@@ -977,11 +1178,21 @@ fn plot_layout(rect: Rect, plot_paint: &PlotPaint<'_>, font_px: i32) -> PlotLayo
     }
 }
 
-/// The rectangle a plot widget draws its curves in: the canvas inside its
-/// frame, after the scales took their room. `None` for other widgets.
+/// The canvas of a plot widget, frame included, after the scales took
+/// their room. `None` for other widgets.
+pub fn plot_canvas(visual: &Visual) -> Option<Rect> {
+    let plot_paint = plot_paint_of(&visual.kind)?;
+    let inner = inset_rect(visual.rect, visual.border_px.max(0));
+    Some(plot_layout(inner, &plot_paint, visual.font_px).canvas)
+}
+
+/// The rectangle a plot widget maps its data to: inside the canvas frame,
+/// inset by the room the scales keep clear at their ends. `None` for other
+/// widgets.
 pub fn plot_interior(visual: &Visual) -> Option<Rect> {
     let plot_paint = plot_paint_of(&visual.kind)?;
-    Some(plot_layout(visual.rect, &plot_paint, visual.font_px).plot)
+    let inner = inset_rect(visual.rect, visual.border_px.max(0));
+    Some(plot_layout(inner, &plot_paint, visual.font_px).plot)
 }
 
 /// The Y value a pixel row of `plot_interior` shows, inverted by
@@ -1065,6 +1276,104 @@ fn nice_ticks(lo: f64, hi: f64, max_major: u32) -> Vec<f64> {
         .collect()
 }
 
+/// The major step `nice_ticks` uses.
+fn nice_step(lo: f64, hi: f64, max_major: u32) -> f64 {
+    ceil125((hi - lo) / f64::from(max_major.max(1)))
+}
+
+/// `QwtScaleArithmetic::divideInterval` in base 10.
+fn qwt_divide_interval(interval: f64, steps: i32) -> f64 {
+    if steps <= 0 {
+        return 0.0;
+    }
+    let v = interval / f64::from(steps);
+    if v == 0.0 || !v.is_finite() {
+        return 0.0;
+    }
+    let lx = v.abs().log10();
+    let p = lx.floor();
+    let fraction = 10f64.powf(lx - p);
+    let mut n = 10u32;
+    while n > 1 && fraction <= f64::from(n / 2) {
+        n /= 2;
+    }
+    let step = f64::from(n) * 10f64.powf(p);
+    if v < 0.0 {
+        -step
+    } else {
+        step
+    }
+}
+
+/// `qwtFuzzyCompare(a, b, interval) > 0`.
+fn qwt_fuzzy_greater(a: f64, b: f64, interval: f64) -> bool {
+    a - b > (1e-6 * interval).abs()
+}
+
+/// `qwtStepSize`: the minor step of `interval` with at most `max_steps`
+/// steps, or half the interval when those steps do not fit.
+fn qwt_step_size(interval: f64, max_steps: i32) -> f64 {
+    let min_step = qwt_divide_interval(interval, max_steps);
+    if min_step != 0.0 {
+        let num = (interval / min_step).abs().ceil() as i32 - 1;
+        if qwt_fuzzy_greater(
+            f64::from(num + 1) * min_step.abs(),
+            interval.abs(),
+            interval,
+        ) {
+            return 0.5 * interval;
+        }
+    }
+    min_step
+}
+
+/// `QwtLinearScaleEngine::buildMinorTicks`: `(minor, medium)` tick values
+/// after each major tick, `step` apart, inside `(lo, hi)`. An odd number of
+/// minor steps turns the middle one into a medium tick.
+fn qwt_minor_ticks(
+    majors: &[f64],
+    step: f64,
+    max_minor: i32,
+    (lo, hi): (f64, f64),
+) -> (Vec<f64>, Vec<f64>) {
+    let mut minor = Vec::new();
+    let mut medium = Vec::new();
+    if step <= 0.0 || !step.is_finite() {
+        return (minor, medium);
+    }
+    let mut min_step = qwt_step_size(step, max_minor);
+    if min_step == 0.0 {
+        return (minor, medium);
+    }
+    let mut num = (step / min_step).abs().ceil() as i32 - 1;
+    if qwt_fuzzy_greater(f64::from(num + 1) * min_step.abs(), step.abs(), step) {
+        num = 1;
+        min_step = step * 0.5;
+    }
+    let med_index = if num % 2 == 1 { num / 2 } else { -1 };
+    let eps = (hi - lo).abs() * 1e-6;
+    for major in majors.iter().take(1000) {
+        let mut value = *major;
+        for index in 0..num {
+            value += min_step;
+            let aligned = if (value + 1.0 - 1.0).abs() < eps {
+                0.0
+            } else {
+                value
+            };
+            if aligned < lo - eps || aligned > hi + eps {
+                continue;
+            }
+            if index == med_index {
+                medium.push(aligned);
+            } else {
+                minor.push(aligned);
+            }
+        }
+    }
+    (minor, medium)
+}
+
 /// `QwtScaleArithmetic::ceil125`.
 fn ceil125(value: f64) -> f64 {
     if value <= 0.0 || !value.is_finite() {
@@ -1127,14 +1436,13 @@ fn trim_decimals(text: &str) -> String {
     }
 }
 
-/// `QwtPlotCanvas` is a sunken panel two lines wide. Fusion outlines it
-/// in a light gray and draws the two inner lines dark on the top and left
-/// and light on the bottom and right.
+/// `QwtPlotCanvas` is a sunken panel two lines wide: `QwtPainter::drawFrame`
+/// paints the top and left in the palette's dark and the bottom and right
+/// in its light color (the plot palette is built from white).
 fn paint_sunken_panel(image: &mut Image, rect: Rect) {
-    let light = Color::rgb(197, 197, 197);
+    let light = Color::rgb(255, 255, 255);
     let dark = Color::rgb(127, 127, 127);
-    image.stroke_rect(rect, light);
-    for inset in 1..=2 {
+    for inset in 0..=1 {
         let band = Rect::new(
             rect.x + inset,
             rect.y + inset,
@@ -1443,6 +1751,181 @@ fn blit_rgba(image: &mut Image, rect: Rect, rgba: &[u8], width: u32, height: u32
                 Color::rgba(rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]),
             );
         }
+    }
+}
+
+/// Fraction of the unit pixel at `(px, py)` inside the box
+/// `[x0, x1] x [y0, y1]`.
+fn box_coverage(px: i32, py: i32, x0: f64, x1: f64, y0: f64, y1: f64) -> f64 {
+    let (fx, fy) = (f64::from(px), f64::from(py));
+    let w = (fx + 1.0).min(x1) - fx.max(x0);
+    let h = (fy + 1.0).min(y1) - fy.max(y0);
+    if w <= 0.0 || h <= 0.0 {
+        0.0
+    } else {
+        w * h
+    }
+}
+
+fn mix(a: Color, b: Color, t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
+    Color::rgba(
+        lerp(a.r, b.r),
+        lerp(a.g, b.g),
+        lerp(a.b, b.b),
+        lerp(a.a, b.a),
+    )
+}
+
+/// `ELed::paintEvent`: the lamp rectangle or ellipse is filled with the
+/// lamp color, or with a gradient from white through the lamp color to the
+/// border color, and outlined with an antialiased one pixel border pen.
+fn paint_led(
+    image: &mut Image,
+    widget: Rect,
+    lamp: Rect,
+    rectangular: bool,
+    gradient: Option<caqtdm_widgets::LedGradient>,
+    color: Color,
+    border: Color,
+) {
+    let white = Color::rgb(255, 255, 255);
+    let (x0, y0) = (f64::from(lamp.x), f64::from(lamp.y));
+    let (w, h) = (f64::from(lamp.width), f64::from(lamp.height));
+    let (x1, y1) = (x0 + w, y0 + h);
+    // Qt's radial gradient sits on the widget, not the lamp: it is centered
+    // and lit from a focal point up and left of the center.
+    let radius = 0.45 * w.min(h);
+    let center = (
+        f64::from(widget.x) + f64::from(widget.width) / 2.0,
+        f64::from(widget.y) + f64::from(widget.height) / 2.0,
+    );
+    let focal = (
+        f64::from(widget.x) + 0.5 * (f64::from(widget.width) - radius),
+        f64::from(widget.y) + 0.5 * (f64::from(widget.height) - radius),
+    );
+    let shade = |fx: f64, fy: f64| -> Color {
+        let Some(g) = gradient else {
+            return color;
+        };
+        let t = if g.linear {
+            // From the top left to the bottom right pixel of the lamp.
+            let (dx, dy) = (w - 1.0, h - 1.0);
+            ((fx - x0) * dx + (fy - y0) * dy) / (dx * dx + dy * dy).max(1e-9)
+        } else {
+            // The circle through the point, grown from the focal point.
+            let (dx, dy) = (center.0 - focal.0, center.1 - focal.1);
+            let (qx, qy) = (fx - focal.0, fy - focal.1);
+            let a = dx * dx + dy * dy - radius * radius;
+            let b = -2.0 * (qx * dx + qy * dy);
+            let c = qx * qx + qy * qy;
+            let disc = (b * b - 4.0 * a * c).max(0.0).sqrt();
+            if a.abs() < 1e-9 {
+                if b.abs() < 1e-9 {
+                    0.0
+                } else {
+                    -c / b
+                }
+            } else {
+                ((-b + disc) / (2.0 * a)).max((-b - disc) / (2.0 * a))
+            }
+        };
+        if t <= g.start {
+            white
+        } else if t < g.stop {
+            mix(white, color, (t - g.start) / (g.stop - g.start).max(1e-9))
+        } else if t < 1.0 {
+            mix(color, border, (t - g.stop) / (1.0 - g.stop).max(1e-9))
+        } else {
+            border
+        }
+    };
+    let (a, b) = (w / 2.0, h / 2.0);
+    let (cx, cy) = (x0 + a, y0 + b);
+    for py in lamp.y - 1..=lamp.y + lamp.height {
+        for px in lamp.x - 1..=lamp.x + lamp.width {
+            let (fx, fy) = (f64::from(px) + 0.5, f64::from(py) + 0.5);
+            let (fill, stroke) = if rectangular {
+                let outer = box_coverage(px, py, x0 - 0.5, x1 + 0.5, y0 - 0.5, y1 + 0.5);
+                let inner = box_coverage(px, py, x0 + 0.5, x1 - 0.5, y0 + 0.5, y1 - 0.5);
+                (box_coverage(px, py, x0, x1, y0, y1), outer - inner)
+            } else {
+                // Signed distance to the ellipse edge, positive outside.
+                let (ex, ey) = ((fx - cx) / a, (fy - cy) / b);
+                let e = (ex * ex + ey * ey).sqrt();
+                let d = if e < 1e-6 {
+                    -a.min(b)
+                } else {
+                    let grad = ((ex / a).powi(2) + (ey / b).powi(2)).sqrt();
+                    (e - 1.0) * e / grad.max(1e-9)
+                };
+                ((0.5 - d).clamp(0.0, 1.0), (1.0 - d.abs()).clamp(0.0, 1.0))
+            };
+            if fill > 0.0 {
+                image.cover(px, py, shade(fx, fy), (fill * 255.0).round() as u8);
+            }
+            if stroke > 0.0 {
+                image.cover(px, py, border, (stroke * 255.0).round() as u8);
+            }
+        }
+    }
+}
+
+/// A `QCheckBox` in the Fusion style: a 14 pixel indicator at the left
+/// edge, centered vertically, outlined in a light gray with a white field
+/// shaded at the top, and the text six pixels to its right.
+fn paint_check_box(image: &mut Image, rect: Rect, visual: &Visual, on: bool) {
+    const INDICATOR: i32 = 14;
+    const SPACING: i32 = 6;
+    let box_rect = Rect::new(
+        rect.x,
+        rect.y + (rect.height - INDICATOR) / 2,
+        INDICATOR,
+        INDICATOR,
+    );
+    let outline = Color::rgb(188, 188, 188);
+    image.fill_rect(box_rect, Color::rgb(255, 255, 255));
+    let inner = Rect::new(box_rect.x + 1, box_rect.y + 1, INDICATOR - 2, 1);
+    image.fill_rect(inner, Color::rgb(222, 222, 222));
+    image.stroke_rect(box_rect, outline);
+    if on {
+        // The Fusion check mark: a stroke from the lower left up to the
+        // right, inset by a seventh of the box.
+        let pad = 1 + (INDICATOR * 13) / 100;
+        let mark = Color::rgb(0, 0, 0);
+        let (x0, y0) = (box_rect.x + pad, box_rect.y + INDICATOR / 2);
+        let (x1, y1) = (
+            box_rect.x + INDICATOR / 2 - 1,
+            box_rect.y + INDICATOR - pad - 1,
+        );
+        let (x2, y2) = (box_rect.x + INDICATOR - pad - 1, box_rect.y + pad);
+        for dy in 0..2 {
+            image.line(x0, y0 + dy, x1, y1 + dy, mark);
+            image.line(x1, y1 + dy, x2, y2 + dy, mark);
+        }
+    }
+    let text = visual.text.trim_end();
+    if !text.is_empty() {
+        // `caToggleButton::calculateTextSpace` fits the font to the
+        // `SE_CheckBoxContents` rectangle right of the indicator.
+        let contents = Rect::new(
+            box_rect.x + INDICATOR + SPACING,
+            rect.y,
+            rect.width - INDICATOR - SPACING,
+            rect.height,
+        );
+        let px = font::fit_px_styled(text, contents, visual.font_fit, visual.font_px, visual.bold);
+        let line_h = font::line_height(px);
+        let y = rect.y + (rect.height - line_h + 1).div_euclid(2);
+        image.text_styled(
+            box_rect.x + INDICATOR + SPACING,
+            y,
+            text,
+            visual.foreground,
+            px,
+            visual.bold,
+        );
     }
 }
 
@@ -2290,6 +2773,7 @@ mod tests {
                     led_w: 16,
                     led_h: 16,
                     scale: true,
+                    gradient: None,
                 },
                 visible: true,
                 severity: Severity::NoAlarm,
@@ -2606,6 +3090,249 @@ mod tests {
     }
 
     #[test]
+    fn qt_font_metrics_round_to_whole_pixels() {
+        // Qt rounds a point size to a whole pixel size and FreeType rounds
+        // the ascender up and the descender down: 13.5pt is 18px with a
+        // 20 + 6 line, and fitting "Left SF" into 120x26 ends there.
+        assert_eq!(font::line_height(18), 26);
+        assert_eq!(
+            font::fit_px_styled("Left SF", Rect::new(0, 70, 120, 26), 2, 12, false),
+            18
+        );
+        // Height mode in a 60px label: 32pt, 43px, a 59px line.
+        assert_eq!(
+            font::fit_px_styled(" Big Title ", Rect::new(-12, 0, 500, 60), 1, 12, false),
+            43
+        );
+        assert_eq!(font::line_height(43), 59);
+    }
+
+    #[test]
+    fn label_baselines_land_where_qt_puts_them() {
+        let black = Color::rgb(0, 0, 0);
+        let mut centered = visual(VisualKind::Label, "Left SF", black);
+        centered.rect = Rect::new(0, 70, 120, 26);
+        centered.background = Color::rgb(255, 255, 255);
+        centered.border_px = 0;
+        centered.font_fit = 2;
+        centered.font_px = 12;
+        let mut top = centered.clone();
+        top.rect = Rect::new(130, 140, 120, 40);
+        top.text = "Top SF".into();
+        top.valign = 1;
+        let image = paint(&[centered, top]);
+        let ink_rows = |x0: i32, x1: i32, y0: i32, y1: i32| -> Vec<i32> {
+            (y0..y1)
+                .filter(|&y| (x0..x1).any(|x| image.pixel(x, y).is_some_and(|p| p.r < 100)))
+                .collect()
+        };
+        // 18px text: ascent 20 in a 26px line centered in 26 rows, so the
+        // baseline is row 90 and the last ink row 89.
+        assert_eq!(ink_rows(0, 120, 70, 96).last().copied(), Some(89));
+        // AlignTop with 28px text: baseline 170, cap height 20.
+        let rows = ink_rows(130, 250, 140, 180);
+        assert!((149..=151).contains(rows.first().unwrap()), "{rows:?}");
+        assert_eq!(rows.last().copied(), Some(176), "descender of p");
+    }
+
+    #[test]
+    fn qwt_minor_ticks_follow_the_scale_engine() {
+        // 200 per major with at most 5 minor steps: 50 wide, three ticks,
+        // the middle one medium.
+        let majors: Vec<f64> = (0..=8).map(|i| f64::from(i) * 200.0).collect();
+        let (minor, medium) = qwt_minor_ticks(&majors, 200.0, 5, (0.0, 1600.0));
+        assert_eq!(medium[..3], [100.0, 300.0, 500.0]);
+        assert_eq!(minor[..4], [50.0, 150.0, 250.0, 350.0]);
+        assert_eq!(medium.len(), 8);
+        assert_eq!(minor.len(), 16);
+        // `PlotScaleEngine`: 1000/12 per major with up to ten minor steps
+        // of 10 does not fit, so one medium tick halves each major step.
+        let step = 1000.0 / 12.0;
+        let majors: Vec<f64> = (0..=12).map(|i| f64::from(i) * step).collect();
+        let (minor, medium) = qwt_minor_ticks(&majors, step, 10, (0.0, 1000.0));
+        assert!(minor.is_empty());
+        assert_eq!(medium.len(), 12);
+        assert!((medium[0] - step / 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn led_gradient_shades_to_the_border_and_its_pen_is_antialiased() {
+        let white = Color::rgb(255, 255, 255);
+        let mut led = visual(
+            VisualKind::Led {
+                on: true,
+                rectangular: true,
+                led_w: 22,
+                led_h: 22,
+                scale: false,
+                gradient: Some(caqtdm_widgets::LedGradient {
+                    linear: true,
+                    start: 0.10,
+                    stop: 0.95,
+                }),
+            },
+            "",
+            white,
+        );
+        led.class_name = "caLed".into();
+        led.rect = Rect::new(10, 10, 24, 24);
+        led.background = Color::rgb(230, 230, 230);
+        led.border_px = 0;
+        let image = paint(&[led]);
+        // The lamp is 22x22 at (11, 11): white in the middle, black at the
+        // far corner of the diagonal gradient.
+        assert_eq!(image.pixel(22, 22).unwrap(), white);
+        let corner = image.pixel(31, 31).unwrap();
+        assert!(corner.r < 140, "gradient end {corner:?}");
+        let start = image.pixel(13, 13).unwrap();
+        assert!(start.r > 240, "gradient start {start:?}");
+        // The one pixel pen straddles the lamp edge: half black on both the
+        // panel pixel outside and the lamp pixel inside.
+        let outside = image.pixel(10, 22).unwrap();
+        let inside = image.pixel(11, 22).unwrap();
+        assert!((100..=130).contains(&outside.r), "outer ring {outside:?}");
+        assert!((110..=140).contains(&inside.r), "inner ring {inside:?}");
+    }
+
+    #[test]
+    fn check_box_draws_a_fusion_indicator_and_fitted_text() {
+        let mut toggle = visual(VisualKind::Toggle { on: false }, "Tog", Color::rgb(0, 0, 0));
+        toggle.class_name = "caToggleButton".into();
+        toggle.rect = Rect::new(20, 140, 100, 24);
+        toggle.background = Color::rgb(255, 255, 255);
+        toggle.border_px = 0;
+        toggle.font_fit = 2;
+        toggle.font_px = 12;
+        let image = paint(&[toggle]);
+        // 14px indicator at the left edge, centered: outline, then field.
+        assert_eq!(image.pixel(20, 152).unwrap(), Color::rgb(188, 188, 188));
+        assert_eq!(image.pixel(33, 152).unwrap(), Color::rgb(188, 188, 188));
+        assert_eq!(image.pixel(27, 152).unwrap(), Color::rgb(255, 255, 255));
+        // The text starts six pixels right of the indicator and is fitted
+        // to the 24px height: 16px glyphs, so "T" is taller than 10 rows.
+        let ink: Vec<(i32, i32)> = (140..164)
+            .flat_map(|y| (20..120).map(move |x| (x, y)))
+            .filter(|&(x, y)| image.pixel(x, y).is_some_and(|p| p.r < 100))
+            .collect();
+        let min_x = ink.iter().map(|p| p.0).min().unwrap();
+        let rows = ink.iter().map(|p| p.1).max().unwrap() - ink.iter().map(|p| p.1).min().unwrap();
+        assert!(min_x >= 40, "text starts at {min_x}");
+        assert!(rows >= 10, "text spans {rows} rows");
+    }
+
+    #[test]
+    fn framed_label_fits_its_text_inside_twice_the_border() {
+        // `ESimpleLabel::calculateTextSpace` takes the frame off twice, so a
+        // 1px border shrinks the fit box by 4 and the text by a size step.
+        let black = Color::rgb(0, 0, 0);
+        let mut plain = visual(VisualKind::Label, "ABCDEF01-GHIJ234 K5", black);
+        plain.rect = Rect::new(0, 0, 170, 22);
+        plain.background = Color::rgb(230, 230, 230);
+        plain.border_px = 0;
+        plain.font_fit = 2;
+        plain.font_px = 12;
+        plain.align = 2;
+        let mut framed = plain.clone();
+        framed.rect = Rect::new(0, 30, 170, 22);
+        framed.border_px = 1;
+        framed.border = Some(black);
+        let image = paint(&[plain, framed]);
+        let ink = |y0: i32, x0: i32| -> (i32, i32) {
+            let cells: Vec<(i32, i32)> = (y0 + 2..y0 + 20)
+                .flat_map(|y| (x0..168).map(move |x| (x, y)))
+                .filter(|&(x, y)| image.pixel(x, y).is_some_and(|p| p.r < 100))
+                .collect();
+            (
+                cells.iter().map(|p| p.0).max().unwrap() - cells.iter().map(|p| p.0).min().unwrap(),
+                cells.iter().map(|p| p.1).max().unwrap() - cells.iter().map(|p| p.1).min().unwrap(),
+            )
+        };
+        let (plain_w, plain_h) = ink(0, 2);
+        let (framed_w, framed_h) = ink(30, 2);
+        assert!(framed_w < plain_w - 10, "{framed_w} vs {plain_w}");
+        assert!(framed_h < plain_h, "{framed_h} vs {plain_h}");
+        // The frame itself, and the half-x indent keeps the text off it.
+        assert_eq!(image.pixel(0, 40).unwrap(), black);
+        assert_eq!(image.pixel(169, 40).unwrap(), black);
+        assert_ne!(image.pixel(168, 40).unwrap(), black);
+    }
+
+    #[test]
+    fn plot_frame_canvas_and_ticks_match_qwt() {
+        let mut plot = series_plot(
+            vec![vec![0.0, 0.0]],
+            (0.0, 1600.0),
+            (f64::NAN, f64::NAN),
+            false,
+        );
+        plot.rect = Rect::new(10, 10, 300, 200);
+        plot.border_px = 1;
+        plot.border = Some(Color::rgb(197, 197, 197));
+        plot.background = Color::rgb(230, 230, 230);
+        if let VisualKind::Plot {
+            x_max,
+            x_limits,
+            x_ticks,
+            scale_color,
+            grid,
+            ..
+        } = &mut plot.kind
+        {
+            *x_max = 1000.0;
+            *x_limits = Some((0.0, 1000.0));
+            *x_ticks = 12;
+            *scale_color = Some(Color::rgb(0, 0, 0));
+            *grid = false;
+        }
+        let canvas = plot_canvas(&plot).unwrap();
+        let inner = plot_interior(&plot).unwrap();
+        let image = paint(&[plot]);
+        let gray = Color::rgb(197, 197, 197);
+        // StyledPanel ring on the widget edge; sunken canvas frame: dark on
+        // the top and left, white on the bottom and right.
+        assert_eq!(image.pixel(10, 100).unwrap(), gray);
+        assert_eq!(image.pixel(150, 10).unwrap(), gray);
+        let dark = Color::rgb(127, 127, 127);
+        let white = Color::rgb(255, 255, 255);
+        assert_eq!(image.pixel(canvas.x, 100).unwrap(), dark);
+        assert_eq!(
+            image.pixel(canvas.x + canvas.width - 1, 100).unwrap(),
+            white
+        );
+        assert_eq!(image.pixel(150, canvas.y).unwrap(), dark);
+        assert_eq!(
+            image.pixel(150, canvas.y + canvas.height - 1).unwrap(),
+            white
+        );
+        // The data rectangle keeps half a label line clear at the top:
+        // the 1600 major tick is 6 rows below the canvas top and runs 7
+        // pixels across the frame; the 1550 minor tick only 3.
+        assert_eq!(inner.y, canvas.y + 6);
+        let black = Color::rgb(0, 0, 0);
+        let top = plot_value_y(inner, 1600.0, 0.0, 1600.0);
+        assert_eq!(image.pixel(canvas.x + 2, top).unwrap(), black);
+        assert_eq!(image.pixel(canvas.x - 4, top).unwrap(), black);
+        assert_ne!(image.pixel(canvas.x - 5, top).unwrap(), black);
+        let minor = plot_value_y(inner, 1550.0, 0.0, 1600.0);
+        let minor_row = (minor - 1..=minor + 1)
+            .find(|&y| image.pixel(canvas.x, y) == Some(black))
+            .expect("minor tick crosses the frame");
+        assert_ne!(image.pixel(canvas.x - 1, minor_row).unwrap(), black);
+        // One medium tick halves each X major step, six rows under the
+        // canvas; a major tick runs eight.
+        let bottom = canvas.y + canvas.height;
+        let first = inner.x;
+        let step = f64::from(inner.width - 1) / 12.0;
+        let mid = first + (step / 2.0).round() as i32;
+        assert_eq!(image.pixel(first, bottom + 7).unwrap(), black);
+        assert_eq!(image.pixel(mid, bottom + 5).unwrap(), black);
+        assert_ne!(image.pixel(mid, bottom + 7).unwrap(), black);
+        // The X scale is inset by half the widest end label ("1000").
+        let half = (font::advance_current("1000", AXIS_PX) + 1) / 2;
+        assert_eq!(inner.x, canvas.x + 2 + half);
+    }
+
+    #[test]
     fn log_scale_lifts_the_middle_decade() {
         // Value 10 of 1..100 is near the bottom on a linear axis and at mid
         // scale on log10.
@@ -2649,15 +3376,21 @@ mod tests {
             .pixel(x, plot_value_y(inner, 500.0, 0.0, 1000.0))
             .unwrap();
         assert!(right.r > 200 && right.b < 100, "second axis {right:?}");
-        // Right-hand ruler: ticks stick out past the canvas frame.
+        // Right-hand ruler: ticks stick out past the canvas frame, which
+        // itself lies a few pixels right of the data rectangle.
         let edge = inner.x + inner.width - 1;
-        let tick = image.pixel(edge + 5, inner.y).unwrap();
-        assert!(tick.b > 150, "top tick of the second scale");
-        let gap = image.pixel(edge + 5, inner.y + 4).unwrap();
+        let tick_x = (edge + 1..edge + 16)
+            .find(|&x| {
+                image
+                    .pixel(x, inner.y)
+                    .is_some_and(|p| p.b > 150 && p.r < 80)
+            })
+            .expect("top tick of the second scale");
+        let gap = image.pixel(tick_x + 4, inner.y + 4).unwrap();
         assert!(gap.b < 40, "gap between right-hand ticks");
         let mut labeled = false;
         for y in inner.y - 8..inner.y + 12 {
-            for x in edge + 7..80 {
+            for x in tick_x + 6..80 {
                 if let Some(pixel) = image.pixel(x, y) {
                     if pixel.b > 150 {
                         labeled = true;

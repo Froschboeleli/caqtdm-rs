@@ -46,6 +46,16 @@ pub struct CssBox {
     pub margin_top: i32,
 }
 
+/// The `ELed` lamp shading: white at `start`, the lamp color at `stop`,
+/// and the border color at the end. A linear gradient runs from the top
+/// left to the bottom right corner; a radial one is lit off center.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LedGradient {
+    pub linear: bool,
+    pub start: f64,
+    pub stop: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum VisualKind {
@@ -82,6 +92,7 @@ pub enum VisualKind {
         led_w: i32,
         led_h: i32,
         scale: bool,
+        gradient: Option<LedGradient>,
     },
     Shape {
         form: ShapeForm,

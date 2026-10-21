@@ -60,6 +60,7 @@ pub fn designer_kind(class_name: &str) -> Option<VisualKind> {
             led_w: 18,
             led_h: 18,
             scale: false,
+            gradient: None,
         },
         DesignerKind::Frame => VisualKind::Frame,
         DesignerKind::Gauge => VisualKind::Gauge {

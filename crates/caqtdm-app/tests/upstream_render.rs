@@ -52,9 +52,15 @@ fn upstream_edm_graphics_paint_matches_the_file() {
     let mut session = Session::open(display.root, Hub::new("epics3"), &MacroMap::new());
     session.tick(0);
     let image = paint(&session.visuals());
-    // Rectangle at (85, 358), outline, lineColor index 14 (black).
+    // Rectangle at (85, 358), outline, lineColor index 14 (black). The
+    // one pixel antialiased pen straddles the widget edge, so the outer
+    // pixel is black at half coverage over the display background.
     let border = image.pixel(85, 358).unwrap();
-    assert_eq!((border.r, border.g, border.b), (0, 0, 0));
+    let inside = image.pixel(120, 400).unwrap();
+    assert!(
+        border.r < inside.r / 2 + 10,
+        "outline {border:?} over {inside:?}"
+    );
     // The widget interior is the display background, not a filled rectangle.
     let inside = image.pixel(120, 400).unwrap();
     assert_ne!((inside.r, inside.g, inside.b), (0, 0, 0));

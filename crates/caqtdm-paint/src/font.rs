@@ -101,15 +101,7 @@ pub fn draw_styled(
         let faces = face.borrow();
         let (font, synth) = faces.pick(bold);
         let extra = if synth { embolden_px(px) } else { 0 };
-        let line = font
-            .horizontal_line_metrics(px)
-            .unwrap_or(fontdue::LineMetrics {
-                ascent: px * 0.8,
-                descent: -px * 0.2,
-                line_gap: 0.0,
-                new_line_size: px,
-            });
-        let baseline = y + line.ascent.round() as i32;
+        let baseline = y + qt_metrics(font, px).ascent;
         let mut cursor = x as f32;
         for ch in text.chars().take(80) {
             let chosen = face_for(Some(font), ch);
@@ -264,33 +256,75 @@ fn is_noto(name: &str) -> bool {
     )
 }
 
-/// Line spacing of the current face at `px`, the `QFontMetricsF::lineSpacing`
-/// the fit loops compare against.
-pub fn line_height(px: i32) -> i32 {
-    let px = (px.max(6) as f32).min(72.0);
-    FACE.with(|face| line_spacing(&face.borrow().regular, px).round() as i32)
+/// The whole-pixel vertical metrics Qt reads back from FreeType for a
+/// scalable face: the ascender is rounded up, the descender down, and the
+/// line height to the nearest pixel (`GRID_FIT_METRICS`). Qt itself rounds
+/// a point size to a whole pixel size before asking, so `px` is integral.
+struct QtMetrics {
+    ascent: i32,
+    descent: i32,
+    /// `QFontMetricsF::lineSpacing`, the hhea height.
+    spacing: i32,
 }
 
-fn line_spacing(font: &Font, px: f32) -> f32 {
-    font.horizontal_line_metrics(px)
-        .map(|line| line.new_line_size)
-        .unwrap_or(px * 1.2)
+fn qt_metrics(font: &Font, px: f32) -> QtMetrics {
+    let px = px.max(1.0);
+    let line = font
+        .horizontal_line_metrics(px)
+        .unwrap_or(fontdue::LineMetrics {
+            ascent: px * 0.8,
+            descent: -px * 0.2,
+            line_gap: 0.0,
+            new_line_size: px,
+        });
+    QtMetrics {
+        ascent: line.ascent.ceil() as i32,
+        descent: (-line.descent).ceil() as i32,
+        spacing: line.new_line_size.round() as i32,
+    }
+}
+
+/// Height of one laid-out line of the current face at `px`: ascent plus
+/// descent, the `QTextLine::height` a label stacks and centers.
+pub fn line_height(px: i32) -> i32 {
+    let px = (px.max(6) as f32).min(72.0);
+    FACE.with(|face| {
+        let metrics = qt_metrics(&face.borrow().regular, px);
+        metrics.ascent + metrics.descent
+    })
 }
 
 /// `FontScalingWidget::calculateFontPointSizeF`. Mode 1 steps the point
-/// size by 0.5 until the line spacing fits `height - 2`. Mode 2 then shrinks
-/// it while the text is wider than `width - 4`. Mode 0 keeps `base_px`.
-/// The result is in pixels at 96 dpi (one point is 4/3 pixel). `bold`
-/// measures with the bold face.
+/// size by 0.5 until the line spacing fits `height - 2`, unless the font's
+/// `height()` already equals that or one more. Mode 2 then shrinks it while
+/// the text is wider than `width - 4`. Mode 0 keeps `base_px`. Each point
+/// size is measured at the whole pixel size Qt rounds it to (96 dpi, one
+/// point is 4/3 pixel) and the result is that pixel size. `bold` measures
+/// with the bold face.
 pub fn fit_px_styled(text: &str, rect: Rect, mode: u8, base_px: i32, bold: bool) -> i32 {
+    fit_px_bordered(text, rect, mode, base_px, bold, 2, 2)
+}
+
+/// `fit_px_styled` with the widget's own `lateralBorderWidth` (taken off
+/// both sides of the width) and `botTopBorderWidth` (taken off the height
+/// once): a `caLineEdit` sets both to its frame line width plus one.
+pub fn fit_px_bordered(
+    text: &str,
+    rect: Rect,
+    mode: u8,
+    base_px: i32,
+    bold: bool,
+    lateral: i32,
+    bot_top: i32,
+) -> i32 {
     if mode == 0 || text.is_empty() {
         return base_px;
     }
     const MIN_PT: f32 = 4.0;
-    let to_px = |pt: f32| pt * 4.0 / 3.0;
-    let lines = text.lines().count().max(1) as f32;
-    let border_h = (rect.height - 2) as f32;
-    let border_w = (rect.width - 4) as f32;
+    let to_px = |pt: f32| (pt * 4.0 / 3.0).round();
+    let lines = text.lines().count().max(1) as i32;
+    let border_h = rect.height - bot_top;
+    let border_w = (rect.width - 2 * lateral) as f32;
     let longest = text
         .lines()
         .max_by_key(|line| line.chars().count())
@@ -299,19 +333,24 @@ pub fn fit_px_styled(text: &str, rect: Rect, mode: u8, base_px: i32, bold: bool)
         let faces = face.borrow();
         let (font, synth) = faces.pick(bold);
         let mut pt = (base_px as f32 * 0.75).max(MIN_PT);
-        let height = |pt: f32| lines * line_spacing(font, to_px(pt));
-        let mut guard = 0;
-        while height(pt) > border_h && pt > MIN_PT && guard < 1000 {
-            pt -= 0.5;
-            guard += 1;
-        }
-        guard = 0;
-        while height(pt) < border_h && guard < 1000 {
-            pt += 0.5;
-            guard += 1;
+        let base = qt_metrics(font, base_px as f32);
+        let height = |pt: f32| lines * qt_metrics(font, to_px(pt)).spacing;
+        let keeps_height =
+            lines == 1 && [border_h, border_h + 1].contains(&(base.ascent + base.descent));
+        if !keeps_height {
+            let mut guard = 0;
+            while height(pt) > border_h && pt > MIN_PT && guard < 1000 {
+                pt -= 0.5;
+                guard += 1;
+            }
+            guard = 0;
+            while height(pt) < border_h && guard < 1000 {
+                pt += 0.5;
+                guard += 1;
+            }
         }
         if mode == 2 {
-            guard = 0;
+            let mut guard = 0;
             while advance(
                 font,
                 to_px(pt),
@@ -325,7 +364,7 @@ pub fn fit_px_styled(text: &str, rect: Rect, mode: u8, base_px: i32, bold: bool)
                 guard += 1;
             }
         }
-        to_px(pt.max(MIN_PT)).round() as i32
+        to_px(pt.max(MIN_PT)) as i32
     })
 }
 
@@ -365,11 +404,7 @@ pub fn draw_rotated_styled(
         let faces = face.borrow();
         let (font, synth) = faces.pick(bold);
         let extra = if synth { embolden_px(px_f) } else { 0 };
-        let ascent = font
-            .horizontal_line_metrics(px_f)
-            .map(|line| line.ascent)
-            .unwrap_or(px_f * 0.8)
-            .round() as i32;
+        let ascent = qt_metrics(font, px_f).ascent;
         let mut cursor = 0.0_f32;
         for ch in text.chars().take(80) {
             let chosen = face_for(Some(font), ch);

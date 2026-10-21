@@ -142,8 +142,8 @@ fn each_widget_honors_the_properties_an_author_sets() {
 
     root.children.extend([
         numeric, apply, slider, menu, choice, text, button, toggle, led, gauge, dial, thermo,
-        meter, hex, lines, label, frame, shape, outline, poly, clock, bits, byte, table, wave, calc, fall,
-        scan, draw, tree, log, plot, strip, shell, script, mime, rowcol, cam,
+        meter, hex, lines, label, frame, shape, outline, poly, clock, bits, byte, table, wave,
+        calc, fall, scan, draw, tree, log, plot, strip, shell, script, mime, rowcol, cam,
     ]);
 
     let mut hub = Hub::new("epics3");
@@ -395,4 +395,108 @@ fn each_widget_honors_the_properties_an_author_sets() {
         .log
         .iter()
         .any(|line| line.contains("put intern://N = 7.5")));
+}
+
+#[test]
+fn constructor_defaults_decide_alignment_frames_and_lamps() {
+    let intern = InternSource::new();
+    intern.insert("V", ChannelData::scalar(1.0));
+    let mut root = WidgetNode::new("QWidget", "root");
+    root.rect = Rect::new(0, 0, 400, 300);
+
+    // `ESimpleLabel` starts right aligned, `caLabelVertical` centered, and
+    // Designer omits what the constructor already set.
+    let dflt = leaf("caLabel", "dflt", "");
+    let mut left = leaf("caLabel", "left", "");
+    left.set_prop(
+        "alignment",
+        PropValue::Set("Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter".into()),
+    );
+    let vertical = leaf("caLabelVertical", "vertical", "");
+    // `caLabel::setBorderWidth` styles a black border unless a color is set.
+    let mut framed = leaf("caLabel", "framed", "");
+    framed.set_prop("borderWidth", PropValue::Number(1));
+    let mut tinted = leaf("caLabel", "tinted", "");
+    tinted.set_prop("borderWidth", PropValue::Number(3));
+    tinted.set_prop(
+        "borderColor",
+        PropValue::Color(caqtdm_core::Color::rgb(200, 0, 0)),
+    );
+    // `caLineEdit::setFrame(false)` zeroes the line width: only
+    // `framePresent` shows the frame, in `frameColor` (black by default).
+    let mut edit = leaf("caLineEdit", "edit", "intern://V");
+    edit.set_prop("frameLineWidth", PropValue::Number(2));
+    let mut boxed = leaf("caLineEdit", "boxed", "intern://V");
+    boxed.set_prop("framePresent", PropValue::Bool(true));
+    boxed.set_prop("frameLineWidth", PropValue::Number(2));
+    // A check box: palette `Base` background, no frame, fitted text.
+    let mut toggle = leaf("caToggleButton", "toggle", "intern://V");
+    toggle.set_prop("text", PropValue::String("Tog".into()));
+    // `ELed` lamps keep their gradient settings.
+    let mut lamp = leaf("caLed", "lamp", "intern://V");
+    lamp.set_prop("linearGradient", PropValue::Bool(true));
+    lamp.set_prop("gradientStart", PropValue::Double(0.2));
+    let mut flat = leaf("caLed", "flat", "intern://V");
+    flat.set_prop("gradientEnabled", PropValue::Bool(false));
+    // A Qwt plot starts without a frame; Fusion outlines a `StyledPanel`
+    // with one light line whatever the line width says.
+    let mut plain = leaf("caCartesianPlot", "plain", "");
+    plain.set_prop(
+        "channels_1",
+        PropValue::String("intern://V;intern://V".into()),
+    );
+    let mut styled = leaf("caCartesianPlot", "styled", "");
+    styled.set_prop(
+        "channels_1",
+        PropValue::String("intern://V;intern://V".into()),
+    );
+    styled.set_prop("frameShape", PropValue::Enum("QFrame::StyledPanel".into()));
+    styled.set_prop("lineWidth", PropValue::Number(0));
+    root.children.extend([
+        dflt, left, vertical, framed, tinted, edit, boxed, toggle, lamp, flat, plain, styled,
+    ]);
+
+    let mut hub = Hub::new("epics3");
+    hub.register(Box::new(intern.clone()));
+    let mut session = Session::open(root, hub, &caqtdm_core::MacroMap::new());
+    session.tick(1_000);
+    let visuals = session.visuals();
+    let by = |name: &str| visuals.iter().find(|v| v.name == name).unwrap().clone();
+
+    assert_eq!(by("dflt").align, 2);
+    assert_eq!(by("left").align, 0);
+    assert_eq!(by("vertical").align, 1);
+    assert_eq!(by("framed").border_px, 1);
+    assert_eq!(by("framed").border, Some(caqtdm_core::Color::rgb(0, 0, 0)));
+    assert_eq!(by("tinted").border_px, 3);
+    assert_eq!(
+        by("tinted").border,
+        Some(caqtdm_core::Color::rgb(200, 0, 0))
+    );
+    assert_eq!(by("edit").border_px, 0);
+    assert_eq!(by("boxed").border_px, 2);
+    assert_eq!(by("boxed").border, Some(caqtdm_core::Color::rgb(0, 0, 0)));
+    let toggle = by("toggle");
+    assert_eq!(toggle.background, caqtdm_core::Color::rgb(255, 255, 255));
+    assert_eq!(toggle.border_px, 0);
+    assert_eq!(toggle.font_fit, 2);
+    match by("lamp").kind {
+        VisualKind::Led { gradient, .. } => {
+            let gradient = gradient.unwrap();
+            assert!(gradient.linear);
+            assert!((gradient.start - 0.2).abs() < 1e-9);
+            assert!((gradient.stop - 0.95).abs() < 1e-9);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        by("flat").kind,
+        VisualKind::Led { gradient: None, .. }
+    ));
+    assert_eq!(by("plain").border_px, 0);
+    assert_eq!(by("styled").border_px, 1);
+    assert_eq!(
+        by("styled").border,
+        Some(caqtdm_core::Color::rgb(197, 197, 197))
+    );
 }

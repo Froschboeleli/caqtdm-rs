@@ -16,7 +16,7 @@ use crate::curves::{parse_curve, strip_timing, CurveKind, CurveSlot, PlotMode};
 
 use crate::visual::{
     qt_global_color, Action, ColorMap, CssBox, CurveStyle, CurveSymbol, Effect, GridCell,
-    ShapeForm, ThermoBand, TreeRow, Visual, VisualKind,
+    LedGradient, ShapeForm, ThermoBand, TreeRow, Visual, VisualKind,
 };
 
 const HISTORY: usize = 240;
@@ -580,6 +580,20 @@ impl Session {
             // default) and fills with `foreground`.
             border = prop_color(node, "lineColor").or(Some(Color::rgb(0, 0, 0)));
         }
+        // `caLabel` styles `border: Npx solid borderColor`, black unless set;
+        // `caLineEdit` frames itself in `frameColor`, black by default.
+        if border.is_none()
+            && matches!(
+                node.class_name.as_str(),
+                "caLabel" | "caLabelVertical" | "caLineEdit" | "caTextEntry"
+            )
+        {
+            border = Some(Color::rgb(0, 0, 0));
+        }
+        // Fusion outlines a `StyledPanel` plot frame in one light gray line.
+        if is_plot(node) && border_px_of(node) > 0 {
+            border = Some(Color::rgb(197, 197, 197));
+        }
         // `SetColorsNotConnected` paints a widget whose channel never
         // connected with `AL_WHITE`. Which parts go white is per class.
         if data.is_some_and(|d| !d.connected) && has_monitor(node) {
@@ -691,6 +705,11 @@ impl Session {
                     led_w,
                     led_h,
                     scale: node.prop_bool("scaleContents").unwrap_or(false),
+                    gradient: gradient.then(|| LedGradient {
+                        linear: node.prop_bool("linearGradient").unwrap_or(false),
+                        start: node.prop_f64("gradientStart").unwrap_or(0.10),
+                        stop: node.prop_f64("gradientStop").unwrap_or(0.95),
+                    }),
                 }
             }
             "caGraphics" => VisualKind::Shape {
@@ -1830,6 +1849,10 @@ fn class_colors(node: &WidgetNode, is_root: bool) -> (Color, Color) {
         "caLineEdit" | "caTextEntry" | "QLineEdit" => {
             (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255))
         }
+        // `caToggleButton` styles itself with the palette `Base` and `Text`
+        // colors once shown; a plain check box paints no background.
+        "caToggleButton" => (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255)),
+        "QCheckBox" | "QRadioButton" => (Color::rgb(0, 0, 0), Color::transparent()),
         "QWidget" | "QFrame" | "QMainWindow" | "QDialog" | "QTabWidget" | "QStackedWidget"
         | "caDoubleTabWidget" => {
             let bg = if is_root || node.prop_bool("autoFillBackground") == Some(true) {
@@ -1959,7 +1982,13 @@ fn scaled_fraction(node: &WidgetNode, value: f64, min: f64, max: f64) -> f64 {
 /// own `Left`, `Center`, and `Right` names.
 fn align_of(node: &WidgetNode) -> i8 {
     let raw = node.prop_str("alignment").unwrap_or("");
-    let mut out = 0;
+    // Designer omits the constructor value: `ESimpleLabel` starts right
+    // aligned, `caLabelVertical` centered, `QLabel` and line edits left.
+    let mut out = match node.class_name.as_str() {
+        "caLabel" => 2,
+        "caLabelVertical" => 1,
+        _ => 0,
+    };
     for flag in raw.split('|') {
         let flag = flag
             .trim()
@@ -2048,9 +2077,8 @@ fn font_fit_of(node: &WidgetNode) -> u8 {
     let mode = node
         .enum_tail("fontScaleMode")
         .unwrap_or(match node.class_name.as_str() {
-            "caLabel" | "caLabelVertical" | "caCalc" | "caLineEdit" | "caTextEntry" => {
-                "WidthAndHeight"
-            }
+            "caLabel" | "caLabelVertical" | "caCalc" | "caLineEdit" | "caTextEntry"
+            | "caToggleButton" => "WidthAndHeight",
             _ => "None",
         });
     match mode.to_ascii_lowercase().as_str() {
@@ -2146,12 +2174,30 @@ fn tab_labels(node: &WidgetNode) -> Vec<String> {
     labels
 }
 
+fn is_plot(node: &WidgetNode) -> bool {
+    matches!(node.class_name.as_str(), "caCartesianPlot" | "caStripPlot")
+}
+
 fn border_px_of(node: &WidgetNode) -> i32 {
+    // `caLineEdit::setFrame(false)` zeroes the line width: the frame shows
+    // only with `framePresent`.
+    if matches!(node.class_name.as_str(), "caLineEdit" | "caTextEntry") {
+        if node.prop_bool("framePresent") != Some(true) {
+            return 0;
+        }
+        return node
+            .prop_f64("frameLineWidth")
+            .map_or(0, |width| width.max(0.0) as i32);
+    }
     // A `QFrame` (caFrame, caLabel, caInclude, ...) draws its frame only
-    // for a `frameShape` other than `NoFrame`, `lineWidth` thick.
+    // for a `frameShape` other than `NoFrame`, `lineWidth` thick. Fusion
+    // outlines a `StyledPanel` with one line whatever the line width.
     if let Some(shape) = node.enum_tail("frameShape") {
         if shape.eq_ignore_ascii_case("NoFrame") {
             return 0;
+        }
+        if shape.eq_ignore_ascii_case("StyledPanel") {
+            return 1;
         }
         return node
             .prop_f64("lineWidth")
@@ -2170,8 +2216,13 @@ fn border_px_of(node: &WidgetNode) -> i32 {
         "caSlider" | "caThermo" | "caMeter" | "caChoice" => 1,
         // The shape strokes its own outline `lineSize` wide; a polyline
         // has no outline around its rectangle at all.
-        "caGraphics" => node.prop_f64("lineSize").map_or(1, |size| size.max(0.0) as i32),
+        "caGraphics" => node
+            .prop_f64("lineSize")
+            .map_or(1, |size| size.max(0.0) as i32),
         "caPolyLine" => 0,
+        // A check box has an indicator, not a frame; a Qwt plot starts
+        // with `NoFrame`.
+        "caToggleButton" | "QCheckBox" | "QRadioButton" | "caCartesianPlot" | "caStripPlot" => 0,
         "caFrame" | "caLabel" | "caLabelVertical" | "QLabel" | "QWidget" | "QFrame"
         | "QMainWindow" | "QDialog" | "QTabWidget" | "QStackedWidget" | "caDoubleTabWidget"
         | "caInclude" | "QMenuBar" | "QMenu" | "QStatusBar" | "QToolBar" => 0,

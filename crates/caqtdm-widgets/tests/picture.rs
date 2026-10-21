@@ -1,6 +1,6 @@
 use caqtdm_core::{ChannelData, Color, PropValue, PvValue, Rect};
 use caqtdm_datasource::{Hub, InternSource};
-use caqtdm_paint::{paint, plot_interior, plot_sample_x, plot_value_y};
+use caqtdm_paint::{paint, plot_canvas, plot_interior, plot_sample_x, plot_value_y};
 use caqtdm_ui::WidgetNode;
 use caqtdm_widgets::{Action, Session, VisualKind};
 
@@ -311,7 +311,11 @@ fn grid_row(inner: Rect, value: f64, lo: f64, hi: f64) -> i32 {
     inner.y + inner.height - 1 - (frac * f64::from(inner.height - 1)).round() as i32
 }
 
-fn plot_with(style: &str, grid: bool, show_x: bool) -> Plotted {
+fn plot_with(
+    style: &str,
+    grid: bool,
+    show_x: bool,
+) -> (caqtdm_paint::Image, Rect, caqtdm_widgets::Visual) {
     let intern = InternSource::new();
     intern.insert("A", ChannelData::scalar(5.0));
     let mut plot = WidgetNode::new("caCartesianPlot", "plot");
@@ -332,14 +336,14 @@ fn plot_with(style: &str, grid: bool, show_x: bool) -> Plotted {
         .find(|v| v.name == "plot")
         .unwrap();
     let inner = plot_interior(&drawn).unwrap();
-    (paint(&[drawn]), inner)
+    (paint(std::slice::from_ref(&drawn)), inner, drawn)
 }
 
 #[test]
 fn curve_style_grid_and_x_axis_change_the_plot() {
-    let (lines, inner) = plot_with("Lines", true, true);
-    let (dots, _) = plot_with("Dots", true, true);
-    let (none, bare) = plot_with("NoCurve", false, false);
+    let (lines, inner, _) = plot_with("Lines", true, true);
+    let (dots, _, _) = plot_with("Dots", true, true);
+    let (none, bare, _) = plot_with("NoCurve", false, false);
     let mid = inner.x + inner.width / 2;
     let y5 = plot_value_y(inner, 5.0, 0.0, 10.0);
     assert!(
@@ -374,7 +378,10 @@ fn curve_style_grid_and_x_axis_change_the_plot() {
         gap.r < 20 && gap.g < 20,
         "DashLine turns the fifth pixel off, got {gap:?}"
     );
-    let tick = (inner.x, inner.y + inner.height + 3);
+    // The first major tick sits under the data rectangle's left edge, just
+    // below the canvas frame.
+    let canvas = plot_canvas(&plot_with("Lines", true, true).2).unwrap();
+    let tick = (inner.x, canvas.y + canvas.height + 3);
     assert_ne!(
         lines.pixel(tick.0, tick.1).unwrap(),
         none.pixel(tick.0, tick.1).unwrap(),
@@ -884,17 +891,21 @@ fn omitted_plot_colors_follow_the_constructor() {
         other => panic!("{other:?}"),
     }
     let inner = plot_interior(&cartesian).unwrap();
+    let cartesian_again = cartesian.clone();
     let image = paint(&[cartesian]);
+    // Sampled off the mid-scale grid line.
     assert_eq!(
         image
-            .pixel(inner.x + inner.width / 2, inner.y + inner.height / 2)
+            .pixel(inner.x + inner.width / 2, inner.y + inner.height / 2 + 3)
             .unwrap(),
         Color::rgb(255, 255, 255),
         "canvas shows the widget fill"
     );
+    // Left of the canvas frame, on a row no major tick reaches.
+    let canvas = plot_canvas(&cartesian_again).unwrap();
     assert_eq!(
         image
-            .pixel(inner.x - 4, inner.y + inner.height / 2)
+            .pixel(canvas.x - 4, inner.y + inner.height / 2 + 3)
             .unwrap(),
         Color::rgb(255, 255, 255),
         "scale well between two ticks"

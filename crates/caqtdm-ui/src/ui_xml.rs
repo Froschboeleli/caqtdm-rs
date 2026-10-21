@@ -9,7 +9,9 @@ use crate::model::{CustomWidget, DisplayFile, LayoutItem, LayoutNode, SourceForm
 
 pub fn parse_ui(text: &str) -> Result<DisplayFile, UiError> {
     let mut reader = Reader::from_str(text);
-    reader.config_mut().trim_text(true);
+    // Qt keeps the whitespace inside `<string>` values: " Title " pads the
+    // text on purpose. Whitespace-only nodes between tags are skipped below.
+    reader.config_mut().trim_text(false);
     let mut version = String::new();
     let mut class_name = String::new();
     let mut root: Option<WidgetNode> = None;
@@ -25,7 +27,7 @@ pub fn parse_ui(text: &str) -> Result<DisplayFile, UiError> {
                             version = v;
                         }
                     }
-                    "class" => class_name = read_text(&mut reader)?,
+                    "class" => class_name = read_text(&mut reader)?.trim().to_string(),
                     "widget" => {
                         root = Some(read_widget(&mut reader, &e)?);
                     }
@@ -192,8 +194,8 @@ fn read_typed(
 ) -> Result<PropValue, UiError> {
     match kind {
         "string" | "cstring" | "pixmap" | "url" => Ok(PropValue::String(read_text(reader)?)),
-        "enum" => Ok(PropValue::Enum(read_text(reader)?)),
-        "set" => Ok(PropValue::Set(read_text(reader)?)),
+        "enum" => Ok(PropValue::Enum(read_text(reader)?.trim().to_string())),
+        "set" => Ok(PropValue::Set(read_text(reader)?.trim().to_string())),
         "bool" => {
             let t = read_text(reader)?;
             Ok(PropValue::Bool(
@@ -300,7 +302,7 @@ fn read_leaf_map(
             Ok(Event::Start(e)) => {
                 let name = local_name(&e);
                 let text = read_text(reader)?;
-                map.insert(name, text);
+                map.insert(name, text.trim().to_string());
             }
             Ok(Event::Empty(e)) => {
                 map.insert(local_name(&e), String::new());
@@ -335,9 +337,9 @@ fn read_one_custom(reader: &mut Reader<&[u8]>) -> Result<CustomWidget, UiError> 
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => match local_name(&e).as_str() {
-                "class" => class_name = read_text(reader)?,
-                "extends" => extends = read_text(reader)?,
-                "header" => header = read_text(reader)?,
+                "class" => class_name = read_text(reader)?.trim().to_string(),
+                "extends" => extends = read_text(reader)?.trim().to_string(),
+                "header" => header = read_text(reader)?.trim().to_string(),
                 _ => skip_rest(reader)?,
             },
             Ok(Event::End(e)) if local_name_end(&e) == "customwidget" => {
@@ -386,7 +388,10 @@ fn read_text_deep(reader: &mut Reader<&[u8]>) -> Result<String, UiError> {
                 }
             }
             Ok(Event::Text(t)) => {
-                text.push_str(&t.unescape().unwrap_or_default());
+                let piece = t.unescape().unwrap_or_default();
+                if !piece.trim().is_empty() {
+                    text.push_str(&piece);
+                }
             }
             Ok(Event::Eof) => return Ok(text),
             Err(err) => return Err(UiError::Xml(err.to_string())),

@@ -552,3 +552,55 @@ fn upstream_tests_ui_opens_with_a_missing_include() {
     );
     assert!(display.widget_count() > 50);
 }
+
+const PADDED_UI: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>
+   MainWindow
+ </class>
+ <widget class="QMainWindow" name="MainWindow">
+  <widget class="QWidget" name="centralwidget">
+   <widget class="caLabel" name="title">
+    <property name="text"><string> Padded Title </string></property>
+    <property name="fontScaleMode">
+     <enum>
+       ESimpleLabel::Height
+     </enum>
+    </property>
+    <property name="alignment"><set>
+      Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter
+    </set></property>
+    <property name="geometry"><rect>
+     <x> -12 </x><y>0</y><width>300</width><height>60</height>
+    </rect></property>
+    <attribute name="title">
+      <string>Page</string>
+    </attribute>
+   </widget>
+  </widget>
+ </widget>
+</ui>
+"#;
+
+#[test]
+fn string_values_keep_their_padding_while_other_values_are_trimmed() {
+    // Qt keeps the spaces an author types into a string: " Title " pads the
+    // text on purpose. Enums, sets, numbers, and the class name are names.
+    let display = load_str(PADDED_UI, Path::new("padded.ui")).unwrap();
+    assert_eq!(display.class_name, "MainWindow");
+    let mut seen = false;
+    display.root.walk(&mut |w| {
+        if w.name == "title" {
+            assert_eq!(w.prop_str("text"), Some(" Padded Title "));
+            assert_eq!(w.enum_tail("fontScaleMode"), Some("Height"));
+            assert_eq!(
+                w.prop_str("alignment"),
+                Some("Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter")
+            );
+            assert_eq!(w.rect.x, -12);
+            assert_eq!(w.attributes.get("title").map(String::as_str), Some("Page"));
+            seen = true;
+        }
+    });
+    assert!(seen);
+}

@@ -1,15 +1,47 @@
-//! A slice of Qt stylesheets: `color`, `background`, `background-color`, and font size.
+//! A slice of Qt stylesheets: `color`, `background`, `background-color`,
+//! font size and weight, `border`, `border-radius`, and `margin-top`, plus
+//! the `::title` sub-control of a `QGroupBox`.
 //!
 //! A stylesheet set on a parent applies to descendants when the selector matches,
 //! which is how `tests.ui` colors `caLineEdit` from the main window.
 
 use caqtdm_core::Color;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CssStyle {
     pub foreground: Option<Color>,
     pub background: Option<Color>,
     pub font_px: Option<i32>,
+    /// `font-weight: bold` (or 600 and up), or `normal`.
+    pub bold: Option<bool>,
+    /// `border: 2px solid black` width; `border-width`.
+    pub border_px: Option<i32>,
+    /// `border: 2px solid black` color; `border-color`.
+    pub border_color: Option<Color>,
+    /// `border-radius`.
+    pub radius: Option<i32>,
+    /// `margin-top`, or the first value of `margin`.
+    pub margin_top: Option<CssLength>,
+}
+
+/// A CSS length. `ex` and `em` resolve against the widget font.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CssLength {
+    Px(i32),
+    Ex(f32),
+    Em(f32),
+}
+
+impl CssLength {
+    /// Pixels for a font of `font_px`. Qt's `1ex` is the x-height, about
+    /// half the pixel size of a sans face.
+    pub fn px(self, font_px: i32) -> i32 {
+        match self {
+            Self::Px(px) => px,
+            Self::Ex(ex) => (ex * font_px as f32 * 0.5).floor() as i32,
+            Self::Em(em) => (em * font_px as f32).round() as i32,
+        }
+    }
 }
 
 impl CssStyle {
@@ -22,6 +54,21 @@ impl CssStyle {
         }
         if other.font_px.is_some() {
             self.font_px = other.font_px;
+        }
+        if other.bold.is_some() {
+            self.bold = other.bold;
+        }
+        if other.border_px.is_some() {
+            self.border_px = other.border_px;
+        }
+        if other.border_color.is_some() {
+            self.border_color = other.border_color;
+        }
+        if other.radius.is_some() {
+            self.radius = other.radius;
+        }
+        if other.margin_top.is_some() {
+            self.margin_top = other.margin_top;
         }
     }
 }
@@ -42,6 +89,23 @@ pub struct SheetSource<'a> {
 /// Later rules of equal or higher specificity win. A bare declaration list
 /// (`color: red` with no selector) applies only to the widget that owns it.
 pub fn cascade(chain: &[WidgetIdent<'_>], sheets: &[SheetSource<'_>]) -> CssStyle {
+    cascade_sub(chain, sheets, None)
+}
+
+/// Rules for a sub-control of the widget, such as `QGroupBox::title`.
+pub fn cascade_sub_control(
+    chain: &[WidgetIdent<'_>],
+    sheets: &[SheetSource<'_>],
+    sub_control: &str,
+) -> CssStyle {
+    cascade_sub(chain, sheets, Some(sub_control))
+}
+
+fn cascade_sub(
+    chain: &[WidgetIdent<'_>],
+    sheets: &[SheetSource<'_>],
+    sub_control: Option<&str>,
+) -> CssStyle {
     if chain.is_empty() {
         return CssStyle::default();
     }
@@ -51,7 +115,7 @@ pub fn cascade(chain: &[WidgetIdent<'_>], sheets: &[SheetSource<'_>]) -> CssStyl
     for sheet in sheets {
         let css = strip_comments(sheet.css);
         if !css.contains('{') {
-            if sheet.owner == subject {
+            if sheet.owner == subject && sub_control.is_none() {
                 ranked.push((1000, order, parse_decls(&css)));
                 order = order.saturating_add(1);
             }
@@ -59,14 +123,14 @@ pub fn cascade(chain: &[WidgetIdent<'_>], sheets: &[SheetSource<'_>]) -> CssStyl
         }
         for (selectors, body) in parse_blocks(&css) {
             let decl = parse_decls(body);
-            if decl.foreground.is_none() && decl.background.is_none() && decl.font_px.is_none() {
+            if decl == CssStyle::default() {
                 continue;
             }
             for selector in split_selectors(selectors) {
                 let Some(parsed) = parse_selector(selector) else {
                     continue;
                 };
-                if !selector_matches(&parsed, chain) {
+                if !selector_matches(&parsed, chain, sub_control) {
                     continue;
                 }
                 ranked.push((specificity(&parsed), order, decl.clone()));
@@ -127,8 +191,10 @@ fn split_selectors(selectors: &str) -> Vec<&str> {
 struct SimpleSel {
     class_name: Option<String>,
     id: Option<String>,
-    /// `:hover`, `:focus`, `::pane`, and other pieces this raster does not draw.
+    /// `:hover`, `:focus`, and other pseudo-states this raster does not draw.
     skip: bool,
+    /// `::title`, `::tab`, and other sub-controls.
+    sub_control: Option<String>,
 }
 
 struct Selector {
@@ -171,9 +237,11 @@ fn parse_selector(text: &str) -> Option<Selector> {
 }
 
 fn parse_compound(text: &str) -> SimpleSel {
-    // `QTabWidget::pane` and `QTabBar::tab` style sub-controls, not the widget.
-    let skip_sub = text.contains("::");
-    let text = text.split("::").next().unwrap_or(text);
+    // `QTabWidget::pane` and `QGroupBox::title` name a sub-control.
+    let (text, sub_control) = match text.split_once("::") {
+        Some((widget, sub)) => (widget, nonempty(sub.split(':').next().unwrap_or(sub))),
+        None => (text, None),
+    };
     let (text, skip_pseudo) = if let Some(index) = text.find(':') {
         (&text[..index], true)
     } else {
@@ -189,7 +257,8 @@ fn parse_compound(text: &str) -> SimpleSel {
     SimpleSel {
         class_name,
         id,
-        skip: skip_sub || skip_pseudo,
+        skip: skip_pseudo,
+        sub_control,
     }
 }
 
@@ -202,8 +271,22 @@ fn nonempty(text: &str) -> Option<String> {
     }
 }
 
-fn selector_matches(selector: &Selector, chain: &[WidgetIdent<'_>]) -> bool {
+fn selector_matches(
+    selector: &Selector,
+    chain: &[WidgetIdent<'_>],
+    sub_control: Option<&str>,
+) -> bool {
     if selector.parts.is_empty() || selector.parts.iter().any(|part| part.skip) {
+        return false;
+    }
+    let last = selector.parts.len() - 1;
+    if selector.parts[..last]
+        .iter()
+        .any(|part| part.sub_control.is_some())
+    {
+        return false;
+    }
+    if selector.parts[last].sub_control.as_deref() != sub_control {
         return false;
     }
     let mut index = chain.len() - 1;
@@ -304,9 +387,32 @@ fn parse_decls(body: &str) -> CssStyle {
                 }
             }
             "font-size" => style.font_px = parse_css_size(value),
+            "font-weight" => style.bold = font_weight_bold(value),
+            "border" => {
+                let (px, color) = border_shorthand(value);
+                if let Some(px) = px {
+                    style.border_px = Some(px);
+                }
+                if let Some(color) = color {
+                    style.border_color = Some(color);
+                }
+            }
+            "border-width" => style.border_px = parse_css_size(value),
+            "border-color" => style.border_color = parse_paint_color(value),
+            "border-radius" => style.radius = parse_css_size(value),
+            "margin-top" => style.margin_top = parse_css_length(value),
+            "margin" => {
+                style.margin_top = value.split_whitespace().next().and_then(parse_css_length);
+            }
             "font" => {
                 if let Some(px) = font_shorthand_size(value) {
                     style.font_px = Some(px);
+                }
+                if value
+                    .split_whitespace()
+                    .any(|word| font_weight_bold(word) == Some(true))
+                {
+                    style.bold = Some(true);
                 }
             }
             _ => {}
@@ -362,8 +468,52 @@ fn parse_css_size(value: &str) -> Option<i32> {
     value.parse().ok()
 }
 
+/// `bold`, `bolder`, and numeric weights from 600 up are bold; `normal`,
+/// `lighter`, and lower numbers are not.
+fn font_weight_bold(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "bold" | "bolder" => Some(true),
+        "normal" | "lighter" => Some(false),
+        other => other.parse::<i32>().ok().map(|weight| weight >= 600),
+    }
+}
+
 fn font_shorthand_size(value: &str) -> Option<i32> {
     value.split_whitespace().find_map(parse_css_size)
+}
+
+/// `2px solid black`: the width and the color, in any order. `none` is a
+/// zero width.
+fn border_shorthand(value: &str) -> (Option<i32>, Option<Color>) {
+    let mut px = None;
+    let mut color = None;
+    for word in value.split_whitespace() {
+        let folded = word.to_ascii_lowercase();
+        if folded == "none" {
+            px = Some(0);
+        } else if folded.ends_with("px") || folded.ends_with("pt") {
+            px = parse_css_size(word).or(px);
+        } else if matches!(
+            folded.as_str(),
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset"
+        ) {
+            continue;
+        } else if let Some(parsed) = parse_paint_color(word) {
+            color = Some(parsed);
+        }
+    }
+    (px, color)
+}
+
+fn parse_css_length(value: &str) -> Option<CssLength> {
+    let value = value.trim();
+    if let Some(number) = value.strip_suffix("ex") {
+        return number.trim().parse().ok().map(CssLength::Ex);
+    }
+    if let Some(number) = value.strip_suffix("em") {
+        return number.trim().parse().ok().map(CssLength::Em);
+    }
+    parse_css_size(value).map(CssLength::Px)
 }
 
 #[cfg(test)]

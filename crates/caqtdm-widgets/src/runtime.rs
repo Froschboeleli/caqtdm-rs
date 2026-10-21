@@ -15,7 +15,7 @@ use caqtdm_ui::WidgetNode;
 use crate::curves::{parse_curve, strip_timing, CurveKind, CurveSlot, PlotMode};
 
 use crate::visual::{
-    qt_global_color, Action, ColorMap, CurveStyle, CurveSymbol, Effect, GridCell, ShapeForm,
+    qt_global_color, Action, ColorMap, CssBox, CurveStyle, CurveSymbol, Effect, GridCell, ShapeForm,
     ThermoBand, TreeRow, Visual, VisualKind,
 };
 
@@ -100,7 +100,6 @@ impl Session {
         for raw in channels {
             session.watch(&raw);
         }
-        session.refresh_soft();
         session
     }
 
@@ -122,9 +121,13 @@ impl Session {
         }
     }
 
-    /// Recompute every `caCalc` with a `calc` expression. An input that is
-    /// not connected counts as 0, the way `CalcVisibility` fills `valueArray`.
-    /// Two passes let a calc that reads another calc settle.
+    /// Recompute every `caCalc` with a `calc` expression whose inputs
+    /// delivered data: `Callback_UpdateWidget` only runs for a channel
+    /// that updated, so a calc on never-connected channels keeps its
+    /// `initialValue`. An unconnected input among connected ones counts
+    /// as 0, the way `CalcVisibility` fills `valueArray`. A second pass
+    /// lets a calc that reads another calc settle; a calc that reads its
+    /// own variable (`A>=1?A=0:A+1` blinkers) runs once per display cycle.
     fn refresh_soft(&mut self) {
         if self.soft.is_empty() {
             return;
@@ -143,8 +146,19 @@ impl Session {
                 Some((name, expr, index))
             })
             .collect();
-        for _ in 0..2 {
+        for pass in 0..2 {
             for (name, expr, index) in &calcs {
+                let channels = node_channels(&self.nodes[*index]);
+                let uses_itself = channels.iter().any(|raw| raw == name);
+                if pass == 1 && uses_itself {
+                    continue;
+                }
+                let any_connected = channels
+                    .iter()
+                    .any(|raw| self.cache.get(raw).is_some_and(|data| data.connected));
+                if !any_connected {
+                    continue;
+                }
                 let inputs = self.calc_inputs(&self.nodes[*index]);
                 if let Ok(value) = eval_calc(expr, &inputs) {
                     let entry = self
@@ -507,6 +521,33 @@ impl Session {
         let visible = self.is_visible(node) && !hint.hidden;
         let text = self.caption(node, data);
         let mut kind = self.kind(node, data);
+        if node.class_name == "QGroupBox" {
+            let font_px = font_px_of(node, &hint.style);
+            kind = VisualKind::GroupBox {
+                frame: css_box(&hint.style, font_px),
+                title: css_box(&hint.title_style, font_px),
+            };
+        }
+        // A Qwt plot fills its widget with the `foreground` palette when
+        // `autoFillBackground` is on (the constructor default). The canvas
+        // of a cartesian plot is transparent, so the `background` property
+        // never shows there; a strip plot paints it on the canvas.
+        let auto_fill = node.prop_bool("autoFillBackground").unwrap_or(true);
+        if matches!(node.class_name.as_str(), "caCartesianPlot" | "caStripPlot") {
+            let fill = foreground;
+            if let VisualKind::Plot { canvas, .. } = &mut kind {
+                *canvas = if node.class_name == "caStripPlot" {
+                    Some(background)
+                } else {
+                    None
+                };
+            }
+            background = if auto_fill {
+                fill
+            } else {
+                Color::transparent()
+            };
+        }
         // `setWhiteColors`: a cartesian plot whose channel is not connected
         // paints canvas, scales, and grid white. Archive channels are exempt.
         if node.class_name == "caCartesianPlot" && data.is_some_and(|d| !d.connected) {
@@ -516,7 +557,9 @@ impl Session {
             if !archive {
                 let white = Color::rgb(255, 255, 255);
                 foreground = white;
-                background = white;
+                if auto_fill {
+                    background = white;
+                }
                 if let VisualKind::Plot {
                     grid_color,
                     scale_color,
@@ -567,6 +610,8 @@ impl Session {
             border_px: border_px_of(node),
             clip: None,
             font_fit: font_fit_of(node),
+            valign: valign_of(node),
+            bold: bold_of(node, &hint.style),
         }
     }
 
@@ -787,6 +832,7 @@ impl Session {
         node.prop_str("text")
             .or_else(|| node.prop_str("label"))
             .or_else(|| node.prop_str("Title"))
+            .or_else(|| node.prop_str("title"))
             .unwrap_or("")
             .to_string()
     }
@@ -886,6 +932,7 @@ impl Session {
                 .map(|index| curve_style(node, index))
                 .collect(),
             grid: node.prop_bool("grid").unwrap_or(true),
+            canvas: None,
             show_x: node.prop_bool("XaxisEnabled").unwrap_or(true),
             show_y: node.prop_bool("YaxisEnabled").unwrap_or(true),
             symbols: (0..series_len)
@@ -1505,14 +1552,23 @@ fn collect_layout(
     }
 }
 
-/// Soft channel name of a `caCalc`: its `variable` without a plugin prefix.
+/// Soft channel name of a `caCalc`: its `variable` without a plugin prefix
+/// or JSON suffix, the way `SoftPVusesItsself` rewrites it.
 fn soft_name(node: &WidgetNode) -> Option<String> {
-    let raw = node.prop_str("variable")?.trim();
+    let raw = plain_channel(node.prop_str("variable")?);
     if raw.is_empty() {
         return None;
     }
     let name = raw.split_once("://").map_or(raw, |(_, tail)| tail);
     Some(name.to_string())
+}
+
+/// A channel name without the `.{"caqtdm_monitor":{"maxdisplayrate":5}}`
+/// style JSON suffix. `addMonitor` cuts the name at `.{`; the suffix only
+/// tunes the display rate and is not part of the PV.
+pub fn plain_channel(raw: &str) -> &str {
+    let raw = raw.trim();
+    raw.find(".{").map_or(raw, |pos| &raw[..pos])
 }
 
 /// Whether `HandleWidget` adds a monitor for this widget. A static label or
@@ -1685,13 +1741,14 @@ fn node_channels(node: &WidgetNode) -> Vec<String> {
         if let Some(prop) = node.prop(key) {
             if key == "channels" || key.starts_with("channels_") {
                 for item in prop.as_string_list() {
+                    let item = plain_channel(&item).to_string();
                     if !item.is_empty() && !out.contains(&item) {
                         out.push(item);
                     }
                 }
             } else if let Some(text) = prop.as_str() {
                 for item in text.split(';') {
-                    let item = item.trim();
+                    let item = plain_channel(item);
                     if !item.is_empty() && !out.contains(&item.to_string()) {
                         out.push(item.to_string());
                     }
@@ -1777,6 +1834,11 @@ fn class_colors(node: &WidgetNode, is_root: bool) -> (Color, Color) {
             (Color::rgb(20, 20, 20), bg)
         }
         "caFrame" => (Color::rgb(0, 0, 0), Color::transparent()),
+        // Plain `QWidget` subclasses that paint only their shape: the
+        // widget rectangle itself is not filled.
+        "caGraphics" | "caPolyLine" | "caLed" | "caInclude" | "caCalc" => {
+            (Color::rgb(20, 20, 20), Color::transparent())
+        }
         _ => (Color::rgb(20, 20, 20), Color::rgb(236, 236, 236)),
     }
 }
@@ -1885,18 +1947,39 @@ fn scaled_fraction(node: &WidgetNode, value: f64, min: f64, max: f64) -> f64 {
     fraction(value, min, max)
 }
 
+/// Horizontal part of a `Qt::Alignment` set such as
+/// `Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter`. Only the horizontal
+/// flags count: `AlignVCenter` is not centering. `caLabelVertical` uses its
+/// own `Left`, `Center`, and `Right` names.
 fn align_of(node: &WidgetNode) -> i8 {
-    let raw = node
-        .enum_tail("alignment")
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if raw.contains("right") {
-        2
-    } else if raw.contains("center") {
-        1
-    } else {
-        0
+    let raw = node.prop_str("alignment").unwrap_or("");
+    let mut out = 0;
+    for flag in raw.split('|') {
+        let flag = flag.trim().rsplit("::").next().unwrap_or("").to_ascii_lowercase();
+        match flag.as_str() {
+            "alignright" | "aligntrailing" | "right" => out = 2,
+            "alignhcenter" | "aligncenter" | "center" => out = 1,
+            "alignleft" | "alignleading" | "left" => out = 0,
+            _ => {}
+        }
     }
+    out
+}
+
+/// Vertical part of a `Qt::Alignment` set: 0 centered, 1 top, 2 bottom.
+fn valign_of(node: &WidgetNode) -> i8 {
+    let raw = node.prop_str("alignment").unwrap_or("");
+    let mut out = 0;
+    for flag in raw.split('|') {
+        let flag = flag.trim().rsplit("::").next().unwrap_or("").to_ascii_lowercase();
+        match flag.as_str() {
+            "aligntop" => out = 1,
+            "alignbottom" => out = 2,
+            "alignvcenter" | "aligncenter" => out = 0,
+            _ => {}
+        }
+    }
+    out
 }
 
 fn shape_form(node: &WidgetNode) -> ShapeForm {
@@ -1956,6 +2039,32 @@ fn font_fit_of(node: &WidgetNode) -> u8 {
         "height" => 1,
         "widthandheight" | "heightandwidth" => 2,
         _ => 0,
+    }
+}
+
+/// The box a stylesheet rule describes, or `None` when the rule has no
+/// border and no fill (the widget keeps its native look).
+fn css_box(style: &crate::style::CssStyle, font_px: i32) -> Option<CssBox> {
+    if style.border_px.is_none() && style.background.is_none() && style.border_color.is_none() {
+        return None;
+    }
+    Some(CssBox {
+        fill: style.background,
+        border_px: style.border_px.unwrap_or(0),
+        border_color: style.border_color.unwrap_or(Color::rgb(0, 0, 0)),
+        radius: style.radius.unwrap_or(0),
+        margin_top: style.margin_top.map_or(0, |length| length.px(font_px)),
+    })
+}
+
+/// `font` with `bold` (uic also sets it for a heavy `weight`), or a stylesheet `font-weight`.
+fn bold_of(node: &WidgetNode, style: &crate::style::CssStyle) -> bool {
+    if let Some(bold) = style.bold {
+        return bold;
+    }
+    match node.prop("font") {
+        Some(PropValue::Font(font)) => font.bold,
+        _ => false,
     }
 }
 
@@ -2020,6 +2129,17 @@ fn tab_labels(node: &WidgetNode) -> Vec<String> {
 }
 
 fn border_px_of(node: &WidgetNode) -> i32 {
+    // A `QFrame` (caFrame, caLabel, caInclude, ...) draws its frame only
+    // for a `frameShape` other than `NoFrame`, `lineWidth` thick.
+    if let Some(shape) = node.enum_tail("frameShape") {
+        if shape.eq_ignore_ascii_case("NoFrame") {
+            return 0;
+        }
+        return node
+            .prop_f64("lineWidth")
+            .or_else(|| node.prop_f64("frameLineWidth"))
+            .map_or(1, |width| width.max(0.0) as i32);
+    }
     if let Some(width) = node
         .prop_f64("lineWidth")
         .or_else(|| node.prop_f64("borderWidth"))
@@ -2030,8 +2150,7 @@ fn border_px_of(node: &WidgetNode) -> i32 {
     match node.class_name.as_str() {
         "caClock" => 3,
         "caSlider" | "caThermo" | "caMeter" | "caChoice" => 1,
-        "caFrame" => 1,
-        "caLabel" | "caLabelVertical" | "QLabel" | "QWidget" | "QFrame" | "QMainWindow"
+        "caFrame" | "caLabel" | "caLabelVertical" | "QLabel" | "QWidget" | "QFrame" | "QMainWindow"
         | "QDialog" | "QTabWidget" | "QStackedWidget" | "caDoubleTabWidget" | "caInclude"
         | "QMenuBar" | "QMenu" | "QStatusBar" | "QToolBar" => 0,
         _ => 1,
@@ -2041,6 +2160,8 @@ fn border_px_of(node: &WidgetNode) -> i32 {
 #[derive(Clone, Default)]
 struct PaintHint {
     style: crate::style::CssStyle,
+    /// `QGroupBox::title` rules.
+    title_style: crate::style::CssStyle,
     hidden: bool,
     is_root: bool,
     /// Fill from `QTabWidget::tab > QWidget > QWidget` on the parent tab widget.
@@ -2089,6 +2210,11 @@ fn walk_hints(
         .collect();
     out.push(PaintHint {
         style: crate::style::cascade(&idents, &sources),
+        title_style: if node.class_name == "QGroupBox" {
+            crate::style::cascade_sub_control(&idents, &sources, "title")
+        } else {
+            crate::style::CssStyle::default()
+        },
         hidden,
         is_root,
         page_fill,
@@ -2189,6 +2315,7 @@ fn scan_waveform(
         axes: Vec::new(),
         styles: Vec::new(),
         grid: node.prop_bool("grid").unwrap_or(true),
+        canvas: None,
         show_x: node.prop_bool("XaxisEnabled").unwrap_or(true),
         show_y: node.prop_bool("YaxisEnabled").unwrap_or(true),
         symbols: Vec::new(),
@@ -2387,7 +2514,14 @@ fn plot_colors(node: &WidgetNode, count: usize) -> Vec<Option<Color>> {
 }
 
 fn plot_legend(node: &WidgetNode, axes: &[(f64, f64)]) -> Vec<String> {
-    if node.prop("LegendEnabled").and_then(PropValue::as_bool) == Some(false) {
+    // The cartesian constructor calls `setLegendEnabled(false)`; the strip
+    // plot shows its legend unless the property turns it off.
+    let enabled = node.prop("LegendEnabled").and_then(PropValue::as_bool);
+    let shown = match node.class_name.as_str() {
+        "caCartesianPlot" => enabled == Some(true),
+        _ => enabled != Some(false),
+    };
+    if !shown {
         return Vec::new();
     }
     let fixed = node

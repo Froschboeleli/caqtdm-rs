@@ -20,6 +20,6 @@ pub use mda::write_rank2;
 pub use runtime::{supported_classes, toggled_bit_value, Session};
 pub use visual::{
     cell_at, cell_rect, colorize_rgba, qt_global_color, sample_color, tab_at, tab_rects, Action,
-    ColorMap, CurveStyle, CurveSymbol, Effect, GridCell, RoiMark, ShapeForm, ThermoBand, TreeRow,
-    Visual, VisualKind,
+    ColorMap, CssBox, CurveStyle, CurveSymbol, Effect, GridCell, RoiMark, ShapeForm, ThermoBand,
+    TreeRow, Visual, VisualKind,
 };

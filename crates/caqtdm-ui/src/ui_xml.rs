@@ -159,7 +159,7 @@ fn read_property_value(reader: &mut Reader<&[u8]>) -> Result<Option<PropValue>, 
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                value = Some(read_typed(reader, &local_name(&e))?);
+                value = Some(read_typed(reader, &local_name(&e), &e)?);
             }
             Ok(Event::Empty(e)) => {
                 value = Some(empty_typed(&local_name(&e)));
@@ -185,7 +185,11 @@ fn empty_typed(kind: &str) -> PropValue {
     }
 }
 
-fn read_typed(reader: &mut Reader<&[u8]>, kind: &str) -> Result<PropValue, UiError> {
+fn read_typed(
+    reader: &mut Reader<&[u8]>,
+    kind: &str,
+    start: &BytesStart<'_>,
+) -> Result<PropValue, UiError> {
     match kind {
         "string" | "cstring" | "pixmap" | "url" => Ok(PropValue::String(read_text(reader)?)),
         "enum" => Ok(PropValue::Enum(read_text(reader)?)),
@@ -211,8 +215,9 @@ fn read_typed(reader: &mut Reader<&[u8]>, kind: &str) -> Result<PropValue, UiErr
             let r = num(&map, "red");
             let g = num(&map, "green");
             let b = num(&map, "blue");
-            let a = map
-                .get("alpha")
+            // uic writes `<color alpha="0">`; the attribute is the alpha.
+            let a = attr(start, "alpha")
+                .or_else(|| map.get("alpha").cloned())
                 .map(|s| s.parse().unwrap_or(255))
                 .unwrap_or(255);
             Ok(PropValue::Color(Color::rgba(r, g, b, a)))
@@ -251,7 +256,13 @@ fn read_typed(reader: &mut Reader<&[u8]>, kind: &str) -> Result<PropValue, UiErr
                     .get("pointsize")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(10),
-                bold: map.get("bold").is_some_and(|s| s == "true" || s == "1"),
+                // `QFont::bold()` is true above `QFont::Medium` (57), which
+                // is how uic reads `<weight>75</weight>` without `<bold>`.
+                bold: map.get("bold").is_some_and(|s| s == "true" || s == "1")
+                    || map
+                        .get("weight")
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .is_some_and(|weight| weight > 57),
                 italic: map.get("italic").is_some_and(|s| s == "true" || s == "1"),
             }))
         }

@@ -1,6 +1,6 @@
 use caqtdm_core::{ChannelData, Color, PropValue, PvValue, Rect};
 use caqtdm_datasource::{Hub, InternSource};
-use caqtdm_paint::paint;
+use caqtdm_paint::{paint, plot_interior, plot_sample_x, plot_value_y};
 use caqtdm_ui::WidgetNode;
 use caqtdm_widgets::{Action, Session, VisualKind};
 
@@ -37,6 +37,7 @@ fn legend_colors_and_extra_axes_change_the_plot() {
     plot.set_prop("YaxisLimitsMin_2", PropValue::Double(0.0));
     plot.set_prop("YaxisLimitsMax_2", PropValue::Double(1000.0));
     plot.set_prop("color_2", PropValue::Color(Color::rgb(220, 0, 0)));
+    plot.set_prop("foreground", PropValue::Color(Color::rgb(0, 0, 0)));
     let mut root = WidgetNode::new("QWidget", "root");
     root.children.push(plot);
     let session = open(root, intern);
@@ -59,13 +60,19 @@ fn legend_colors_and_extra_axes_change_the_plot() {
         }
         other => panic!("{other:?}"),
     }
+    let inner = plot_interior(&drawn).unwrap();
     let image = paint(&[drawn]);
+    let mid = inner.x + inner.width / 2;
     assert!(
-        image.pixel(20, 34).unwrap().r > 180,
+        image
+            .pixel(mid, plot_value_y(inner, 500.0, 0.0, 1000.0))
+            .unwrap()
+            .r
+            > 180,
         "second axis places 500 mid-scale"
     );
     assert!(
-        image.pixel(20, 19).unwrap().r < 80,
+        image.pixel(inner.x + 2, inner.y + 1).unwrap().r < 80,
         "500 is not clipped to the top"
     );
     let mut legend_ink = false;
@@ -295,12 +302,23 @@ fn border_color_and_line_width_change_the_outline() {
     );
 }
 
-fn plot_with(style: &str, grid: bool, show_x: bool) -> caqtdm_paint::Image {
+/// A painted plot and the canvas interior its curves are drawn in.
+type Plotted = (caqtdm_paint::Image, Rect);
+
+/// The row a horizontal grid line of value `value` lands on (Qwt rounds).
+fn grid_row(inner: Rect, value: f64, lo: f64, hi: f64) -> i32 {
+    let frac = (value - lo) / (hi - lo);
+    inner.y + inner.height - 1 - (frac * f64::from(inner.height - 1)).round() as i32
+}
+
+fn plot_with(style: &str, grid: bool, show_x: bool) -> Plotted {
     let intern = InternSource::new();
     intern.insert("A", ChannelData::scalar(5.0));
     let mut plot = WidgetNode::new("caCartesianPlot", "plot");
     plot.rect = Rect::new(0, 0, 80, 60);
     plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("foreground", PropValue::Color(Color::rgb(0, 0, 0)));
+    plot.set_prop("scaleColor", PropValue::Color(Color::rgb(200, 200, 200)));
     plot.set_prop("Style_1", PropValue::Enum(style.into()));
     plot.set_prop("grid", PropValue::Bool(grid));
     plot.set_prop("XaxisEnabled", PropValue::Bool(show_x));
@@ -313,35 +331,41 @@ fn plot_with(style: &str, grid: bool, show_x: bool) -> caqtdm_paint::Image {
         .into_iter()
         .find(|v| v.name == "plot")
         .unwrap();
-    paint(&[drawn])
+    let inner = plot_interior(&drawn).unwrap();
+    (paint(&[drawn]), inner)
 }
 
 #[test]
 fn curve_style_grid_and_x_axis_change_the_plot() {
-    let lines = plot_with("Lines", true, true);
-    let dots = plot_with("Dots", true, true);
-    let none = plot_with("NoCurve", false, false);
+    let (lines, inner) = plot_with("Lines", true, true);
+    let (dots, _) = plot_with("Dots", true, true);
+    let (none, bare) = plot_with("NoCurve", false, false);
+    let mid = inner.x + inner.width / 2;
+    let y5 = plot_value_y(inner, 5.0, 0.0, 10.0);
     assert!(
-        lines.pixel(40, 34).unwrap().r > 250,
+        lines.pixel(mid, y5).unwrap().r > 250,
         "a line crosses mid-scale"
     );
     assert!(
-        dots.pixel(40, 34).unwrap().r < 40,
+        dots.pixel(mid, y5).unwrap().r < 40,
         "dots leave the middle empty"
     );
-    let on = lines.pixel(20, 22).unwrap();
-    let off = none.pixel(20, 22).unwrap();
+    let row = grid_row(inner, 6.0, 0.0, 10.0);
+    let on = lines.pixel(inner.x + 1, row).unwrap();
+    let off = none
+        .pixel(bare.x + 1, grid_row(bare, 6.0, 0.0, 10.0))
+        .unwrap();
     assert!(
         on.r > 100 && on.r < 180 && on.g > 100,
         "grid is Qt gray, got {on:?}"
     );
     assert!(
         off.r < 20 && off.g < 20,
-        "grid off leaves the black constructor canvas, got {off:?}"
+        "grid off leaves the widget fill, got {off:?}"
     );
-    // Qt DashLine at width 1 is 4 on, 2 off. The line starts at plot.x + 1.
-    let fourth = lines.pixel(8, 22).unwrap();
-    let gap = lines.pixel(9, 22).unwrap();
+    // Qt DashLine at width 1 is 4 on, 2 off. The line starts at the canvas edge.
+    let fourth = lines.pixel(inner.x + 3, row).unwrap();
+    let gap = lines.pixel(inner.x + 4, row).unwrap();
     assert!(
         fourth.r > 100 && fourth.r < 180 && fourth.g > 100,
         "DashLine keeps the fourth pixel on, got {fourth:?}"
@@ -350,70 +374,79 @@ fn curve_style_grid_and_x_axis_change_the_plot() {
         gap.r < 20 && gap.g < 20,
         "DashLine turns the fifth pixel off, got {gap:?}"
     );
+    let tick = (inner.x, inner.y + inner.height + 3);
     assert_ne!(
-        lines.pixel(18, 51).unwrap(),
-        none.pixel(18, 51).unwrap(),
+        lines.pixel(tick.0, tick.1).unwrap(),
+        none.pixel(tick.0, tick.1).unwrap(),
         "hiding the x axis removes the tick"
     );
 }
 
 #[test]
 fn symbols_x_limits_time_and_grid_color_change_pixels() {
-    let plain = styled_plot(|plot| {
+    let (plain, inner) = styled_plot(|plot| {
         plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
     });
-    let cross = styled_plot(|plot| {
+    let (cross, _) = styled_plot(|plot| {
         plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
         plot.set_prop("symbol_1", PropValue::Enum("Cross".into()));
         plot.set_prop("symbolResizeFactor", PropValue::Double(10.0));
     });
-    let ellipse = styled_plot(|plot| {
+    let (ellipse, _) = styled_plot(|plot| {
         plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
         plot.set_prop("symbol_1", PropValue::Enum("Rect".into()));
         plot.set_prop("symbolResizeFactor", PropValue::Double(10.0));
     });
+    // Three ticks put the middle sample of value 5 at the canvas center.
+    let cx = plot_sample_x(inner, 1, 3);
+    let cy = plot_value_y(inner, 5.0, 0.0, 10.0);
     assert!(
-        plain.pixel(39, 28).unwrap().r < 40,
+        plain.pixel(cx, cy - 5).unwrap().r < 40,
         "no symbol leaves the arm empty"
     );
     assert!(
-        cross.pixel(39, 28).unwrap().r > 250,
+        cross.pixel(cx, cy - 5).unwrap().r > 250,
         "a cross paints the vertical arm"
     );
     assert!(
-        ellipse.pixel(42, 37).unwrap().r > 250,
+        ellipse.pixel(cx + 3, cy + 3).unwrap().r > 250,
         "Rect is the ellipse myMarker draws"
     );
     assert!(
-        cross.pixel(42, 37).unwrap().r < 40,
+        cross.pixel(cx + 3, cy + 3).unwrap().r < 40,
         "the cross does not fill the diagonal"
     );
 
-    let wide = styled_plot(|_| {});
-    let limited = styled_plot(|plot| {
+    let (wide, _) = styled_plot(|_| {});
+    let (limited, _) = styled_plot(|plot| {
         plot.set_prop("XaxisScaling", PropValue::Enum("User".into()));
         plot.set_prop("XaxisLimits", PropValue::String("0;6".into()));
     });
+    let mid = inner.x + inner.width / 2;
     assert!(
-        wide.pixel(40, 34).unwrap().r > 250,
+        wide.pixel(mid, cy).unwrap().r > 250,
         "index scale spans the plot"
     );
     assert!(
-        limited.pixel(40, 34).unwrap().r < 40,
+        limited.pixel(mid, cy).unwrap().r < 40,
         "user limits 0;6 stop index 2 before mid-plot"
     );
-    let linear = peaked(false);
-    let logged = peaked(true);
+    let (linear, peak) = peaked(false);
+    let (logged, _) = peaked(true);
+    let peak_at = (
+        plot_sample_x(peak, 1, 3),
+        plot_value_y(peak, 8.0, 0.0, 10.0),
+    );
     assert!(
-        linear.pixel(39, 25).unwrap().r > 250,
+        linear.pixel(peak_at.0, peak_at.1).unwrap().r > 250,
         "the middle sample is the linear peak"
     );
     assert!(
-        logged.pixel(39, 25).unwrap().r < 40,
+        logged.pixel(peak_at.0, peak_at.1).unwrap().r < 40,
         "log10 moves that peak toward the right"
     );
 
-    let timed = styled_plot(|plot| {
+    let (timed, _) = styled_plot(|plot| {
         plot.set_prop("XaxisType", PropValue::Enum("time".into()));
     });
     let mut clock = false;
@@ -428,19 +461,22 @@ fn symbols_x_limits_time_and_grid_color_change_pixels() {
     }
     assert!(clock, "a time axis stamps hh:mm:ss ({diffs} pixels)");
 
-    let red = styled_plot(|plot| {
+    let (red, _) = styled_plot(|plot| {
         plot.set_prop("gridColor", PropValue::Color(Color::rgb(200, 0, 0)));
     });
-    let grid = red.pixel(20, 22).unwrap();
+    let grid = red
+        .pixel(inner.x + 1, grid_row(inner, 6.0, 0.0, 10.0))
+        .unwrap();
     assert!(grid.r > 180 && grid.g < 40, "gridColor replaces Qt gray");
 }
 
-fn peaked(log_x: bool) -> caqtdm_paint::Image {
+fn peaked(log_x: bool) -> Plotted {
     let intern = InternSource::new();
     intern.insert("A", ChannelData::scalar(0.0));
     let mut plot = WidgetNode::new("caCartesianPlot", "plot");
     plot.rect = Rect::new(0, 0, 80, 60);
     plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("foreground", PropValue::Color(Color::rgb(0, 0, 0)));
     plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
     plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
     plot.set_prop("grid", PropValue::Bool(false));
@@ -461,15 +497,18 @@ fn peaked(log_x: bool) -> caqtdm_paint::Image {
         .into_iter()
         .find(|v| v.name == "plot")
         .unwrap();
-    paint(&[drawn])
+    let inner = plot_interior(&drawn).unwrap();
+    (paint(&[drawn]), inner)
 }
 
-fn styled_plot(setup: impl Fn(&mut WidgetNode)) -> caqtdm_paint::Image {
+fn styled_plot(setup: impl Fn(&mut WidgetNode)) -> Plotted {
     let intern = InternSource::new();
     intern.insert("A", ChannelData::scalar(5.0));
     let mut plot = WidgetNode::new("caCartesianPlot", "plot");
     plot.rect = Rect::new(0, 0, 80, 60);
     plot.set_prop("channel", PropValue::String("intern://A".into()));
+    plot.set_prop("foreground", PropValue::Color(Color::rgb(0, 0, 0)));
+    plot.set_prop("scaleColor", PropValue::Color(Color::rgb(200, 200, 200)));
     plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
     plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
     setup(&mut plot);
@@ -492,7 +531,8 @@ fn styled_plot(setup: impl Fn(&mut WidgetNode)) -> caqtdm_paint::Image {
         .into_iter()
         .find(|v| v.name == "plot")
         .unwrap();
-    paint(&[drawn])
+    let inner = plot_interior(&drawn).unwrap();
+    (paint(&[drawn]), inner)
 }
 
 #[test]
@@ -569,6 +609,7 @@ fn cartesian_vectors_count_trigger_and_erase_change_the_trace() {
     plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
     plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
     plot.set_prop("grid", PropValue::Bool(false));
+    plot.set_prop("foreground", PropValue::Color(Color::rgb(0, 0, 0)));
     let mut root = WidgetNode::new("QWidget", "root");
     root.children.push(plot);
     let mut hub = Hub::new("epics3");
@@ -587,10 +628,13 @@ fn cartesian_vectors_count_trigger_and_erase_change_the_trace() {
         }
         other => panic!("{other:?}"),
     }
+    let inner = plot_interior(&drawn).unwrap();
     let image = paint(&[drawn]);
-    assert!(image.pixel(67, 25).unwrap().r > 250, "the peak sits at X=9");
+    let y8 = plot_value_y(inner, 8.0, 0.0, 10.0);
+    let x9 = inner.x + (0.9 * f64::from(inner.width - 1)) as i32;
+    assert!(image.pixel(x9, y8).unwrap().r > 250, "the peak sits at X=9");
     assert!(
-        image.pixel(39, 25).unwrap().r < 250,
+        image.pixel(plot_sample_x(inner, 1, 3), y8).unwrap().r < 250,
         "index 1 is not the X position"
     );
 
@@ -681,6 +725,7 @@ fn erase_trace() -> (Vec<f64>, Vec<f64>) {
     plot.set_prop("YaxisLimitsMin_1", PropValue::Double(0.0));
     plot.set_prop("YaxisLimitsMax_1", PropValue::Double(10.0));
     plot.set_prop("grid", PropValue::Bool(false));
+    plot.set_prop("foreground", PropValue::Color(Color::rgb(0, 0, 0)));
     let mut root = WidgetNode::new("QWidget", "root");
     root.children.push(plot);
     let mut hub = Hub::new("epics3");
@@ -694,8 +739,13 @@ fn erase_trace() -> (Vec<f64>, Vec<f64>) {
         .into_iter()
         .find(|v| v.name == "plot")
         .unwrap();
+    let inner = plot_interior(&drawn).unwrap();
+    let probe = (
+        inner.x + inner.width / 2,
+        plot_value_y(inner, 8.0, 0.0, 10.0),
+    );
     let ink = paint(&[drawn]);
-    assert!(ink.pixel(20, 25).unwrap().r > 250, "the trace is painted");
+    assert!(ink.pixel(probe.0, probe.1).unwrap().r > 250, "the trace is painted");
     intern.insert("E", ChannelData::scalar(1.0));
     session.tick(3_000);
     let after = series_of(&session);
@@ -706,7 +756,7 @@ fn erase_trace() -> (Vec<f64>, Vec<f64>) {
         .unwrap();
     let cleared = paint(&[drawn]);
     assert!(
-        cleared.pixel(20, 25).unwrap().r < 40,
+        cleared.pixel(probe.0, probe.1).unwrap().r < 40,
         "erase removes the painted trace"
     );
     (before, after)
@@ -791,13 +841,18 @@ fn strip_refresh_period_sync_and_archive_backfill() {
     assert_eq!((hms.as_str(), date.as_str()), ("00:00:00", "01-01-70"));
     let (hms, date) = caqtdm_paint::axis_time_lines(23 * 3_600, 2 * 3_600);
     assert_eq!((hms.as_str(), date.as_str()), ("01:00:00", "02-01-70"));
-    let ellipse = styled_plot(|plot| {
+    let (ellipse, inner) = styled_plot(|plot| {
         plot.set_prop("Style_1", PropValue::Enum("NoCurve".into()));
         plot.set_prop("symbol_1", PropValue::Enum("Ellipse".into()));
         plot.set_prop("symbolResizeFactor", PropValue::Double(10.0));
         plot.set_prop("grid", PropValue::Bool(false));
     });
-    let edge = ellipse.pixel(45, 37).unwrap();
+    let edge = ellipse
+        .pixel(
+            plot_sample_x(inner, 1, 3) + 6,
+            plot_value_y(inner, 5.0, 0.0, 10.0) + 3,
+        )
+        .unwrap();
     assert!(
         edge.r > 20 && edge.r < 250,
         "the ellipse edge is antialiased, got {edge:?}"
@@ -806,39 +861,52 @@ fn strip_refresh_period_sync_and_archive_backfill() {
 
 #[test]
 fn omitted_plot_colors_follow_the_constructor() {
+    // The constructor foreground (white) fills the widget; the cartesian
+    // canvas is transparent, so the black constructor background never shows.
     let cartesian = bare_plot("caCartesianPlot");
     assert_eq!(cartesian.foreground, Color::rgb(255, 255, 255));
-    assert_eq!(cartesian.background, Color::rgb(0, 0, 0));
+    assert_eq!(cartesian.background, Color::rgb(255, 255, 255));
     match &cartesian.kind {
         VisualKind::Plot {
             scale_color,
             colors,
+            canvas,
             ..
         } => {
             assert_eq!(*scale_color, Some(Color::rgb(0, 0, 0)));
+            assert_eq!(*canvas, None);
             assert_eq!(colors[3], Some(Color::rgb(0, 0, 255)));
             assert_eq!(colors[5], Some(Color::rgb(255, 0, 255)));
         }
         other => panic!("{other:?}"),
     }
+    let inner = plot_interior(&cartesian).unwrap();
     let image = paint(&[cartesian]);
-    assert_eq!(image.pixel(20, 30).unwrap(), Color::rgb(0, 0, 0), "canvas");
     assert_eq!(
-        image.pixel(2, 30).unwrap(),
+        image
+            .pixel(inner.x + inner.width / 2, inner.y + inner.height / 2)
+            .unwrap(),
         Color::rgb(255, 255, 255),
-        "scale well"
+        "canvas shows the widget fill"
     );
     assert_eq!(
-        image.pixel(18, 51).unwrap(),
+        image.pixel(inner.x - 4, inner.y + inner.height / 2).unwrap(),
+        Color::rgb(255, 255, 255),
+        "scale well between two ticks"
+    );
+    assert_eq!(
+        image.pixel(inner.x - 5, inner.y + inner.height - 1).unwrap(),
         Color::rgb(0, 0, 0),
         "black tick on the well"
     );
 
+    // A strip plot paints its canvas with the (black) background.
     let strip = bare_plot("caStripPlot");
     assert_eq!(strip.foreground, Color::rgb(133, 190, 232));
-    assert_eq!(strip.background, Color::rgb(0, 0, 0));
+    assert_eq!(strip.background, Color::rgb(133, 190, 232));
     match &strip.kind {
-        VisualKind::Plot { colors, .. } => {
+        VisualKind::Plot { colors, canvas, .. } => {
+            assert_eq!(*canvas, Some(Color::rgb(0, 0, 0)));
             assert_eq!(colors[3], Some(Color::rgb(0, 255, 255)));
             assert_eq!(colors[4], Some(Color::rgb(255, 0, 255)));
             assert_eq!(colors[5], Some(Color::rgb(0, 255, 0)));
@@ -864,7 +932,7 @@ fn omitted_plot_colors_follow_the_constructor() {
         .into_iter()
         .find(|v| v.name == "chosen")
         .unwrap();
-    assert_eq!(chosen.background, Color::rgb(10, 20, 30));
+    assert_eq!(chosen.background, Color::rgb(1, 2, 3), "widget fill");
     assert_eq!(chosen.foreground, Color::rgb(1, 2, 3));
     match chosen.kind {
         VisualKind::Plot {

@@ -11,7 +11,10 @@
 //! pixel already there, which is the grayscale edge Qt paints instead of a
 //! hard 50% cutoff.
 //!
-//! `install_display_font` selects Arimo, Cousine, Noto, or a `.ttf` path.
+//! `install_display_font` selects Noto Sans (the default, which is what
+//! `fc-match sans` gives Qt on a stock Linux desktop), Arimo, Cousine, or a
+//! `.ttf` path. Noto Sans has a real bold face; the others get a synthesized
+//! bold, drawn twice one pixel apart the way FreeType emboldens.
 //! The viewer flag `-displayFont` is accepted and ignored, matching upstream.
 
 use std::cell::RefCell;
@@ -25,11 +28,34 @@ use caqtdm_core::{Color, Rect};
 const ARIMO: &[u8] = include_bytes!("../fonts/Arimo-Regular.ttf");
 const COUSINE: &[u8] = include_bytes!("../fonts/Cousine-Regular.ttf");
 const NOTO: &[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
+const NOTO_BOLD: &[u8] = include_bytes!("../fonts/NotoSans-Bold.ttf");
 const DROID: &[u8] = include_bytes!("../fonts/DroidSansFallbackFull.ttf");
 const HANGUL: &[u8] = include_bytes!("../fonts/WenQuanYiHangul.ttf");
 
+/// The selected face and, when the family ships one, its bold companion.
+struct Faces {
+    regular: Font,
+    bold: Option<Font>,
+}
+
+impl Faces {
+    /// The face to rasterize with and whether bold must be synthesized.
+    fn pick(&self, bold: bool) -> (&Font, bool) {
+        match (&self.bold, bold) {
+            (Some(face), true) => (face, false),
+            (None, true) => (&self.regular, true),
+            (_, false) => (&self.regular, false),
+        }
+    }
+}
+
 thread_local! {
-    static FACE: RefCell<Font> = RefCell::new(load_bytes(ARIMO).expect("Arimo"));
+    static FACE: RefCell<Faces> = RefCell::new(resolve("Noto Sans").expect("Noto Sans"));
+}
+
+/// Extra pixels a synthesized bold glyph is widened by.
+fn embolden_px(px: f32) -> i32 {
+    (px / 24.0).round().max(1.0) as i32
 }
 
 fn load_bytes(bytes: &[u8]) -> Result<Font, String> {
@@ -45,21 +71,36 @@ pub fn install_display_font(name: &str) -> Result<(), String> {
 
 /// Advance width in pixels for `text` at `px`, using the named face.
 pub fn measure_text(name: &str, px: f32, text: &str) -> Result<f32, String> {
-    let font = resolve(name)?;
-    Ok(advance(&font, px, text))
+    let faces = resolve(name)?;
+    Ok(advance(&faces.regular, px, text, 0))
 }
 
 /// `(advance, ymin)` of one character. A descender has a negative `ymin`.
 pub fn glyph_metrics(name: &str, px: f32, ch: char) -> Result<(f32, i32), String> {
-    let font = resolve(name)?;
-    let metrics = face_for(Some(&font), ch).metrics(ch, px.max(1.0));
+    let faces = resolve(name)?;
+    let metrics = face_for(Some(&faces.regular), ch).metrics(ch, px.max(1.0));
     Ok((metrics.advance_width, metrics.ymin))
 }
 
 pub fn draw(image: &mut Image, x: i32, y: i32, text: &str, color: Color, px: i32) {
+    draw_styled(image, x, y, text, color, px, false);
+}
+
+/// `draw` with the bold face (or a synthesized bold) when `bold` is set.
+pub fn draw_styled(
+    image: &mut Image,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+    px: i32,
+    bold: bool,
+) {
     let px = (px.max(6) as f32).min(72.0);
     FACE.with(|face| {
-        let font = face.borrow();
+        let faces = face.borrow();
+        let (font, synth) = faces.pick(bold);
+        let extra = if synth { embolden_px(px) } else { 0 };
         let line = font
             .horizontal_line_metrics(px)
             .unwrap_or(fontdue::LineMetrics {
@@ -71,24 +112,36 @@ pub fn draw(image: &mut Image, x: i32, y: i32, text: &str, color: Color, px: i32
         let baseline = y + line.ascent.round() as i32;
         let mut cursor = x as f32;
         for ch in text.chars().take(80) {
-            let chosen = face_for(Some(&font), ch);
+            let chosen = face_for(Some(font), ch);
             let (metrics, bitmap) = chosen.rasterize(ch, px);
-            blit(image, cursor, baseline, &metrics, &bitmap, color);
-            cursor += metrics.advance_width;
+            for dx in 0..=extra {
+                blit(image, cursor + dx as f32, baseline, &metrics, &bitmap, color);
+            }
+            cursor += metrics.advance_width + extra as f32;
         }
     });
 }
 
 pub fn advance_current(text: &str, px: i32) -> i32 {
-    let px = (px.max(6) as f32).min(72.0);
-    FACE.with(|face| advance(&face.borrow(), px, text).round() as i32)
+    advance_styled(text, px, false)
 }
 
-fn advance(font: &Font, px: f32, text: &str) -> f32 {
+/// Advance of `text` in the current face, bold or regular.
+pub fn advance_styled(text: &str, px: i32, bold: bool) -> i32 {
+    let px = (px.max(6) as f32).min(72.0);
+    FACE.with(|face| {
+        let faces = face.borrow();
+        let (font, synth) = faces.pick(bold);
+        let extra = if synth { embolden_px(px) } else { 0 };
+        advance(font, px, text, extra).round() as i32
+    })
+}
+
+fn advance(font: &Font, px: f32, text: &str, extra: i32) -> f32 {
     let px = px.max(1.0);
     text.chars()
         .take(80)
-        .map(|ch| face_for(Some(font), ch).metrics(ch, px).advance_width)
+        .map(|ch| face_for(Some(font), ch).metrics(ch, px).advance_width + extra as f32)
         .sum()
 }
 
@@ -155,21 +208,30 @@ fn fallbacks() -> &'static [Font] {
         .as_slice()
 }
 
-fn resolve(name: &str) -> Result<Font, String> {
+fn resolve(name: &str) -> Result<Faces, String> {
     let trimmed = name.trim();
-    if trimmed.is_empty() || is_arimo(trimmed) {
-        return load_bytes(ARIMO);
+    let single = |font: Font| Faces {
+        regular: font,
+        bold: None,
+    };
+    if trimmed.is_empty() || is_noto(trimmed) {
+        return Ok(Faces {
+            regular: load_bytes(NOTO)?,
+            bold: Some(load_bytes(NOTO_BOLD)?),
+        });
+    }
+    if is_arimo(trimmed) {
+        return load_bytes(ARIMO).map(single);
     }
     if is_cousine(trimmed) {
-        return load_bytes(COUSINE);
-    }
-    if is_noto(trimmed) {
-        return load_bytes(NOTO);
+        return load_bytes(COUSINE).map(single);
     }
     let path = std::path::Path::new(trimmed);
     if path.is_file() {
         let bytes = std::fs::read(path).map_err(|err| format!("display font {trimmed}: {err}"))?;
-        return load_bytes(&bytes).map_err(|err| format!("display font {trimmed}: {err}"));
+        return load_bytes(&bytes)
+            .map(single)
+            .map_err(|err| format!("display font {trimmed}: {err}"));
     }
     Err(format!("display font '{trimmed}' was not found"))
 }
@@ -177,7 +239,7 @@ fn resolve(name: &str) -> Result<Font, String> {
 fn is_arimo(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "arimo" | "sans" | "arial" | "helvetica" | "sans-serif"
+        "arimo" | "arial" | "helvetica"
     )
 }
 
@@ -191,7 +253,7 @@ fn is_cousine(name: &str) -> bool {
 fn is_noto(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "noto" | "noto sans" | "noto-sans"
+        "noto" | "noto sans" | "noto-sans" | "sans" | "sans-serif"
     )
 }
 
@@ -199,7 +261,7 @@ fn is_noto(name: &str) -> bool {
 /// the fit loops compare against.
 pub fn line_height(px: i32) -> i32 {
     let px = (px.max(6) as f32).min(72.0);
-    FACE.with(|face| line_spacing(&face.borrow(), px).round() as i32)
+    FACE.with(|face| line_spacing(&face.borrow().regular, px).round() as i32)
 }
 
 fn line_spacing(font: &Font, px: f32) -> f32 {
@@ -211,8 +273,9 @@ fn line_spacing(font: &Font, px: f32) -> f32 {
 /// `FontScalingWidget::calculateFontPointSizeF`. Mode 1 steps the point
 /// size by 0.5 until the line spacing fits `height - 2`. Mode 2 then shrinks
 /// it while the text is wider than `width - 4`. Mode 0 keeps `base_px`.
-/// The result is in pixels at 96 dpi (one point is 4/3 pixel).
-pub fn fit_px(text: &str, rect: Rect, mode: u8, base_px: i32) -> i32 {
+/// The result is in pixels at 96 dpi (one point is 4/3 pixel). `bold`
+/// measures with the bold face.
+pub fn fit_px_styled(text: &str, rect: Rect, mode: u8, base_px: i32, bold: bool) -> i32 {
     if mode == 0 || text.is_empty() {
         return base_px;
     }
@@ -226,9 +289,10 @@ pub fn fit_px(text: &str, rect: Rect, mode: u8, base_px: i32) -> i32 {
         .max_by_key(|line| line.chars().count())
         .unwrap_or(text);
     FACE.with(|face| {
-        let font = face.borrow();
+        let faces = face.borrow();
+        let (font, synth) = faces.pick(bold);
         let mut pt = (base_px as f32 * 0.75).max(MIN_PT);
-        let height = |pt: f32| lines * line_spacing(&font, to_px(pt));
+        let height = |pt: f32| lines * line_spacing(font, to_px(pt));
         let mut guard = 0;
         while height(pt) > border_h && pt > MIN_PT && guard < 1000 {
             pt -= 0.5;
@@ -241,7 +305,15 @@ pub fn fit_px(text: &str, rect: Rect, mode: u8, base_px: i32) -> i32 {
         }
         if mode == 2 {
             guard = 0;
-            while advance(&font, to_px(pt), longest) > border_w && pt > MIN_PT && guard < 1000 {
+            while advance(
+                font,
+                to_px(pt),
+                longest,
+                if synth { embolden_px(to_px(pt)) } else { 0 },
+            ) > border_w
+                && pt > MIN_PT
+                && guard < 1000
+            {
                 pt -= 0.5;
                 guard += 1;
             }
@@ -252,7 +324,12 @@ pub fn fit_px(text: &str, rect: Rect, mode: u8, base_px: i32) -> i32 {
 
 /// Top-left origin that centers `text` in `rect`.
 pub fn centered_origin(text: &str, px: i32, rect: Rect) -> (i32, i32) {
-    let width = advance_current(text, px);
+    centered_origin_styled(text, px, rect, false)
+}
+
+/// `centered_origin` measured with the bold face when `bold` is set.
+pub fn centered_origin_styled(text: &str, px: i32, rect: Rect, bold: bool) -> (i32, i32) {
+    let width = advance_styled(text, px, bold);
     (
         rect.x + (rect.width - width) / 2,
         rect.y + (rect.height - line_height(px)) / 2,
@@ -261,15 +338,26 @@ pub fn centered_origin(text: &str, px: i32, rect: Rect) -> (i32, i32) {
 
 /// Text turned a quarter turn. `up` reads from the bottom of `rect` upward,
 /// the `caLabelVertical::Up` direction; otherwise it reads downward. Each
-/// glyph pixel is transposed into place with its coverage.
-pub fn draw_rotated(image: &mut Image, rect: Rect, text: &str, color: Color, px: i32, up: bool) {
+/// glyph pixel is transposed into place with its coverage. `bold` uses the
+/// bold face.
+pub fn draw_rotated_styled(
+    image: &mut Image,
+    rect: Rect,
+    text: &str,
+    color: Color,
+    px: i32,
+    up: bool,
+    bold: bool,
+) {
     let px_f = (px.max(6) as f32).min(72.0);
     let height = line_height(px).max(1);
     // The rotated block is `height` wide, centered across the widget, and
     // starts at the end of `rect` that the reading direction begins from.
     let x0 = rect.x + (rect.width - height) / 2;
     FACE.with(|face| {
-        let font = face.borrow();
+        let faces = face.borrow();
+        let (font, synth) = faces.pick(bold);
+        let extra = if synth { embolden_px(px_f) } else { 0 };
         let ascent = font
             .horizontal_line_metrics(px_f)
             .map(|line| line.ascent)
@@ -277,7 +365,7 @@ pub fn draw_rotated(image: &mut Image, rect: Rect, text: &str, color: Color, px:
             .round() as i32;
         let mut cursor = 0.0_f32;
         for ch in text.chars().take(80) {
-            let chosen = face_for(Some(&font), ch);
+            let chosen = face_for(Some(font), ch);
             let (metrics, bitmap) = chosen.rasterize(ch, px_f);
             let origin_x = cursor.round() as i32 + metrics.xmin;
             let origin_y = ascent - metrics.ymin - metrics.height as i32;
@@ -287,18 +375,20 @@ pub fn draw_rotated(image: &mut Image, rect: Rect, text: &str, color: Color, px:
                     if coverage == 0 {
                         continue;
                     }
-                    // Upright position inside the text line.
-                    let sx = origin_x + col as i32;
-                    let sy = origin_y + row as i32;
-                    let (x, y) = if up {
-                        (x0 + sy, rect.y + rect.height - 1 - sx)
-                    } else {
-                        (x0 + height - 1 - sy, rect.y + sx)
-                    };
-                    image.cover(x, y, color, coverage);
+                    for dx in 0..=extra {
+                        // Upright position inside the text line.
+                        let sx = origin_x + col as i32 + dx;
+                        let sy = origin_y + row as i32;
+                        let (x, y) = if up {
+                            (x0 + sy, rect.y + rect.height - 1 - sx)
+                        } else {
+                            (x0 + height - 1 - sy, rect.y + sx)
+                        };
+                        image.cover(x, y, color, coverage);
+                    }
                 }
             }
-            cursor += metrics.advance_width;
+            cursor += metrics.advance_width + extra as f32;
         }
     });
 }

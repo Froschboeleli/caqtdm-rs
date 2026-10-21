@@ -607,7 +607,7 @@ fn serve_flags(options: &Options) -> Result<String, String> {
 
 fn install_font(options: &Options) -> Result<(), String> {
     let name = if options.display_font.is_empty() {
-        "Arimo"
+        "Noto Sans"
     } else {
         options.display_font.as_str()
     };

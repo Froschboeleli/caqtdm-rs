@@ -480,6 +480,8 @@ mod tests {
             border_px: 1,
             clip: None,
             font_fit: 0,
+            valign: 0,
+            bold: false,
         }
     }
 
@@ -514,6 +516,7 @@ mod tests {
             axes: Vec::new(),
             styles: Vec::new(),
             grid: true,
+            canvas: None,
             show_x: true,
             show_y: true,
             symbols: Vec::new(),

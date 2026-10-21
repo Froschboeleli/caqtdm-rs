@@ -29,6 +29,21 @@ pub struct Visual {
     /// `fontScaleMode`: 0 keeps `font_px`, 1 fits the height, 2 fits the
     /// height and then shrinks until the text fits the width.
     pub font_fit: u8,
+    /// 0 centered, 1 top, 2 bottom. From the vertical `alignment` flags.
+    pub valign: i8,
+    /// Bold face, from the `font` property or a `font-weight` rule.
+    pub bold: bool,
+}
+
+/// A stylesheet box: `background`, `border`, `border-radius`, `margin-top`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CssBox {
+    pub fill: Option<Color>,
+    pub border_px: i32,
+    pub border_color: Color,
+    pub radius: i32,
+    /// Pixels above the box left for a title.
+    pub margin_top: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +125,10 @@ pub enum VisualKind {
         styles: Vec<CurveStyle>,
         /// `grid`. Upstream turns this on in the cartesian constructor.
         grid: bool,
+        /// Canvas fill. `None` is transparent: the cartesian constructor
+        /// turns the canvas `autoFillBackground` off, so only the widget
+        /// fill shows behind the curves. A strip plot paints `background`.
+        canvas: Option<Color>,
         /// `XaxisEnabled`. False hides the bottom tick marks.
         show_x: bool,
         /// `YaxisEnabled`. False hides the left tick marks.
@@ -187,6 +206,12 @@ pub enum VisualKind {
         current: usize,
     },
     Frame,
+    /// `QGroupBox`. `frame` and `title` come from a stylesheet; without one
+    /// the Fusion look applies: a thin frame with the title at the top left.
+    GroupBox {
+        frame: Option<CssBox>,
+        title: Option<CssBox>,
+    },
     /// `caAlarmTree`. A collapsed group omits its children.
     Tree {
         rows: Vec<TreeRow>,
